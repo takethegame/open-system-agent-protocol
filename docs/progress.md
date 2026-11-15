@@ -15,7 +15,7 @@
 | M0 仓库可信化 | ✅ 完成 | 7/7 | 2026-11-12 |
 | M1 可执行一致性 | ✅ 完成 | 68/68 用例（100%） | 2026-11-12 |
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
-| M3 形式化不变量 | 🚧 进行中 | 4/4 不变量通过 TLC；Receipt 与 §8.11 待补 | — |
+| M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -30,7 +30,7 @@
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
 | 参考实现 | 19 个模块 + 适配器（4253 行）+ 331 个单元测试 |
-| 形式化模型 | 2 个 TLA+ 模块 + 3 个配置 + `check.sh`（259 行） |
+| 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
 | CI 工作流 | 1（Python 3.11 / 3.12） |
@@ -69,6 +69,7 @@
 | `47a3f4c` | 2026-11-15 | **M2.1b**：UDS stream、消息型 socketpair、对端认证；C0-01/C0-06 自动化（325 tests；累计 62 pass） |
 | `b95e2c9` | 2026-11-15 | **M2 退出标准**：撤销按父→子索引传播，P95 1.23 ms（1,555 节点、100 样本）；329 tests |
 | `c3268f6` | 2026-11-15 | **M3（第一段）**：TLA+ 能力/任务模型、6 条不变量、负向对照；发现并修复撤销后仍可派生（331 tests） |
+| `17c11ad` | 2026-11-15 | **M3 完成**：同意顺序与 §8.11 崩溃对账模型；四个模型、两个负向对照全部通过 |
 
 ---
 
@@ -536,7 +537,7 @@ python3 tools/benchmark_revocation.py
 
 ---
 
-## 6. M3 — 形式化不变量（进行中）
+## 6. M3 — 形式化不变量（已完成）
 
 ### 6.1 交付物
 
@@ -544,9 +545,11 @@ python3 tools/benchmark_revocation.py
 |---|---|
 | `spec/formal/Capability.tla` | 能力签发、衰减、撤销的 TLA+ 状态机 |
 | `spec/formal/Task.tla` | 任务树、预算、消耗、完成、取消与 `detached` 子树 |
-| `spec/formal/Capability.cfg` / `Task.cfg` | 正常配置，有限常量 |
-| `spec/formal/CapabilityBroken.cfg` | 负向对照：放宽衰减后必须报反例 |
-| `spec/formal/check.sh` | 依次运行两个正常配置与负向对照 |
+| `spec/formal/Consent.tla` | 同意请求、`cap_id` 预约、授权/拒绝、激活与撤销 |
+| `spec/formal/Recovery.tla` | §8.11 的 `intent` / `outcome` / `unknown` 崩溃对账 |
+| `spec/formal/Capability.cfg` / `Task.cfg` / `Consent.cfg` / `Recovery.cfg` | 正常配置，有限常量 |
+| `spec/formal/CapabilityBroken.cfg` / `RecoveryBroken.cfg` | 负向对照：放宽衰减或允许盲重试后必须报反例 |
+| `spec/formal/check.sh` | 依次运行四个正常配置与两个负向对照 |
 | `spec/formal/README.md` | 不变量到条文、结果、模型边界 |
 
 ### 6.2 验证证据
@@ -555,15 +558,16 @@ python3 tools/benchmark_revocation.py
 
 ```
 spec/formal/check.sh
-→ Capability: Model checking completed. No error has been found.
-  61,267 states generated, 16,866 distinct states found
-→ Task:       Model checking completed. No error has been found.
-  78,551 states generated, 15,972 distinct states found
+→ Capability: 61,267 states generated, 16,866 distinct states found
+→ Task:       78,551 states generated, 15,972 distinct states found
+→ Consent:     6,850 states generated,  2,532 distinct states found
+→ Recovery:        8 states generated,      6 distinct states found
 → CapabilityBroken: Invariant AttenuationMonotonic is violated.
-→ OK: Capability and Task have no violations; the broken attenuation control fails
+→ RecoveryBroken:   Invariant AtMostOnce is violated.
+→ OK: all positive models pass and both negative controls fail
 ```
 
-四条不变量分别对应 §5.3、§5.5、§8.6、§8.7；`Task.tla` 另加 `NoOverConsumption` 与 `NoResultAfterCancel`，共六条断言。所有常量都在 `.cfg` 中限定，状态空间可枚举。
+四条主不变量分别对应 §5.3、§5.5、§8.6、§8.7；`Consent.tla` 覆盖 §10.3 的“先预约、再授权、后激活”，`Recovery.tla` 覆盖 §8.11 的三态。四个模型合计 19 条断言（含 `TypeOK`），所有常量都在 `.cfg` 中限定，状态空间可枚举。
 
 ### 6.3 模型发现的实现缺口
 
@@ -583,14 +587,18 @@ spec/formal/check.sh
 | 闭包用 `MaxDepth` 次迭代而不是无界递归 | TLC 可直接展开；模型中的树深由配置固定，超出深度的派生不会发生 |
 | `Task.tla` 的委托检查基于父任务“剩余预算” | 与 `impl/osap/task.py` 一致；`BudgetMonotonic` 只断言沿链不增长，避免把运行期消耗误当新上界 |
 | 取消把 `results` 清零 | 规范要求取消后子树不再产生新 `result`；已产生的结果留在审计里，不进入可用状态 |
-| `AllowWidening` 只服务负向对照 | 证明模型不是空转：放宽一条约束后 TLC 必须给出反例 |
+| `Consent.tla` 用 `granted_once` 记录历史 | 单靠 `phase` 无法证明“激活前确实授权过”；历史变量让 `ActivationHadGrant` 可检查 |
+| `Recovery.tla` 把 `unknown` 分成“无副作用”与“已执行”两种对账结果 | 前者回到 `idle`，后者进入 `done`；两者都不重新执行副作用 |
+| `AllowWidening` / `AllowBlindRetry` 只服务负向对照 | 证明模型不是空转：放宽一条约束后 TLC 必须给出反例 |
 
 ### 6.5 未建模
 
-1. `Receipt`（同意回执）与 `RevocationSet` 的持久化、分发与重放；
-2. §8.11 的 `intent` / `outcome` / `unknown` 崩溃对账三态；
+1. `RevocationSet` 的跨进程分发、持久化与重放；
+2. 同意回执的真实 `proof` 验签与 PCS 用户密钥；
 3. 跨进程通知、重试与传播时延（由 `tools/benchmark_revocation.py` 单独测量）；
 4. 错误码、JSON 编码、传输绑定与审计链。
+
+Alloy 补充模型不采用：四条主不变量的关系约束在 TLA+ 中已经可读，两个负向对照也足以证明模型非空转。
 
 ---
 
@@ -638,3 +646,4 @@ spec/formal/check.sh
 | 2026-11-15 | **M2.1b**（`47a3f4c`）：真实传输（UDS stream + 数据报消息绑定）与对端认证；C0-01/C0-06 自动化，C0 7/7；16 条集成测试，累计 325；剩余 6 条 manual |
 | 2026-11-15 | **M2 退出标准**（`b95e2c9`）：撤销传播改为父→子索引的一次遍历，重复撤销幂等；新增 `tools/benchmark_revocation.py`，实测 P95 1.23 ms；累计 329 tests |
 | 2026-11-15 | **M3（第一段）**（`c3268f6`）：`spec/formal/` 的 Capability/Task TLA+ 模型与 TLC 检查；负向对照证明模型非空转；TLC 发现“撤销后仍可派生”缺口，`issue` 改为返回 `CAPABILITY_REVOKED`；累计 331 tests |
+| 2026-11-15 | **M3 完成**（`17c11ad`）：新增 `Consent.tla`（预约→授权→激活→撤销）与 `Recovery.tla`（intent/outcome/unknown）；`check.sh` 扩到四个正常模型与两个负向对照；M3 退出标准全部满足 |

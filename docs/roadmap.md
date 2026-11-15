@@ -56,7 +56,7 @@
 | **M0** 仓库可信化 | 让外部人能一键验证 | CI、`.gitignore`、`CHANGELOG`、`SECURITY`、改名 | CI 在干净 checkout 上全绿 | 2 天 | 2026-11-14 |
 | **M1** 可执行一致性 | 68 个用例变成机器可读 | `conformance/cases/`、runner、报告格式 | 68/68 用例可加载，报告通过 schema 校验 | 4 天 | 2026-11-20 |
 | **M2** 参考实现 MVP | 跑通 C0–C3 + C4 主路径 | `impl/` 最小实现、3 App 演示（notes + calendar + supervisor） | C0–C3 全绿，C4 主路径通过 | 4 周 | 2026-12-18 |
-| **M3** 形式化不变量 | 证明权威单调性 | TLA+ 或 Alloy 模型 + 4 条定理 | 模型检查无违例 | 2 周 | 2026-12-31 |
+| **M3** 形式化不变量 | 证明权威单调性 | TLA+ 模型（能力/任务/同意/恢复）+ 4 条定理 | 模型检查无违例 + 负向对照报反例 | 2 周 | 2026-12-31 |
 | **M4** 标准打包 | 拆成可提交材料 | 2 个 IETF draft + Linux binding + ADR | 草案可独立阅读、无悬空引用 | 3 周 | 2027-01-30 |
 | **M5** 生态与采用 | 拿到外部实现与评审 | 一致性登记、外部实现、安全审计 | ≥1 个非本项目实现通过 C2 | 持续 | 2027-Q1 起 |
 
@@ -239,15 +239,15 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 - [x] 用 TLA+ 定义状态：`Capability`、`Task`、`RevocationSet`（`Receipt` 待补）
 - [x] 建模 `Issue`、`Attenuate`、`Revoke`、`Delegate`、`Cancel`、`Consume`
 - [x] 写出 4 条 `Invariant`，用 TLC 模型检查（`spec/formal/`；Capability 61,267 状态、Task 78,551 状态无违例）
-- [ ] 用 Alloy 做补充（关系约束更直观），或只保留 TLA+
+- [x] 不采用 Alloy：TLA+ 的四个模型与两个负向对照已覆盖 M3 目标
 - [x] 把模型与规范条文的对应关系写成表（`spec/formal/README.md`）
-- [ ] 增加 §8.11 崩溃对账的三态模型（`intent` / `outcome` / `unknown`）
+- [x] 增加 §8.11 崩溃对账的三态模型（`intent` / `outcome` / `unknown`；`Recovery.tla`）
 
 **退出标准**
 
-- TLC 在限定状态空间内无违例（✅ `Capability.cfg`、`Task.cfg`）；
+- TLC 在限定状态空间内无违例（✅ `Capability.cfg`、`Task.cfg`、`Consent.cfg`、`Recovery.cfg`）；
 - 每个不变量都能指回具体小节编号（✅ 见 `spec/formal/README.md` §2）；
-- 故意放宽一条约束时，模型检查能报出反例（✅ `CapabilityBroken.cfg` 报 `AttenuationMonotonic` 违例）。
+- 故意放宽一条约束时，模型检查能报出反例（✅ `CapabilityBroken.cfg` 报 `AttenuationMonotonic`、`RecoveryBroken.cfg` 报 `AtMostOnce` 违例）。
 
 ---
 
