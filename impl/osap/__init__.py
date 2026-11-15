@@ -9,7 +9,8 @@ Covered so far:
 - M2.2: Ed25519 manifest signatures, agent registration, reserved namespaces,
   and the registry subset (§4, §6);
 - M2.3: capability tokens, attenuation, binding, revocation (§5.1-§5.6);
-- M2.4: consent receipts and capability linkage (§5.8);
+- M2.4: consent receipts and capability linkage (§5.8); consent request,
+  reservation, grant/deny, activation, and revocation flow (§10.2, §10.3);
 - M2.5: task tree, budgets, cancellation, results, handoff (§8); context
   fabric handles, labels, blackboard, objects (§9); federation adapters
   projecting native descriptors into capability records (§6.7, §6.8);
@@ -21,6 +22,7 @@ from . import (
     audit,
     capability,
     consent,
+    consent_flow,
     context,
     crypto,
     federation,
@@ -49,6 +51,7 @@ __all__ = [
     "audit",
     "capability",
     "consent",
+    "consent_flow",
     "context",
     "crypto",
     "federation",

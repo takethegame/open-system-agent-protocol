@@ -26,7 +26,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "impl"))
 
-from osap import audit, capability, consent, context, crypto, identity, registry, task  # noqa: E402
+from osap import (  # noqa: E402
+    audit,
+    capability,
+    consent_flow,
+    context,
+    crypto,
+    identity,
+    registry,
+    task,
+)
 from osap.clock import parse_timestamp  # noqa: E402
 
 EXAMPLES = REPO / "examples"
@@ -260,8 +269,30 @@ def main() -> int:
         "to": {"agent": REGISTRY},
     }
 
-    # --- 3. consent and capability ----------------------------------------
-    section("3. user consent and attenuated capability (§5.2–§5.8)")
+    # --- 3. consent request, reservation, grant, activation ----------------
+    section("3. user consent flow and attenuated capability (§5.2–§5.8, §10.2–§10.3)")
+    authority = capability.CapabilityAuthority(clock=lambda: NOW)
+    flow = consent_flow.ConsentFlow(user=USER, authority=authority, clock=lambda: NOW)
+
+    consent_payload = copy.deepcopy(load("consent-request.json")["body"]["data"])
+    consent_payload["task_id"] = CALENDAR_TASK_ID
+    consent_payload["agent"] = SUPERVISOR
+    consent_payload["audience"] = CALENDAR
+    consent_payload["actions"] = ["propose"]
+    consent_payload["resources"] = ["calendar:primary"]
+    consent_payload["risk"] = "L3"
+    consent_message = flow.request(consent_payload, message_id="msg_demo_consent")
+
+    reserved = flow.reserve_cap_id(consent_payload["request_id"], cap_id=CAP_ID)
+    require(not flow.usable(reserved), "a reserved cap_id must stay inert")
+
+    receipt = flow.grant(
+        consent_payload["request_id"],
+        option="allow_once",
+        receipt_id=RECEIPT_ID,
+    )
+    require(not flow.usable(CAP_ID), "a grant must not activate before the CA issues")
+
     token = copy.deepcopy(load("capability.json"))
     token["cap_id"] = CAP_ID
     token["task_id"] = CALENDAR_TASK_ID
@@ -274,24 +305,17 @@ def main() -> int:
     token["iat"] = int(NOW.timestamp())
     token["nbf"] = int(NOW.timestamp())
     token["exp"] = int(NOW.timestamp()) + 3600
-
-    receipt = copy.deepcopy(load("consent-receipt.json"))
-    receipt["receipt_id"] = RECEIPT_ID
-    receipt["cap_id"] = CAP_ID
-    receipt["task_id"] = CALENDAR_TASK_ID
-    receipt["audience"] = CALENDAR
-    receipt["agent"] = SUPERVISOR
-    receipt["actions"] = ["propose"]
-    receipt["resources"] = ["calendar:primary"]
-    receipt["risk"] = "L3"
     token["consent_receipt_id"] = RECEIPT_ID
 
-    consent.validate(receipt, token, now=NOW)
-    authority = capability.CapabilityAuthority(clock=lambda: NOW)
-    authority.issue(token)
+    flow.activate(RECEIPT_ID, token)
+    require(flow.usable(CAP_ID), "activation must make the capability usable")
     authority.check_validity(token, now=NOW)
     authority.require_consent(token, risk="L3")
-    print(f"receipt {RECEIPT_ID} covers {CAP_ID} for {CALENDAR}")
+    print(
+        f"{consent_message['type']} {consent_payload['request_id']} "
+        f"-> {receipt['decision']} max_uses={receipt['constraints']['max_uses']}"
+    )
+    print(f"receipt {RECEIPT_ID} activated {CAP_ID} for {CALENDAR}")
     print("L3 consent prerequisite satisfied; capability is valid at the simulated now")
 
     # --- 4. two delegations, two results ----------------------------------
@@ -433,6 +457,11 @@ def main() -> int:
         {"actor": BUS, "action": "agent.registered", "target": CALENDAR},
         {"actor": BUS, "action": "agent.registered", "target": NOTES},
         {"actor": SUPERVISOR, "action": "discovery.query", "target": REGISTRY},
+        {
+            "actor": flow.policy_agent,
+            "action": "consent.requested",
+            "target": USER,
+        },
         {
             "actor": USER,
             "action": "consent.granted",
