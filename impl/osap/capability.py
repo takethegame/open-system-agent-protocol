@@ -144,6 +144,19 @@ class CapabilityAuthority:
     def issue(self, token: dict) -> dict:
         validate_token(token)
         cap_id = token["cap_id"]
+        if cap_id in self.revoked:
+            raise OsapError(
+                "CAPABILITY_REVOKED",
+                "a revoked cap_id cannot be issued again",
+                details={"cap_id": cap_id},
+            )
+        parent = token.get("parent_cap_id")
+        if parent is not None and parent in self.revoked:
+            raise OsapError(
+                "CAPABILITY_REVOKED",
+                "cannot derive a capability from a revoked parent",
+                details={"cap_id": cap_id, "parent_cap_id": parent},
+            )
         previous = self.issued.get(cap_id)
         if previous is not None:
             old_parent = previous.get("parent_cap_id")
@@ -152,7 +165,6 @@ class CapabilityAuthority:
                 if siblings is not None:
                     siblings.discard(cap_id)
         self.issued[cap_id] = token
-        parent = token.get("parent_cap_id")
         if parent is not None:
             self._children.setdefault(parent, set()).add(cap_id)
         return token

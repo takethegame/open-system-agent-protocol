@@ -290,6 +290,24 @@ class RevocationTests(unittest.TestCase):
         self.assertEqual(len(authority.revoked), 31)
         self.assertEqual(len(authority.audit), 31)
 
+    def test_revoked_id_cannot_be_reissued(self):
+        self.authority.revoke("cap_leaf")
+        with self.assertRaises(OsapError) as caught:
+            self.authority.issue(self.leaf)
+        self.assertEqual(caught.exception.code, "CAPABILITY_REVOKED")
+
+    def test_child_of_revoked_parent_cannot_be_issued(self):
+        self.authority.revoke(PARENT_ID)
+        replacement = token()
+        replacement["cap_id"] = "cap_after_revoke"
+        replacement["parent_cap_id"] = PARENT_ID
+        with self.assertRaises(OsapError) as caught:
+            self.authority.issue(replacement)
+        self.assertEqual(caught.exception.code, "CAPABILITY_REVOKED")
+        self.assertEqual(
+            caught.exception.details["parent_cap_id"], PARENT_ID
+        )
+
     def test_reissuing_a_token_moves_it_to_the_new_parent(self):
         replacement = token()
         replacement["cap_id"] = "cap_leaf"
