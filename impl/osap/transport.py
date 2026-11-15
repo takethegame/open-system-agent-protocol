@@ -1,0 +1,508 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OSAP Authors
+"""Real local transports for the two framing bindings (standard.md §7.9, §7.10).
+
+The transport layer sits below `Bus`:
+
+- `UnixStreamServer` / `UnixStreamClient` use an `AF_UNIX` stream socket and
+  the mandatory 4-byte big-endian length prefix. Every accepted connection owns
+  an independent `Bus`, so handshake state never leaks between peers;
+- `UnixMessagePair` uses a connected `AF_UNIX` datagram socket pair. One
+  datagram is exactly one message, so no length prefix is added.
+
+Both bindings authenticate the peer before any protocol message is exchanged.
+Linux exposes `SO_PEERCRED` (pid, uid, gid) and `/proc/<pid>/exe`; macOS and
+BSD expose `getpeereid` plus `LOCAL_PEERPID` and `proc_pidpath`. A `PeerPolicy`
+fails closed: a field the policy requires but the platform cannot provide is a
+denial, not a pass.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import socket
+import stat
+import struct
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from . import framing
+from .bus import Bus
+from .errors import OsapError
+
+_UCRED_BYTES = struct.calcsize("3i")
+
+#: macOS `LOCAL_PEERPID` socket option (`sys/un.h`, `SOL_LOCAL` is 0).
+_MACOS_LOCAL_PEERPID = 0x002
+
+
+@dataclass(frozen=True)
+class PeerCredentials:
+    """What the local kernel tells us about the other end of a socket."""
+
+    uid: int | None = None
+    gid: int | None = None
+    pid: int | None = None
+    executable: str | None = None
+    source: str = "unavailable"
+
+    def to_dict(self) -> dict:
+        return {
+            "uid": self.uid,
+            "gid": self.gid,
+            "pid": self.pid,
+            "executable": self.executable,
+            "source": self.source,
+        }
+
+
+def _getpeereid(fd: int) -> tuple[int | None, int | None]:
+    """Read uid/gid via the BSD `getpeereid(2)` libc call."""
+
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        uid = ctypes.c_uint32()
+        gid = ctypes.c_uint32()
+        if libc.getpeereid(fd, ctypes.byref(uid), ctypes.byref(gid)) == 0:
+            return uid.value, gid.value
+    except (AttributeError, OSError):
+        pass
+    return None, None
+
+
+def _macos_peer_pid(sock: socket.socket) -> int | None:
+    try:
+        raw = sock.getsockopt(0, _MACOS_LOCAL_PEERPID, 4)
+        return struct.unpack("i", raw)[0]
+    except OSError:
+        return None
+
+
+def _executable_of(pid: int | None) -> str | None:
+    """Resolve the executable path for `pid` where the platform allows it."""
+
+    if pid is None:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            return os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return None
+    if sys.platform == "darwin":
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buffer = ctypes.create_string_buffer(4096)
+            length = libproc.proc_pidpath(pid, buffer, len(buffer))
+            if length > 0:
+                return buffer.value.decode("utf-8", "replace")
+        except (AttributeError, OSError):
+            return None
+    return None
+
+
+def _ids_from_pid(pid: int | None) -> tuple[int | None, int | None]:
+    """Resolve uid/gid for `pid` when the socket option omits them."""
+
+    if pid is None:
+        return None, None
+    if sys.platform == "darwin":
+        try:
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+            buffer = ctypes.create_string_buffer(256)
+            # PROC_PIDTBSDINFO = 3; pbi_uid/pbi_gid sit at offsets 20 and 24.
+            length = libproc.proc_pidinfo(pid, 3, 0, buffer, len(buffer))
+            if length >= 28:
+                raw = buffer.raw
+                uid = struct.unpack_from("I", raw, 20)[0]
+                gid = struct.unpack_from("I", raw, 24)[0]
+                return uid, gid
+        except (AttributeError, OSError):
+            return None, None
+    if sys.platform.startswith("linux"):
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        except OSError:
+            return None, None
+        values = {}
+        for line in status.splitlines():
+            if line.startswith(("Uid:", "Gid:")):
+                key, _, rest = line.partition(":")
+                values[key] = int(rest.split()[0])
+        return values.get("Uid"), values.get("Gid")
+    return None, None
+
+
+def peer_credentials(sock: socket.socket) -> PeerCredentials:
+    """Return the kernel-attested identity of the socket peer, or empty fields."""
+
+    if sys.platform.startswith("linux") and hasattr(socket, "SO_PEERCRED"):
+        try:
+            raw = sock.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, _UCRED_BYTES
+            )
+            pid, uid, gid = struct.unpack("3i", raw)
+            return PeerCredentials(
+                uid=uid,
+                gid=gid,
+                pid=pid,
+                executable=_executable_of(pid),
+                source="SO_PEERCRED",
+            )
+        except OSError:
+            pass
+
+    uid, gid = _getpeereid(sock.fileno())
+    if sys.platform == "darwin":
+        pid = _macos_peer_pid(sock)
+        source = "getpeereid+LOCAL_PEERPID" if pid is not None else "getpeereid"
+        if uid is None or gid is None:
+            fallback_uid, fallback_gid = _ids_from_pid(pid)
+            uid = uid if uid is not None else fallback_uid
+            gid = gid if gid is not None else fallback_gid
+        return PeerCredentials(
+            uid=uid,
+            gid=gid,
+            pid=pid,
+            executable=_executable_of(pid),
+            source=source,
+        )
+    return PeerCredentials(
+        uid=uid,
+        gid=gid,
+        source="getpeereid" if uid is not None else "unavailable",
+    )
+
+
+@dataclass(frozen=True)
+class PeerPolicy:
+    """An allow-list for kernel-attested peer attributes.
+
+    Unset fields are not checked. A set field that the platform cannot attest
+    is denied, because absence of evidence is not evidence of a trusted peer.
+    """
+
+    uid: int | None = None
+    gid: int | None = None
+    pid: int | None = None
+    executable: str | None = None
+
+    def check(self, peer: PeerCredentials) -> PeerCredentials:
+        for field, expected, actual in (
+            ("uid", self.uid, peer.uid),
+            ("gid", self.gid, peer.gid),
+            ("pid", self.pid, peer.pid),
+        ):
+            if expected is None:
+                continue
+            if actual is None:
+                raise OsapError(
+                    "AUTH_DENIED",
+                    f"peer {field} is unavailable",
+                    details={"reason": "peer_field_unavailable", "field": field},
+                )
+            if actual != expected:
+                raise OsapError(
+                    "AUTH_DENIED",
+                    f"peer {field} does not match the policy",
+                    details={
+                        "reason": "peer_mismatch",
+                        "field": field,
+                        "expected": expected,
+                        "actual": actual,
+                    },
+                )
+
+        if self.executable is not None:
+            if peer.executable is None:
+                raise OsapError(
+                    "AUTH_DENIED",
+                    "peer executable is unavailable",
+                    details={
+                        "reason": "peer_field_unavailable",
+                        "field": "executable",
+                    },
+                )
+            expected = os.path.realpath(self.executable)
+            actual = os.path.realpath(peer.executable)
+            if actual != expected:
+                raise OsapError(
+                    "AUTH_DENIED",
+                    "peer executable does not match the policy",
+                    details={
+                        "reason": "peer_mismatch",
+                        "field": "executable",
+                        "expected": expected,
+                        "actual": actual,
+                    },
+                )
+        return peer
+
+
+class UnixSession:
+    """One authenticated connection or datagram pair with its own Bus."""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        *,
+        binding: framing.Binding,
+        bus: Bus | None = None,
+        peer_policy: PeerPolicy | None = None,
+    ) -> None:
+        self.sock = sock
+        self.binding = binding
+        self.bus = bus or Bus(binding=binding)
+        self.peer = peer_credentials(sock)
+        if peer_policy is not None:
+            peer_policy.check(self.peer)
+        self.closed = False
+
+    # --- wire -------------------------------------------------------------
+
+    def send(self, message: object) -> None:
+        if self.binding == framing.Binding.STREAM:
+            self.sock.sendall(framing.encode_stream(message))
+            return
+        payload = json.dumps(
+            message, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        framing.check_size(len(payload))
+        self.sock.send(payload)
+
+    def _recv_exact(self, count: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < count:
+            chunk = self.sock.recv(count - len(chunks))
+            if not chunk:
+                raise ConnectionError("peer closed the transport")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def _recv_payload(self) -> bytes:
+        if self.binding == framing.Binding.STREAM:
+            header = self._recv_exact(framing.HEADER_BYTES)
+            (length,) = struct.unpack(">I", header)
+            framing.check_size(length)
+            return self._recv_exact(length)
+        payload = self.sock.recv(framing.MAX_FRAME_BYTES + 1)
+        if not payload:
+            raise ConnectionError("peer closed the transport")
+        framing.check_size(len(payload))
+        return payload
+
+    def receive(self) -> dict:
+        payload = self._recv_payload()
+        try:
+            message = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OsapError(
+                "SCHEMA_INVALID", f"transport payload is not UTF-8 JSON: {exc}"
+            ) from exc
+        if not isinstance(message, dict):
+            raise OsapError("SCHEMA_INVALID", "transport payload must be an object")
+        return message
+
+    # --- Bus integration --------------------------------------------------
+
+    def serve(self) -> dict:
+        """Receive one message, dispatch it, and send the reply or error."""
+
+        request = None
+        try:
+            request = self.receive()
+            reply = self.bus.receive(request)
+        except OsapError as error:
+            reply = self.bus.error_envelope(request or {}, error)
+        self.send(reply)
+        return reply
+
+    def call(self, message: dict) -> dict:
+        """Send one message and return the next reply."""
+
+        self.send(message)
+        return self.receive()
+
+    def serve_forever(self, *, max_messages: int | None = None) -> int:
+        """Serve until the peer closes or `max_messages` replies were sent."""
+
+        served = 0
+        while max_messages is None or served < max_messages:
+            try:
+                self.serve()
+            except (ConnectionError, OSError):
+                break
+            served += 1
+        return served
+
+    # --- lifecycle --------------------------------------------------------
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self.sock.close()
+
+    def __enter__(self) -> "UnixSession":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+class UnixStreamServer:
+    """`AF_UNIX` stream listener whose accepted connections use length framing."""
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        bus_factory: Callable[[], Bus] | None = None,
+        peer_policy: PeerPolicy | None = None,
+        backlog: int = 8,
+    ) -> None:
+        self.path = Path(path)
+        self._remove_stale_socket()
+        self.peer_policy = peer_policy
+        self._bus_factory = bus_factory or (
+            lambda: Bus(binding=framing.Binding.STREAM)
+        )
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.sock.bind(str(self.path))
+        except OSError:
+            self.sock.close()
+            raise
+        os.chmod(self.path, 0o600)
+        self.sock.listen(backlog)
+        self.closed = False
+
+    def _remove_stale_socket(self) -> None:
+        """Drop a leftover socket, but never clobber an unrelated file."""
+
+        try:
+            mode = self.path.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if not stat.S_ISSOCK(mode):
+            raise FileExistsError(
+                f"{self.path} exists and is not a socket; refusing to replace it"
+            )
+        self.path.unlink()
+
+    def accept(self) -> UnixSession:
+        connection, _ = self.sock.accept()
+        try:
+            return UnixSession(
+                connection,
+                binding=framing.Binding.STREAM,
+                bus=self._bus_factory(),
+                peer_policy=self.peer_policy,
+            )
+        except Exception:
+            connection.close()
+            raise
+
+    def serve_once(self) -> dict:
+        with self.accept() as session:
+            return session.serve()
+
+    def serve_forever(self, *, max_messages: int | None = None) -> int:
+        """Serve connections until closed or `max_messages` replies were sent."""
+
+        served = 0
+        while not self.closed and (max_messages is None or served < max_messages):
+            try:
+                session = self.accept()
+            except OsapError:
+                continue
+            except OSError:
+                break
+            try:
+                while max_messages is None or served < max_messages:
+                    session.serve()
+                    served += 1
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                session.close()
+        return served
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self.sock.close()
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def __enter__(self) -> "UnixStreamServer":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+class UnixStreamClient:
+    """Connect to a `UnixStreamServer` and return an authenticated session."""
+
+    @staticmethod
+    def connect(
+        path: str | os.PathLike[str],
+        *,
+        bus: Bus | None = None,
+        peer_policy: PeerPolicy | None = None,
+        timeout: float | None = None,
+    ) -> UnixSession:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            if timeout is not None:
+                sock.settimeout(timeout)
+            sock.connect(str(path))
+            return UnixSession(
+                sock,
+                binding=framing.Binding.STREAM,
+                bus=bus,
+                peer_policy=peer_policy,
+            )
+        except Exception:
+            sock.close()
+            raise
+
+
+class UnixMessagePair:
+    """A connected datagram pair; one datagram is exactly one message."""
+
+    @staticmethod
+    def pair(
+        *,
+        server_bus: Bus | None = None,
+        client_bus: Bus | None = None,
+        peer_policy: PeerPolicy | None = None,
+        timeout: float | None = None,
+    ) -> tuple[UnixSession, UnixSession]:
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        if timeout is not None:
+            left.settimeout(timeout)
+            right.settimeout(timeout)
+        try:
+            server = UnixSession(
+                left,
+                binding=framing.Binding.MESSAGE,
+                bus=server_bus,
+                peer_policy=peer_policy,
+            )
+            client = UnixSession(
+                right,
+                binding=framing.Binding.MESSAGE,
+                bus=client_bus,
+                peer_policy=peer_policy,
+            )
+        except Exception:
+            left.close()
+            right.close()
+            raise
+        return server, client

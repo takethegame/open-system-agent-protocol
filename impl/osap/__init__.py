@@ -6,6 +6,8 @@ Covered so far:
 
 - M2.1: envelope, error model, stream and message framing, handshake,
   idempotency, and monotonic-clock deadlines (standard.md §7.1–§7.10);
+- M2.1b: authenticated local transport bindings — an `AF_UNIX` stream server
+  and client with length framing, plus a datagram message pair (§7.9, §7.10);
 - M2.2: Ed25519 manifest signatures, agent registration, reserved namespaces,
   and the registry subset (§4, §6);
 - M2.3: capability tokens, attenuation, binding, revocation (§5.1-§5.6);
@@ -30,6 +32,7 @@ from . import (
     registry,
     schema,
     task,
+    transport,
 )
 from .bus import Bus
 from .clock import Deadline
@@ -59,5 +62,6 @@ __all__ = [
     "registry",
     "schema",
     "task",
+    "transport",
     "validate",
 ]

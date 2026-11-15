@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import copy
 import sys
+import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -42,6 +44,7 @@ from osap import (  # noqa: E402
     identity,
     registry,
     task,
+    transport,
 )
 from osap.clock import parse_timestamp  # noqa: E402
 
@@ -179,6 +182,8 @@ def _check_c0(case: dict, documents: dict) -> dict:
 
     if operation == "handshake":
         return _check_handshake(params)
+    if operation == "transport":
+        return _check_transport(params, documents)
     if operation == "frame":
         return _check_frame(params)
     if operation == "send":
@@ -188,6 +193,70 @@ def _check_c0(case: dict, documents: dict) -> dict:
     if operation == "clock":
         return _check_clock(primary, params)
     return {"outcome": "skip", "reason": f"C0 operation {operation!r} has no automated check"}
+
+
+def _check_transport(params: dict, documents: dict) -> dict:
+    binding = params.get("binding", "stream")
+    message = documents.get("primary")
+    if message is None:
+        raise ValueError("transport case needs an input.ref message")
+
+    if binding == "stream":
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bus.sock"
+            server = transport.UnixStreamServer(path)
+            worker = threading.Thread(
+                target=server.serve_forever,
+                kwargs={"max_messages": 1},
+                daemon=True,
+            )
+            worker.start()
+            client = transport.UnixStreamClient.connect(path, timeout=5)
+            try:
+                reply = client.call(message)
+            finally:
+                client.close()
+                server.close()
+            worker.join(2)
+        if reply.get("type") == "error":
+            return {
+                "outcome": "reject",
+                "error": reply["body"]["data"]["code"],
+                "state": {"transport": "af_unix_stream", "reply_type": "error"},
+            }
+        return {
+            "outcome": "accept",
+            "state": {"transport": "af_unix_stream", "reply_type": reply.get("type")},
+        }
+
+    if binding != "message":
+        raise ValueError(f"unknown transport binding: {binding!r}")
+
+    server, client = transport.UnixMessagePair.pair(timeout=5)
+    worker = threading.Thread(
+        target=server.serve_forever,
+        kwargs={"max_messages": 1},
+        daemon=True,
+    )
+    worker.start()
+    try:
+        reply = client.call(message)
+    finally:
+        client.close()
+        server.close()
+    worker.join(2)
+    if reply.get("type") != "welcome":
+        raise ValueError(f"message binding did not accept hello: {reply!r}")
+    return {
+        "outcome": "observe",
+        "state": {
+            "transport": "af_unix_dgram",
+            "binding": "message",
+            "native_boundary": True,
+            "length_prefix": False,
+            "reply_type": reply.get("type"),
+        },
+    }
 
 
 def _check_handshake(params: dict) -> dict:

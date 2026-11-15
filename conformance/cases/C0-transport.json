@@ -5,14 +5,18 @@
       "id": "C0-01",
       "level": "C0",
       "title": "request before hello is rejected",
-      "mode": "manual",
-      "operation": "handshake",
+      "mode": "automated",
+      "operation": "transport",
       "preconditions": ["transport connected", "hello/welcome not completed"],
       "steps": [
         "open a connection to the Bus",
         "send the envelope in examples/request.json without sending hello",
         "read the error frame"
       ],
+      "input": {
+        "ref": "../../examples/request.json",
+        "params": { "binding": "stream" }
+      },
       "expect": {
         "outcome": "reject",
         "error": "TRANSPORT_HANDSHAKE_REQUIRED"
@@ -89,14 +93,18 @@
       "id": "C0-06",
       "level": "C0",
       "title": "message transport must not require a length prefix",
-      "mode": "manual",
-      "operation": "frame",
+      "mode": "automated",
+      "operation": "transport",
       "preconditions": ["transport_kind includes message"],
       "steps": [
         "declare a message-kind transport in hello",
         "send a complete message without a length prefix",
         "observe whether the receiver accepts it"
       ],
+      "input": {
+        "ref": "../../examples/hello.json",
+        "params": { "binding": "message" }
+      },
       "expect": {
         "outcome": "observe",
         "notes": "A conforming message transport accepts the frame; requiring a length prefix makes the implementation non-conforming."
