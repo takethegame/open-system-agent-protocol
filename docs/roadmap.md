@@ -45,7 +45,7 @@
 | 规范是 umbrella 文档 | 无法直接提交 IETF | M4 |
 | 仓库名拼写错误 | 对外发布不专业 | M0 |
 
-截至 2026-11-14：M0、M1 已完成；M2 的 C0–C7 automated 用例全部通过，`M2.1b`（真实传输）与 `M2.4b`（同意消息流）仍开放。上表保留规划时的口径，作为历史对照。
+截至 2026-11-15：M0、M1 已完成；M2 的 C0–C7 automated 用例全部通过，`M2.4b`（同意消息流）已接入参考实现与演示，仅 `M2.1b`（真实传输）仍开放。上表保留规划时的口径，作为历史对照。
 
 ---
 
@@ -207,12 +207,12 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 - [x] M2.2 身份与握手 + 保留命名空间 + Ed25519 签名（`impl/osap/identity.py`、`crypto.py`、`registry.py`；C1 6/6、C2 5/5）
 - [x] M2.3 能力模型：衰减十项规则、绑定三项、撤销级联、风险前置（`impl/osap/capability.py`；C3-01…C3-08）
 - [x] M2.4a 同意回执校验：决策、过期、范围与顺序（`impl/osap/consent.py`；C3-09…C3-12）
-- [ ] M2.4b 同意消息流：`consent.request`/`grant`/`deny`、回执签发、`cap_id` 预约顺序
+- [x] M2.4b 同意消息流：`consent.request`/`grant`/`deny`、回执签发、`cap_id` 预约顺序（`impl/osap/consent_flow.py`；44 条单元测试，演示第 3 节接入）
 - [x] M2.5a 任务模型：`request`/`result`、`delegate`、`handoff`、取消传播、预算（`impl/osap/task.py`；C4 automated 8/8）
 - [x] M2.5b 上下文织构：`ctx://` 句柄授权与 TTL、标签继承、出口策略、黑板、对象删除、缓存与存储声明（`impl/osap/context.py`；C5 11/11）
 - [x] M2.5c 联邦适配器与命名空间映射：Android/Apple/Windows、MCP、A2A、D-Bus 投影，外部信任归一（`impl/osap/federation.py`；C6 automated 7/7）
 - [x] M2.6 审计链与任务 trace：链验证、脱敏承诺导出、回放幂等、恢复对账、跨用户边界（`impl/osap/audit.py`；C7 automated 6/6）
-- [x] M2.7 演示：`notes-agent` + `calendar-agent` + `supervisor`，两条委派边界、15 条审计事件、脱敏导出与恢复断言（`demo/run_demo.py`）
+- [x] M2.7 演示：`notes-agent` + `calendar-agent` + `supervisor`，两条委派边界、16 条审计事件、脱敏导出与恢复断言（`demo/run_demo.py`）
 
 **退出标准**
 
