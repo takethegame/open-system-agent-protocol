@@ -260,6 +260,44 @@ class RevocationTests(unittest.TestCase):
         targets = [entry["target"] for entry in self.authority.audit]
         self.assertEqual(targets, [PARENT_ID, "cap_middle", "cap_leaf"])
 
+    def test_repeated_revocation_is_idempotent(self):
+        self.assertEqual(self.authority.revoke(PARENT_ID), 3)
+        self.assertEqual(self.authority.revoke(PARENT_ID), 0)
+        self.assertEqual(len(self.authority.audit), 3)
+
+    def test_revoking_middle_does_not_revoke_the_ancestor(self):
+        self.assertEqual(self.authority.revoke("cap_middle"), 2)
+        self.assertFalse(self.authority.is_revoked(self.ancestor))
+        self.assertTrue(self.authority.is_revoked(self.middle))
+        self.assertTrue(self.authority.is_revoked(self.leaf))
+
+    def test_fan_out_tree_revokes_every_descendant_once(self):
+        authority = capability.CapabilityAuthority()
+        root = parent()
+        root["cap_id"] = "cap_root"
+        authority.issue(root)
+        for index in range(6):
+            branch = token()
+            branch["cap_id"] = f"cap_branch_{index}"
+            branch["parent_cap_id"] = "cap_root"
+            authority.issue(branch)
+            for leaf_index in range(4):
+                leaf = token()
+                leaf["cap_id"] = f"cap_leaf_{index}_{leaf_index}"
+                leaf["parent_cap_id"] = branch["cap_id"]
+                authority.issue(leaf)
+        self.assertEqual(authority.revoke("cap_root"), 31)
+        self.assertEqual(len(authority.revoked), 31)
+        self.assertEqual(len(authority.audit), 31)
+
+    def test_reissuing_a_token_moves_it_to_the_new_parent(self):
+        replacement = token()
+        replacement["cap_id"] = "cap_leaf"
+        replacement["parent_cap_id"] = PARENT_ID
+        self.authority.issue(replacement)
+        self.assertEqual(self.authority.revoke(PARENT_ID), 3)
+        self.assertIn("cap_leaf", self.authority.revoked)
+
 
 class ConsentRequirementTests(unittest.TestCase):
     def setUp(self):

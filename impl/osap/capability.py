@@ -139,28 +139,41 @@ class CapabilityAuthority:
         self.issued: dict[str, dict] = {}
         self.revoked: set[str] = set()
         self.audit: list[dict] = []
+        self._children: dict[str, set[str]] = {}
 
     def issue(self, token: dict) -> dict:
         validate_token(token)
-        self.issued[token["cap_id"]] = token
+        cap_id = token["cap_id"]
+        previous = self.issued.get(cap_id)
+        if previous is not None:
+            old_parent = previous.get("parent_cap_id")
+            if old_parent is not None:
+                siblings = self._children.get(old_parent)
+                if siblings is not None:
+                    siblings.discard(cap_id)
+        self.issued[cap_id] = token
+        parent = token.get("parent_cap_id")
+        if parent is not None:
+            self._children.setdefault(parent, set()).add(cap_id)
         return token
 
     def revoke(self, cap_id: str) -> int:
         """Revoke `cap_id` and every descendant; return the number revoked."""
 
-        self.revoked.add(cap_id)
-        self.audit.append({"action": "capability.revoked", "target": cap_id})
-        count = 1
-        changed = True
-        while changed:
-            changed = False
-            for token in self.issued.values():
-                parent = token.get("parent_cap_id")
-                if parent in self.revoked and token["cap_id"] not in self.revoked:
-                    self.revoked.add(token["cap_id"])
-                    self.audit.append({"action": "capability.revoked", "target": token["cap_id"]})
-                    count += 1
-                    changed = True
+        if cap_id in self.revoked:
+            return 0
+        # Walk the parent -> children index breadth first so a deep chain is
+        # visited once per token instead of once per level.
+        queue = [cap_id]
+        count = 0
+        while queue:
+            current = queue.pop()
+            if current in self.revoked:
+                continue
+            self.revoked.add(current)
+            self.audit.append({"action": "capability.revoked", "target": current})
+            count += 1
+            queue.extend(self._children.get(current, ()))
         return count
 
     def is_revoked(self, token: dict) -> bool:
