@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -12,6 +12,9 @@
 | 错误模型 | §7.7 | 27 个标准错误码、`retryable` 默认值、`osap.error/v1` body |
 | 流式分帧 | §7.9 | 4 字节大端长度前缀 + UTF-8 JSON，增量解码 |
 | 消息型分帧 | §7.9、§7.10 | 保留原生消息边界，不强制长度前缀 |
+| UDS stream 绑定 | §7.9、§7.10 | `AF_UNIX` 监听/连接、长度前缀、每连接独立 `Bus`、`chmod 0600` |
+| 消息型本地绑定 | §7.9、§7.10 | `AF_UNIX` 数据报 socketpair，一报一消息，无长度前缀 |
+| 对端认证 | §7.10 | Linux `SO_PEERCRED`、macOS `getpeereid`+`LOCAL_PEERPID`；可校验 uid/gid/pid/可执行文件，缺字段即拒绝 |
 | 8 MiB 上限 | §7.9 | 两种绑定都按 UTF-8 JSON 字节数校验 |
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
 | 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用 |
@@ -59,7 +62,7 @@
 | 跨用户 | §11.2 | 默认拒绝；显式开启且双方同意才放行 |
 | 被攻破的 Bus | §3.6、§11.1 | 0.1 不声称 P0 防护；声明了即判不合约 |
 
-**不在本阶段**：真实 OS 传输绑定（M2.1b）与持久账本。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
+**不在本阶段**：持久账本、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
 
 ## 2. 目录
 
@@ -85,6 +88,7 @@ impl/
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
     task.py             §8 任务树、预算、取消、结果、handoff
+    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证
   tests/                单元测试（unittest）
 ```
 
@@ -108,12 +112,12 @@ python3 demo/run_demo.py
 
 ```
 python3 tools/conformance_run.py --impl impl/adapter.py
-→ 68 cases [C0..C7]: 60 pass, 0 fail, 8 skip
+→ 68 cases [C0..C7]: 62 pass, 0 fail, 6 skip
 ```
 
 | 等级 | 结果 | 说明 |
 |---|---|---|
-| C0 | 5 pass / 2 manual skip | 信封、分帧、幂等、单调时钟 |
+| C0 | 7 pass | 真实 UDS 握手、信封、两种分帧、幂等、单调时钟 |
 | C1 | 6 pass | 注册、保留命名空间、验签、App/公钥绑定、轮换 |
 | C2 | 5 pass / 1 manual skip | 清单索引、发现响应、TTL |
 | C3 | 12 pass | 绑定、衰减、撤销、风险与回执 |
@@ -122,7 +126,7 @@ python3 tools/conformance_run.py --impl impl/adapter.py
 | C6 | 7 pass / 1 manual skip | 三家原生注册表、MCP、A2A、D-Bus 投影与外部信任归一 |
 | C7 | 6 pass / 1 manual skip | 审计链篡改、脱敏导出、跨用户、回放、恢复、被攻破 Bus 声明 |
 
-60 条 automated 用例全部通过；剩余 8 条 skip 都是 manual 用例（C0-01、C0-06、C2-05、C4-01、C4-08、C4-09、C6-08、C7-01）。
+62 条 automated 用例全部通过；剩余 6 条 skip 都是 manual 用例（C2-05、C4-01、C4-08、C4-09、C6-08、C7-01）。
 
 C3 的 12 条都命中预期错误码，且实现被断言为“只在目标维度上失败”：C3-04…C3-07 的 `details.violations` 分别只有 `actions`、`resources`、`exp`、`depth`+`constraints.max_depth`。
 
@@ -260,12 +264,24 @@ D-Bus 的 `native_id` 同时含 bus、interface、path 与 interface.method，�
 
 `consent_flow` 生成的回执结构完整并通过 schema，但 `proof.kid` 与 `proof.sig` 是固定占位串；参考实现还没有 PCS 用户密钥，验签链路留给后续里程碑。`consent.validate` 因此只校验范围与时间，不验证 `proof`。
 
+### 5.30 流式绑定用真实的 UDS 监听/连接
+
+`UnixStreamServer` 在文件系统路径上 `bind` 后 `chmod 0600`，每个 `accept` 都新建一个 `Bus`，因此握手状态属于连接而不是进程。客户端连接后先做对端认证，再允许任何 `hello`。写路径复用 `framing.encode_stream`，读路径先读 4 字节头、检查 8 MiB 上限，再读正文；超限头会变成 `TRANSPORT_FRAME_TOO_LARGE` 错误帧，而不是让接收方分配超大缓冲区。
+
+### 5.31 消息型绑定用数据报 socketpair
+
+`AF_UNIX` 的 `SOCK_DGRAM` 对保留“一次发送 = 一条消息”的边界，等价于参考实现范围内的 XPC/Binder 语义。`UnixSession.send` 直接序列化 JSON 后调用 `send`，不写长度前缀；接收方一次 `recv` 得到完整消息。`SOCK_SEQPACKET` 在 macOS 不可用，因此没有采用。
+
+### 5.32 对端认证失败即关闭，且缺字段不放过
+
+Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执行文件；macOS 用 `getpeereid` + `LOCAL_PEERPID`，再用 `proc_pidinfo` 补 uid/gid、用 `proc_pidpath` 取可执行文件。`PeerPolicy` 只检查显式设置的字段；但字段被设置而平台给不出值时返回 `AUTH_DENIED`，避免“无法验证”被当成“验证通过”。监听端在 `accept` 后立即检查，失败就关闭连接；拒绝的对端不会拿到任何协议消息。
+
 ## 6. 已知限制
 
 1. **内存态**：幂等索引、注册表、轮换状态都在进程内，重启即丢；§7.8 要求可重建的持久索引，尚未实现。
 2. **开发密钥环**：一致性适配器在导入时生成一次性 Ed25519 密钥并为示例 App 签清单。示例里的 `base64url-example-*` 是占位字符串，不是真实密钥。
-3. **没有 OS 认证**：§4.2 的 `SO_PEERCRED`、audit token、package identity 都未实现；当前“App 身份”只来自清单签名。
-4. **没有跨进程传输**：`stream` 与 `message` 只是编解码层，没有绑定到 UDS/XPC/D-Bus；由 M2.1b 处理。
+3. **OS 认证只覆盖 Linux/macOS 本地 socket**：已实现 `SO_PEERCRED` / `getpeereid` / `LOCAL_PEERPID` 与可执行文件解析；audit token、package identity、代码签名和 Windows SID 都未实现。
+4. **不是平台原生绑定**：只有 `AF_UNIX` stream 与数据报 socketpair，没有 XPC、Binder、named pipe 或 localhost mTLS；对端认证是 uid/gid/pid/可执行文件，不是平台代码签名。
 5. **任务状态只在内存**：`TaskBoard` 没有持久化，重启后无法恢复任务树；§8.11 的 `effect.intent` 与对账也没有实现，C4-08/C4-09 因此仍是 manual。
 6. **凭证只做结构校验**：`proof.sig` 未验证，`cap_id` 也未由 CA 签发密钥覆盖；需要把用户密钥分发与签名纳入 M2.4 之后的里程碑。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
@@ -276,10 +292,12 @@ D-Bus 的 `native_id` 同时含 bus、interface、path 与 interface.method，�
 12. **联邦只做投影**：没有监听原生注册表变化，也没有按 TTL 自动刷新；C6-08 仍是 manual。MCP/A2A/OpenAPI 的外部签名未验证，因此统一降为 `unverified`。
 13. **审计链不重算正文哈希**：只验证事件 schema、trace、`audit_id` 与 `prev_hash` 链接；夹具的 hash 是占位串，规范也未固定编码。
 14. **审计只在内存**：`ContextFabric`、`TaskBoard` 与审计模块都不持久化；重启恢复与真实回放需要持久账本，C7-01 仍是 manual。
-15. **60 个 pass 覆盖全部 automated 用例**，但不覆盖 8 条 manual 的运行时、跨进程与崩溃恢复语义。
+15. **62 个 pass 覆盖全部 automated 用例**，但不覆盖 6 条 manual 的运行时、跨进程与崩溃恢复语义。
 16. **同意流程只在内存**：`ConsentFlow.requests` / `receipts` / `reservations` 都是进程内字典，重启即丢；没有持久化的用户决策日志，也不会把同一请求广播给多个 Bus。
 17. **回执未验签**：`ConsentFlow` 生成的 `proof` 是占位串；PCS 用户密钥的分发与 Ed25519 验签尚未接入。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
+19. **UDS 服务端是串行的**：`serve_forever` 一次只服务一个连接直到 EOF，没有连接并发、admission control、在途请求上限或 rate limit；§7.11 的隔离与背压仍是文字要求。
+20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 
 ## 7. 与规范的偏差登记
 
@@ -303,3 +321,6 @@ D-Bus 的 `native_id` 同时含 bus、interface、path 与 interface.method，�
 | 任务状态机的非法转换 | 规范未规定错误码 | 用 `POLICY_DENIED` 并附带 `from`/`to` |
 | 结果状态转换 | §8.8 未规定“结果消息自带 `task.status` 时如何校验” | 先校验结果契约，再走 §8.10 状态机；因此对从未启动的任务返回结果会被拒绝 |
 | 委派的能力链 | §8.5 要求子能力满足全部衰减条件 | 任务侧只校验预算与深度；能力侧需要父凭证，未在夹具中提供 |
+| 消息型本地绑定 | macOS 推荐 XPC、Android 推荐 Binder | 用 `AF_UNIX` 数据报 socketpair 保留消息边界；平台原生绑定留给适配层 |
+| 对端可执行文件校验 | §7.10 要求“可执行文件校验” | Linux/macOS 解析可执行路径；其他平台或字段缺失时 `AUTH_DENIED`，不降级为只看 uid |
+| 对端认证失败的错误码 | §7.7 没有专用码 | 用标准码 `AUTH_DENIED`，`details.reason` 区分 `peer_mismatch` 与 `peer_field_unavailable` |

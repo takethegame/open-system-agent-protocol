@@ -118,7 +118,7 @@ python3 demo/run_demo.py           # 三 Agent 端到端演示
 - **规范**：0.1 讨论稿，核心机制已定义，开放问题见规范第 15 节。
 - **信任边界**：Bus Core 是最小 TCB；RFS/CA/PCS/CF/AL 为独立服务。0.1 的 Bus 可读取 payload，这是显式信任假设；不信任 Bus 的 P1 加密 profile 列入 0.2。
 - **状态语义**：任务树、幂等索引、撤销列表、审计链头必须持久化并支持崩溃恢复。Bus 状态不是记忆：长期语义记忆由 Agent 或独立 memory 服务持有，必须单独授权（见 `docs/standard.md` §3.7、§9.3）。
-- **实现**：Python 参考实现位于 `impl/`，覆盖 M2.1–M2.7 并通过全部 60 条 automated 一致性用例；`demo/` 提供三 Agent 端到端演示。
+- **实现**：Python 参考实现位于 `impl/`，覆盖 M2.1–M2.7 并通过全部 62 条 automated 一致性用例；`demo/` 提供三 Agent 端到端演示。
 - **一致性**：C0–C7 等级已定义，测试用例已列出。
 - **标准归属**：未定；建议作为本地 profile 与 IETF `agentproto` 相关讨论、OAuth WIMSE、AAIF/LF 生态对齐（是否成立工作组以 IETF 官方为准）。
 - **许可**：Apache-2.0（规范、schema、示例、工具统一）；贡献使用 DCO 1.1。

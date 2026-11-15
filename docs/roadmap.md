@@ -45,7 +45,7 @@
 | 规范是 umbrella 文档 | 无法直接提交 IETF | M4 |
 | 仓库名拼写错误 | 对外发布不专业 | M0 |
 
-截至 2026-11-15：M0、M1 已完成；M2 的 C0–C7 automated 用例全部通过，`M2.4b`（同意消息流）已接入参考实现与演示，仅 `M2.1b`（真实传输）仍开放。上表保留规划时的口径，作为历史对照。
+截至 2026-11-15：M0、M1 已完成；M2 的全部子阶段（M2.1a/b 至 M2.7）已接入参考实现，C0–C7 automated 用例全部通过；仅撤销传播 P95 基准待补。上表保留规划时的口径，作为历史对照。
 
 ---
 
@@ -203,7 +203,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 **拆分**
 
 - [x] M2.1a 信封 + 错误模型 + 两种分帧编解码（`impl/osap/`，C0 automated 5/5）
-- [ ] M2.1b 真实传输绑定（Linux UDS stream + 一种 message 绑定，含对端认证与回环 demo）
+- [x] M2.1b 真实传输绑定（UDS stream + 消息型 socketpair，含对端认证；C0-01/C0-06 自动化）
 - [x] M2.2 身份与握手 + 保留命名空间 + Ed25519 签名（`impl/osap/identity.py`、`crypto.py`、`registry.py`；C1 6/6、C2 5/5）
 - [x] M2.3 能力模型：衰减十项规则、绑定三项、撤销级联、风险前置（`impl/osap/capability.py`；C3-01…C3-08）
 - [x] M2.4a 同意回执校验：决策、过期、范围与顺序（`impl/osap/consent.py`；C3-09…C3-12）

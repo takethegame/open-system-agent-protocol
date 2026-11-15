@@ -14,7 +14,7 @@
 |---|---|---|---|
 | M0 仓库可信化 | ✅ 完成 | 7/7 | 2026-11-12 |
 | M1 可执行一致性 | ✅ 完成 | 68/68 用例（100%） | 2026-11-12 |
-| M2 参考实现 MVP | 🟢 接近完成 | M2.1a + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；仅 M2.1b（真实传输）开放 | — |
+| M2 参考实现 MVP | 🟢 接近完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 基准待补 | — |
 | M3 形式化不变量 | ⬜ 未开始 | 0/4 定理 | — |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
@@ -29,7 +29,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验工具 | 4 |
 | Markdown 文件 | 22 |
-| 参考实现 | 18 个模块 + 适配器（3647 行）+ 309 个单元测试 |
+| 参考实现 | 19 个模块 + 适配器（4228 行）+ 325 个单元测试 |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
 | CI 工作流 | 1（Python 3.11 / 3.12） |
@@ -65,6 +65,7 @@
 | `0b304db` | 2026-11-14 | **M2.6**：审计链、脱敏导出、回放、恢复、跨用户；修复 None 结果的幂等缓存（265 tests；累计 60 pass） |
 | `1a4d09a` | 2026-11-14 | **M2.7**：三 Agent 演示（注册、发现、同意、两次委派、上下文、16 条审计事件），CI 增加演示步骤 |
 | `f1b8453` | 2026-11-15 | **M2.4b**：同意请求、`cap_id` 预约、授权/拒绝、激活与撤销；演示第 3 节接入（309 tests） |
+| `47a3f4c` | 2026-11-15 | **M2.1b**：UDS stream、消息型 socketpair、对端认证；C0-01/C0-06 自动化（325 tests；累计 62 pass） |
 
 ---
 
@@ -215,7 +216,7 @@ M1 收尾时的负向验证（均在临时目录，不随仓库发布）：
 |---|---|---|
 | 总数 | 68 | C0 7 + C1 6 + C2 6 + C3 12 + C4 11 + C5 11 + C6 8 + C7 7 |
 | automated | 60 | 其中 7 条为 `observe` |
-| manual | 8 | C0-01、C0-06、C2-05、C4-01、C4-08、C4-09、C6-08、C7-01 |
+| manual | 6 | C2-05、C4-01、C4-08、C4-09、C6-08、C7-01 |
 | `observe` | 14 | 7 条 automated + 7 条 manual |
 
 手动用例集中在三类：传输/时钟运行时（C0）、TTL 与生命周期（C2、C6）、崩溃与跨 App 集成（C4、C7）。`observe` 用例不产生自动判定，报告只记录实现的实际行为。
@@ -273,21 +274,22 @@ C2/C4/C6 复用 `manifest.json`、`discovery-result.json`、`capability-record.j
 | `impl/osap/consent.py` | 120 | 同意回执与能力范围校验 | §5.8 | M2.4 |
 | `impl/osap/consent_flow.py` | 381 | 同意请求、`cap_id` 预约、授权/拒绝、激活、撤销 | §10.2、§10.3 | M2.4b |
 | `impl/osap/task.py` | 425 | 任务树、预算、取消、结果、handoff | §8.2–§8.10 | M2.5a |
+| `impl/osap/transport.py` | 508 | UDS stream、消息型 socketpair、对端认证 | §7.9、§7.10 | M2.1b |
 | `impl/osap/context.py` | 289 | 句柄、标签、黑板、对象、缓存、存储声明 | §9.2–§9.10 | M2.5b |
 | `impl/osap/federation.py` | 138 | 原生描述符投影、原生身份、命名空间、信任归一 | §6.4、§6.7、§6.8 | M2.5c |
 | `impl/osap/audit.py` | 226 | 审计链、脱敏导出、回放、恢复、跨用户 | §8.11、§10.5–§10.6、§11.2 | M2.6 |
-| `impl/adapter.py` | 692 | 一致性适配器 | — | M2.1a–M2.7 |
+| `impl/adapter.py` | 761 | 一致性适配器 | — | M2.1a–M2.7 |
 | `demo/run_demo.py` | 575 | 三 Agent 端到端演示：注册、发现、同意、委派、上下文、审计 | §4–§10 | M2.7 |
 
-`impl/tests/` 有 309 个单元测试，覆盖分帧往返与边界、校验顺序、幂等、时钟回拨、错误码默认值、签名与篡改、注册拒绝路径、注册表 TTL 与发现过滤、衰减的十项规则（逐维度）、撤销级联、绑定三项、回执的校验顺序、同意请求的 TTL 与选项、预约的惰性、拒绝/撤销后不可激活、回执有效期钳制、任务状态机、取消传播、委派预算与深度、结果契约、handoff 的五类拒绝路径，上下文句柄的授权/过期/标签/出口/黑板/删除/缓存/存储/记忆边界，联邦投影的 MCP/A2A/D-Bus/OpenAPI 身份解析、外部信任归一与命名空间映射，以及审计链链接校验、脱敏承诺、回放幂等、恢复对账与跨用户边界。
+`impl/tests/` 有 325 个单元测试，覆盖分帧往返与边界、校验顺序、幂等、时钟回拨、错误码默认值、签名与篡改、注册拒绝路径、注册表 TTL 与发现过滤、衰减的十项规则（逐维度）、撤销级联、绑定三项、回执的校验顺序、同意请求的 TTL 与选项、预约的惰性、拒绝/撤销后不可激活、回执有效期钳制、任务状态机、取消传播、委派预算与深度、结果契约、handoff 的五类拒绝路径，上下文句柄的授权/过期/标签/出口/黑板/删除/缓存/存储/记忆边界，联邦投影的 MCP/A2A/D-Bus/OpenAPI 身份解析、外部信任归一与命名空间映射，UDS stream 与数据报消息绑定的真实往返、连接级握手隔离、超长帧与 8 MiB 上限、uid/gid/pid/可执行文件认证与 fail-closed 策略，以及审计链链接校验、脱敏承诺、回放幂等、恢复对账与跨用户边界。
 
 ### 5.2 验证证据
 
 ```
 python3 -m unittest discover -s impl/tests -t impl
-    → Ran 309 tests ... OK
+    → Ran 325 tests ... OK
 python3 tools/conformance_run.py --impl impl/adapter.py
-    → 68 cases [C0..C7]: 60 pass, 0 fail, 8 skip
+    → 68 cases [C0..C7]: 62 pass, 0 fail, 6 skip
 python3 demo/run_demo.py
     → registered=3 discovery=1 consent=1 delegated=2 context=1 audit=verified
       16 events verified; redaction verifiable; recovery complete; trace complete
@@ -295,7 +297,7 @@ python3 demo/run_demo.py
 
 | 等级 | 结果 | 覆盖点 |
 |---|---|---|
-| C0 | 5 pass / 2 manual skip | 版本、帧大小、未知类型、幂等、单调时钟 |
+| C0 | 7 pass | 真实 UDS 握手、版本、两种分帧、幂等、单调时钟 |
 | C1 | 6 pass | 未注册、保留命名空间、验签失败、App 越权、轮换宽限、公钥未绑定 |
 | C2 | 5 pass / 1 manual skip | 无签名清单、发现无泄漏、静态 `consent_hint`、TTL 过期、缺 `provenance` |
 | C3 | 12 pass | audience/task/subject 绑定、四项衰减、撤销级联、L3 无回执、回执过期与范围不足 |
@@ -386,12 +388,34 @@ M2.4b 不新增一致性编号：它把 §10.2–§10.3 的流程接到 `consent
 
 C1-05 与 C2-03 是 `observe`：前者规范允许“拒绝或宽限期接受”，实现选择拒绝；后者报告实际观察到的字段。
 
+### 5.2.2 真实传输（M2.1b）的覆盖
+
+C0-01 与 C0-06 已从 manual 改为 automated，因为适配器现在真的建立 `AF_UNIX` socket：
+
+| 用例 | 传输 | 断言 |
+|---|---|---|
+| C0-01 | UDS stream | 连接后不发 `hello`，直接发 `examples/request.json`；服务端返回 `TRANSPORT_HANDSHAKE_REQUIRED` 错误帧 |
+| C0-06 | `AF_UNIX` `SOCK_DGRAM` | `hello` 以一条无前缀数据报发送；收到 `welcome`，`binding=message`、`native_boundary=true`、`length_prefix=false` |
+
+16 条传输集成测试另外覆盖：
+
+- 同一 UDS 连接上的 `hello` → `request` 往返；
+- 每条连接独立 `Bus`，第二条连接未握手仍被拒绝；
+- 4 字节头超过 8 MiB 时返回 `TRANSPORT_FRAME_TOO_LARGE`；
+- 消息型发送超过 8 MiB 时在发送侧拒绝；
+- uid/gid/pid/可执行文件匹配，错误 uid 或可执行文件被 `AUTH_DENIED` 拒绝；
+- 平台给不出策略要求的字段时 fail closed；
+- `server.close()` 删除 socket 文件。
+
 ### 5.3 设计决定
 
 | 决定 | 理由 |
 |---|---|
 | 校验顺序：版本 → 类型 → JSON Schema | §7.9 要求未知类型返回 `SCHEMA_UNSUPPORTED`；若先跑 schema，`enum` 会先报 `SCHEMA_INVALID` |
 | 消息型绑定不设统一加前缀的 `encode()` 默认路径 | 避免 C0-06 的“再套一层长度前缀” |
+| UDS stream 每连接一个 `Bus`，socket 文件 `chmod 0600` | 握手状态属于连接，不跨对端泄漏；同用户其他进程也要先过文件权限 |
+| 消息型本地绑定用 `AF_UNIX` 数据报 socketpair | macOS 不支持 `SOCK_SEQPACKET`；数据报天然保留“一报一消息”，无需长度前缀 |
+| 对端认证 fail closed | 策略要求的 uid/gid/pid/可执行文件拿不到时拒绝，而不是降级为“无法验证即通过” |
 | deadline 只保存预算，剩余时间一律用 `time.monotonic()` | 墙钟回拨或挂起恢复不得复活请求（C0-07） |
 | `STANDARD_CODES` 单点定义 | 错误码只出现一次，测试反查 §7.7 的 `retryable` 列 |
 | 签名覆盖“去掉 `signature` 后的 key 排序 JSON” | 确定性强、跨语言可复现；不是完整 RFC 8785，已在代码里写明 |
@@ -451,6 +475,9 @@ C1-05 与 C2-03 是 `observe`：前者规范允许“拒绝或宽限期接受”
 | 审计链 hash | 规范未固定规范化编码，夹具 hash 是占位串 | 只验证事件 schema、trace、`audit_id` 与链接，不重算正文摘要 |
 | 演示的清单密钥 | 示例夹具只有占位签名 | 每次运行生成新的 Ed25519 密钥，会话 ID 因此会变；判定结果不变 |
 | 演示的传输 | 没有真实 UDS/XPC/D-Bus | 消息是内存字典，只证明协议语义，不证明传输行为 |
+| 消息型本地绑定 | macOS 推荐 XPC、Android 推荐 Binder | 用 `AF_UNIX` 数据报 socketpair 保留消息边界；平台原生绑定留给适配层 |
+| 对端认证失败 | §7.7 没有传输认证专用码 | 用 `AUTH_DENIED`，`details.reason` 区分 `peer_mismatch` 与 `peer_field_unavailable` |
+| 对端可执行文件校验 | §7.10 要求“可执行文件校验” | Linux/macOS 解析可执行路径；字段缺失时拒绝，不降级为只看 uid |
 | 同意流程的回执 `proof` | 没有 PCS 用户密钥 | 生成结构合法的占位 `kid`/`sig`；`consent.validate` 只校验范围与时间 |
 | 预约被拒绝/撤销后的错误码 | §10.3 只要求“不可再激活”，未定义码 | 统一 `POLICY_DENIED`，`details` 带 `cap_id` 与预约状态 |
 | 未预约先授权 | 规范只规定顺序，未规定错误码 | `POLICY_DENIED` + `details.reason=missing_reservation`，与“用户未同意”区分 |
@@ -459,8 +486,8 @@ C1-05 与 C2-03 是 `observe`：前者规范允许“拒绝或宽限期接受”
 
 1. 幂等索引、注册表、轮换状态都在内存，重启即丢；§7.8 要求可重建的持久索引，尚未实现。
 2. `auth.token` 与能力 `proof.sig` 都只做结构校验，没有验签；密钥分发链路未实现。
-3. 两种“绑定”目前只是编解码层，没有接到 UDS / XPC / D-Bus，也没有对端认证；由 M2.1b 处理。
-4. §4.2 的 App 认证（`SO_PEERCRED`、audit token、package identity）未实现，当前 App 身份只来自清单签名。
+3. 传输绑定只有 `AF_UNIX` stream 与数据报 socketpair；没有 XPC、Binder、named pipe 或 localhost mTLS。
+4. 对端认证覆盖 uid/gid/pid/可执行文件（Linux `SO_PEERCRED`，macOS `getpeereid` + `LOCAL_PEERPID`），没有 audit token、package identity 或代码签名；同 uid 的其他进程只有在设置可执行文件策略后才被排除。
 5. 撤销集合只在内存，重启即丢，也没有广播；§5.5 要求写入审计账本并通知受影响 Agent，尚未实现。
 6. `max_uses` 未计数，`rate` 未限流；衰减只比较声明值。
 7. 任务树只在内存，重启即丢；`TaskBoard` 不产生 `effect.intent`，`audit.recover_effects` 只读已有事件，C4-08/C4-09 仍是 manual。
@@ -469,15 +496,16 @@ C1-05 与 C2-03 是 `observe`：前者规范允许“拒绝或宽限期接受”
 10. 联邦只做投影：没有监听原生注册表变化，也没有按 TTL 自动刷新，C6-08 仍是 manual；MCP/A2A/OpenAPI 的签名未验证。
 11. 审计链不重算正文摘要：只验证 schema、trace、`audit_id` 与 `prev_hash` 链接；真正的防篡改需要规范化编码与持久账本。
 12. 审计、上下文与任务状态都只在内存；重启恢复与跨进程回放未实现，C7-01 仍是 manual。
-13. 60 个 pass 覆盖全部 automated 用例；8 条 manual 仍依赖真实传输、崩溃恢复与跨 App 集成。
+13. 62 个 pass 覆盖全部 automated 用例；6 条 manual 仍依赖崩溃恢复与跨 App 集成。
 14. 演示是进程内单进程：它证明模块能串起来，不证明真实传输、真实 OS 句柄或持久账本。
 15. `ConsentFlow` 的请求、回执与预约都只在内存；重启即丢，也没有把同一请求广播给多个 Bus。
 16. 同意回执的 `proof` 是占位串，没有 PCS 用户密钥的分发与验签。
 17. 一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
+18. UDS 服务端串行处理连接，没有 §7.11 的连接并发、admission control、在途请求上限或 rate limit。
 
 ### 5.6 M2 剩余工作
 
-- [ ] **M2.1b**：真实传输绑定（Linux UDS + 一种 message 绑定），让 C0-01 与 C0-06 可执行；
+- [x] **M2.1b**：真实传输绑定（UDS stream + 消息型 socketpair）与对端认证，C0-01/C0-06 已自动化（`impl/osap/transport.py`；16 条集成测试）；
 - [x] **M2.2**：身份、签名、注册表（C1 全绿，C2 automated 全绿）；
 - [x] **M2.3**：能力签发、衰减、绑定、撤销（C3-01…C3-08 全绿）；
 - [x] **M2.4**：风险前置与同意回执校验（C3-09…C3-12 全绿）；
@@ -508,10 +536,10 @@ C1-05 与 C2-03 是 `observe`：前者规范允许“拒绝或宽限期接受”
 
 ## 7. 下一步（按顺序）
 
-1. **M2.1b**：真实传输绑定（Linux UDS + 一种 message 绑定），让 C0-01 与 C0-06 可执行；
-2. 用持久账本替换内存索引，补上崩溃恢复、TTL 刷新与真实回放；
-3. 为撤销传播补 P95 基准并写入 `impl/README.md`（M2 退出标准之一）；
-4. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
+1. 用持久账本替换内存索引，补上崩溃恢复、TTL 刷新与真实回放；
+2. 为撤销传播补 P95 基准并写入 `impl/README.md`（M2 退出标准之一）；
+3. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
+4. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
 5. 每个 PR 只对应一个 C 编号用例，避免过度设计。
 
 ---
@@ -531,3 +559,4 @@ C1-05 与 C2-03 是 `observe`：前者规范允许“拒绝或宽限期接受”
 | 2026-11-14 | **M2.6**（`0b304db`）：审计链、脱敏导出、回放、恢复、跨用户；C7 automated 6/6，累计 60 pass（全部 automated） |
 | 2026-11-14 | **M2.7**（`1a4d09a`）：三 Agent 演示（notes + calendar + supervisor）；两个委派边界、16 条审计事件、脱敏与恢复断言；CI 增加 `python3 demo/run_demo.py` |
 | 2026-11-15 | **M2.4b**（`f1b8453`）：同意消息流（请求、`cap_id` 预约、授权/拒绝、激活、撤销）；44 条单元测试，累计 309；演示第 3 节改为完整流程并增加 `consent.requested` 事件（16 条） |
+| 2026-11-15 | **M2.1b**（`47a3f4c`）：真实传输（UDS stream + 数据报消息绑定）与对端认证；C0-01/C0-06 自动化，C0 7/7；16 条集成测试，累计 325；剩余 6 条 manual |
