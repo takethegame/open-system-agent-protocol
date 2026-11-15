@@ -140,6 +140,19 @@ C7 的 6 条 automated 同样逐条核对：C7-02 在 `events[1].prev_hash` 被�
 
 `python3 demo/run_demo.py` 把上述模块串成一条可复核路径：三个 Agent 注册、一次发现、一次完整同意流程（request → reserve → grant → activate）、两次委派（supervisor → notes、supervisor → calendar）、一次上下文解析与 16 条审计事件。它用断言固定 C7-01 中可自动化的部分（单 trace、每跳 `causation_id`、链验证、脱敏后仍可验证、恢复不执行副作用），细节见 [`../demo/README.md`](../demo/README.md)。
 
+### 4.1 撤销传播基准（M2 退出标准）
+
+退出标准是“单机 P95 < 100 ms（自测口径）”。参考实现没有跨进程通知，因此口径限定为**进程内可观察传播**：从 `revoke(根)` 返回，到树中每个后代 `is_revoked()` 都为真。
+
+```
+python3 tools/benchmark_revocation.py
+→ tree: width=6 depth=4 tokens=1555 samples=100
+  p50=0.921 ms  p95=1.225 ms  p99=1.830 ms  max=5.969 ms  mean=1.020 ms
+  PASS: p95 is below 100.000 ms
+```
+
+测量环境为 macOS + Python 3.11，单次 `revoke` 走父→子索引，不再每层扫描全部已签发凭证。`tools/benchmark_revocation.py` 不进入 CI：阈值依赖机器，CI 只验证级联结果与审计条数（`impl/tests/test_capability.py`）。跨进程扇出、持久账本读取和通知通道重试都不在这个数字里。
+
 ## 5. 设计决定
 
 ### 5.1 校验顺序
@@ -276,6 +289,10 @@ D-Bus 的 `native_id` 同时含 bus、interface、path 与 interface.method，�
 
 Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执行文件；macOS 用 `getpeereid` + `LOCAL_PEERPID`，再用 `proc_pidinfo` 补 uid/gid、用 `proc_pidpath` 取可执行文件。`PeerPolicy` 只检查显式设置的字段；但字段被设置而平台给不出值时返回 `AUTH_DENIED`，避免“无法验证”被当成“验证通过”。监听端在 `accept` 后立即检查，失败就关闭连接；拒绝的对端不会拿到任何协议消息。
 
+### 5.33 撤销按父→子索引传播
+
+`CapabilityAuthority.issue` 同时维护 `parent_cap_id → {child cap_id}`；`revoke` 从目标出发做一次广度优先遍历，每个凭证只访问一次。旧实现的“反复扫描全部已签发凭证直到不再变化”在深链上是 O(n²)，无法支撑 P95 基准。重复撤销返回 0 且不重复写审计，避免重试制造重复事件。
+
 ## 6. 已知限制
 
 1. **内存态**：幂等索引、注册表、轮换状态都在进程内，重启即丢；§7.8 要求可重建的持久索引，尚未实现。
@@ -298,6 +315,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
 19. **UDS 服务端是串行的**：`serve_forever` 一次只服务一个连接直到 EOF，没有连接并发、admission control、在途请求上限或 rate limit；§7.11 的隔离与背压仍是文字要求。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
+21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 
 ## 7. 与规范的偏差登记
 

@@ -24,8 +24,9 @@ Entries are written in English to match commit messages; the Chinese text in
 - `impl/osap/federation.py` (M2.5c): read-only projection of Android/Apple/Windows, MCP, A2A, D-Bus, and OpenAPI descriptors into capability records, preserving native identity, mapping namespaces deterministically, and capping external trust at `unverified`.
 - `impl/osap/audit.py` (M2.6): audit-chain verification with schema, trace, and hash-linkage checks; salted-commitment redacted export; idempotent replay; intent-only recovery marked `unknown`; cross-user authorization; and the 0.1 compromised-Bus declaration.
 - `impl/osap/transport.py` (M2.1b): an authenticated `AF_UNIX` stream server/client with length framing and one `Bus` per connection, a datagram message pair that preserves native boundaries without a prefix, and a fail-closed `PeerPolicy` over kernel-attested uid/gid/pid/executable (Linux `SO_PEERCRED`, macOS `getpeereid`/`LOCAL_PEERPID`).
-- `impl/tests/`: 325 unit tests covering framing, validation order, idempotency, deadlines, signatures, registration rejections, registry freshness, attenuation per dimension, revocation cascade, binding, receipt ordering, consent request TTLs and options, inert reservations, denial and revocation terminal states, receipt-expiry clamping, task state transitions, cancellation, delegation budgets, result contracts, handoff rejections, the context fabric's grant, expiry, label, egress, blackboard, delete, cache, storage, and memory rules, federated native-identity projection with external-trust normalization, real UDS stream and datagram round trips with connection isolation and peer authentication, and audit-chain verification, redaction, replay, recovery, and cross-user rules.
+- `impl/tests/`: 329 unit tests covering framing, validation order, idempotency, deadlines, signatures, registration rejections, registry freshness, attenuation per dimension, revocation cascade, binding, receipt ordering, consent request TTLs and options, inert reservations, denial and revocation terminal states, receipt-expiry clamping, task state transitions, cancellation, delegation budgets, result contracts, handoff rejections, the context fabric's grant, expiry, label, egress, blackboard, delete, cache, storage, and memory rules, federated native-identity projection with external-trust normalization, real UDS stream and datagram round trips with connection isolation and peer authentication, and audit-chain verification, redaction, replay, recovery, and cross-user rules.
 - `demo/run_demo.py` and `demo/README.md` (M2.7): a three-agent end-to-end demo that registers signed manifests, discovers a capability record, runs the L3 consent flow from request through activation, delegates to notes and calendar across two boundaries, resolves a memory context handle, and verifies plus redacts a 16-event audit chain with asserted trace completeness and side-effect-free recovery.
+- `tools/benchmark_revocation.py`: a local, CI-excluded revocation-propagation benchmark over a configurable tree; it measures from `revoke(root)` to every descendant reporting `is_revoked()` and enforces a p95 below 100 ms.
 - `tools/conformance_run.py`: loads and validates cases, applies JSON Pointer mutations, runs an implementation adapter, and emits text, JSON, or Markdown reports.
 - `docs/roadmap.md`: milestone plan from 0.1 to 0.2 (M0–M5, decision gates, risk register).
 - `SECURITY.md` / `SECURITY.en.md`: disclosure channel, timelines, security review triggers.
@@ -47,12 +48,13 @@ Entries are written in English to match commit messages; the Chinese text in
 - `conformance/cases/C3-authorization.json`: C3-04…C3-07 now name the pristine capability fixture as `context`, so the parent token is derived from it rather than from the mutated child. Expected outcomes and error codes are unchanged.
 - `conformance/cases/C0-transport.json`: C0-01 and C0-06 are now automated against real `AF_UNIX` sockets (stream handshake rejection and prefix-free message delivery); `conformance/case.schema.json` accepts the new `transport` operation.
 - `tools/conformance_run.py --stub`: now also checks case-ID coverage against `docs/conformance.md` and materialises every `input.ref`, `context`, and mutation, so a missing fixture or a bad JSON Pointer fails CI instead of being skipped.
+- `impl/osap/capability.py`: `CapabilityAuthority` now indexes `parent_cap_id → children` on issuance, so revocation walks each descendant once instead of rescanning every issued token per level; a repeated revocation returns 0 and writes no duplicate audit event.
 - CI now runs `python3 demo/run_demo.py` after the unit tests and the conformance suite.
 
 ### Planned
 
 - Persistent indexes and audit storage to replace the in-memory state.
-- A revocation-propagation P95 benchmark and the §7.11 admission-control/rate-limit rules.
+- The §7.11 admission-control and rate-limit rules.
 - Platform-native bindings (XPC, Binder, named pipe) and localhost mTLS with code-signature or package-identity peer checks.
 
 ## [0.1.0] - 2026-11-10
