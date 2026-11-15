@@ -70,6 +70,7 @@ OSAP 的目标不是“再发明一个 Agent 协议”，而是定义 **本地�
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献流程、DCO、内容规范 |
 | [`docs/roadmap.md`](docs/roadmap.md) | 0.1 → 0.2 里程碑、退出标准、风险登记与决策闸门（工作文档） |
 | [`docs/progress.md`](docs/progress.md) | 已完成里程碑、验证证据、剩余用例逐条拆分（工作记录） |
+| [`spec/formal/README.md`](spec/formal/README.md) | TLA+ 不变量模型、TLC 结果、模型边界（M3 工作记录） |
 | [`SECURITY.md`](SECURITY.md) | 漏洞披露渠道、时限、安全评审触发条件 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
 

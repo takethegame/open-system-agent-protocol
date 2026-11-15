@@ -15,7 +15,7 @@
 | M0 仓库可信化 | ✅ 完成 | 7/7 | 2026-11-12 |
 | M1 可执行一致性 | ✅ 完成 | 68/68 用例（100%） | 2026-11-12 |
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
-| M3 形式化不变量 | ⬜ 未开始 | 0/4 定理 | — |
+| M3 形式化不变量 | 🚧 进行中 | 4/4 不变量通过 TLC；Receipt 与 §8.11 待补 | — |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -27,9 +27,10 @@
 | JSON Schema | 12（协议）+ 3（一致性：case / suite / report）= 15 |
 | 示例 | 17 |
 | 一致性用例 | 68 / 68 |
-| 校验工具 | 4 |
-| Markdown 文件 | 22 |
-| 参考实现 | 19 个模块 + 适配器（4241 行）+ 329 个单元测试 |
+| 校验与基准工具 | 6 |
+| Markdown 文件 | 23 |
+| 参考实现 | 19 个模块 + 适配器（4253 行）+ 331 个单元测试 |
+| 形式化模型 | 2 个 TLA+ 模块 + 3 个配置 + `check.sh`（259 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
 | CI 工作流 | 1（Python 3.11 / 3.12） |
@@ -67,6 +68,7 @@
 | `f1b8453` | 2026-11-15 | **M2.4b**：同意请求、`cap_id` 预约、授权/拒绝、激活与撤销；演示第 3 节接入（309 tests） |
 | `47a3f4c` | 2026-11-15 | **M2.1b**：UDS stream、消息型 socketpair、对端认证；C0-01/C0-06 自动化（325 tests；累计 62 pass） |
 | `b95e2c9` | 2026-11-15 | **M2 退出标准**：撤销按父→子索引传播，P95 1.23 ms（1,555 节点、100 样本）；329 tests |
+| `c3268f6` | 2026-11-15 | **M3（第一段）**：TLA+ 能力/任务模型、6 条不变量、负向对照；发现并修复撤销后仍可派生（331 tests） |
 
 ---
 
@@ -253,7 +255,7 @@ C2/C4/C6 复用 `manifest.json`、`discovery-result.json`、`capability-record.j
 
 ---
 
-## 5. M2 — 参考实现（进行中）
+## 5. M2 — 参考实现（已完成）
 
 ### 5.1 交付物
 
@@ -271,7 +273,7 @@ C2/C4/C6 复用 `manifest.json`、`discovery-result.json`、`capability-record.j
 | `impl/osap/crypto.py` | 104 | Ed25519 签名与规范化 JSON | §4.5 | M2.2 |
 | `impl/osap/identity.py` | 127 | 注册、保留命名空间、App/公钥绑定 | §4.1–§4.4 | M2.2 |
 | `impl/osap/registry.py` | 208 | 清单、能力记录、发现、能力描述解析 | §6 | M2.2 |
-| `impl/osap/capability.py` | 246 | 能力凭证、衰减、绑定、撤销、风险前置 | §5.2–§5.7 | M2.3 |
+| `impl/osap/capability.py` | 258 | 能力凭证、衰减、绑定、撤销、风险前置 | §5.2–§5.7 | M2.3 |
 | `impl/osap/consent.py` | 120 | 同意回执与能力范围校验 | §5.8 | M2.4 |
 | `impl/osap/consent_flow.py` | 381 | 同意请求、`cap_id` 预约、授权/拒绝、激活、撤销 | §10.2、§10.3 | M2.4b |
 | `impl/osap/task.py` | 425 | 任务树、预算、取消、结果、handoff | §8.2–§8.10 | M2.5a |
@@ -282,13 +284,13 @@ C2/C4/C6 复用 `manifest.json`、`discovery-result.json`、`capability-record.j
 | `impl/adapter.py` | 761 | 一致性适配器 | — | M2.1a–M2.7 |
 | `demo/run_demo.py` | 575 | 三 Agent 端到端演示：注册、发现、同意、委派、上下文、审计 | §4–§10 | M2.7 |
 
-`impl/tests/` 有 329 个单元测试，覆盖分帧往返与边界、校验顺序、幂等、时钟回拨、错误码默认值、签名与篡改、注册拒绝路径、注册表 TTL 与发现过滤、衰减的十项规则（逐维度）、撤销级联、绑定三项、回执的校验顺序、同意请求的 TTL 与选项、预约的惰性、拒绝/撤销后不可激活、回执有效期钳制、任务状态机、取消传播、委派预算与深度、结果契约、handoff 的五类拒绝路径，上下文句柄的授权/过期/标签/出口/黑板/删除/缓存/存储/记忆边界，联邦投影的 MCP/A2A/D-Bus/OpenAPI 身份解析、外部信任归一与命名空间映射，UDS stream 与数据报消息绑定的真实往返、连接级握手隔离、超长帧与 8 MiB 上限、uid/gid/pid/可执行文件认证与 fail-closed 策略，以及审计链链接校验、脱敏承诺、回放幂等、恢复对账与跨用户边界。
+`impl/tests/` 有 331 个单元测试，覆盖分帧往返与边界、校验顺序、幂等、时钟回拨、错误码默认值、签名与篡改、注册拒绝路径、注册表 TTL 与发现过滤、衰减的十项规则（逐维度）、撤销级联、绑定三项、回执的校验顺序、同意请求的 TTL 与选项、预约的惰性、拒绝/撤销后不可激活、回执有效期钳制、任务状态机、取消传播、委派预算与深度、结果契约、handoff 的五类拒绝路径，上下文句柄的授权/过期/标签/出口/黑板/删除/缓存/存储/记忆边界，联邦投影的 MCP/A2A/D-Bus/OpenAPI 身份解析、外部信任归一与命名空间映射，UDS stream 与数据报消息绑定的真实往返、连接级握手隔离、超长帧与 8 MiB 上限、uid/gid/pid/可执行文件认证与 fail-closed 策略，以及审计链链接校验、脱敏承诺、回放幂等、恢复对账与跨用户边界。
 
 ### 5.2 验证证据
 
 ```
 python3 -m unittest discover -s impl/tests -t impl
-    → Ran 329 tests ... OK
+    → Ran 331 tests ... OK
 python3 tools/conformance_run.py --impl impl/adapter.py
     → 68 cases [C0..C7]: 62 pass, 0 fail, 6 skip
 python3 demo/run_demo.py
@@ -534,7 +536,65 @@ python3 tools/benchmark_revocation.py
 
 ---
 
-## 6. 待确认的规范问题
+## 6. M3 — 形式化不变量（进行中）
+
+### 6.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `spec/formal/Capability.tla` | 能力签发、衰减、撤销的 TLA+ 状态机 |
+| `spec/formal/Task.tla` | 任务树、预算、消耗、完成、取消与 `detached` 子树 |
+| `spec/formal/Capability.cfg` / `Task.cfg` | 正常配置，有限常量 |
+| `spec/formal/CapabilityBroken.cfg` | 负向对照：放宽衰减后必须报反例 |
+| `spec/formal/check.sh` | 依次运行两个正常配置与负向对照 |
+| `spec/formal/README.md` | 不变量到条文、结果、模型边界 |
+
+### 6.2 验证证据
+
+2026-11-15，`tla2tools` v1.7.4、TLC 2.19、单 worker：
+
+```
+spec/formal/check.sh
+→ Capability: Model checking completed. No error has been found.
+  61,267 states generated, 16,866 distinct states found
+→ Task:       Model checking completed. No error has been found.
+  78,551 states generated, 15,972 distinct states found
+→ CapabilityBroken: Invariant AttenuationMonotonic is violated.
+→ OK: Capability and Task have no violations; the broken attenuation control fails
+```
+
+四条不变量分别对应 §5.3、§5.5、§8.6、§8.7；`Task.tla` 另加 `NoOverConsumption` 与 `NoResultAfterCancel`，共六条断言。所有常量都在 `.cfg` 中限定，状态空间可枚举。
+
+### 6.3 模型发现的实现缺口
+
+`Capability.tla` 初版允许从已撤销的父能力继续 `Attenuate`。TLC 的反例是“先撤销根，再从根派生新能力”，此时 `RevocationCascade` 被破坏。参考实现当时同样只校验 schema 与索引，没有检查父能力是否已撤销。
+
+修复：
+
+- 已撤销的 `cap_id` 不能再 `issue`；
+- `parent_cap_id` 已撤销时拒绝派生，返回 `CAPABILITY_REVOKED`；
+- 新增两条单元测试固定这两个路径。
+
+### 6.4 设计决定
+
+| 决定 | 理由 |
+|---|---|
+| `Revoke` / `Cancel` 在一个原子步骤里做有界闭包 | 规范承诺的是可观察结果；把异步传播拆成多步会让“未传播完”的状态破坏不变量 |
+| 闭包用 `MaxDepth` 次迭代而不是无界递归 | TLC 可直接展开；模型中的树深由配置固定，超出深度的派生不会发生 |
+| `Task.tla` 的委托检查基于父任务“剩余预算” | 与 `impl/osap/task.py` 一致；`BudgetMonotonic` 只断言沿链不增长，避免把运行期消耗误当新上界 |
+| 取消把 `results` 清零 | 规范要求取消后子树不再产生新 `result`；已产生的结果留在审计里，不进入可用状态 |
+| `AllowWidening` 只服务负向对照 | 证明模型不是空转：放宽一条约束后 TLC 必须给出反例 |
+
+### 6.5 未建模
+
+1. `Receipt`（同意回执）与 `RevocationSet` 的持久化、分发与重放；
+2. §8.11 的 `intent` / `outcome` / `unknown` 崩溃对账三态；
+3. 跨进程通知、重试与传播时延（由 `tools/benchmark_revocation.py` 单独测量）；
+4. 错误码、JSON 编码、传输绑定与审计链。
+
+---
+
+## 7. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -550,16 +610,17 @@ python3 tools/benchmark_revocation.py
 
 ---
 
-## 7. 下一步（按顺序）
+## 8. 下一步（按顺序）
 
-1. 用持久账本替换内存索引，补上崩溃恢复、TTL 刷新与真实回放；
-2. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
-3. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
-4. 每个 PR 只对应一个 C 编号用例，避免过度设计。
+1. 完成 M3 剩余：`Receipt` / `RevocationSet` 的持久化状态、§8.11 的 `intent` / `outcome` / `unknown` 三态模型，可选 Alloy 补充；
+2. 用持久账本替换内存索引，补上崩溃恢复、TTL 刷新与真实回放；
+3. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
+4. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
+5. 每个 PR 只对应一个 C 编号用例，避免过度设计。
 
 ---
 
-## 8. 变更记录
+## 9. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -576,3 +637,4 @@ python3 tools/benchmark_revocation.py
 | 2026-11-15 | **M2.4b**（`f1b8453`）：同意消息流（请求、`cap_id` 预约、授权/拒绝、激活、撤销）；44 条单元测试，累计 309；演示第 3 节改为完整流程并增加 `consent.requested` 事件（16 条） |
 | 2026-11-15 | **M2.1b**（`47a3f4c`）：真实传输（UDS stream + 数据报消息绑定）与对端认证；C0-01/C0-06 自动化，C0 7/7；16 条集成测试，累计 325；剩余 6 条 manual |
 | 2026-11-15 | **M2 退出标准**（`b95e2c9`）：撤销传播改为父→子索引的一次遍历，重复撤销幂等；新增 `tools/benchmark_revocation.py`，实测 P95 1.23 ms；累计 329 tests |
+| 2026-11-15 | **M3（第一段）**（`c3268f6`）：`spec/formal/` 的 Capability/Task TLA+ 模型与 TLC 检查；负向对照证明模型非空转；TLC 发现“撤销后仍可派生”缺口，`issue` 改为返回 `CAPABILITY_REVOKED`；累计 331 tests |

@@ -70,6 +70,7 @@ For a more detailed positioning and prior work, see [`docs/prior-art.md`](docs/p
 | [`CONTRIBUTING.en.md`](CONTRIBUTING.en.md) | Contribution process, DCO, content rules |
 | [`docs/roadmap.md`](docs/roadmap.md) | Milestones from 0.1 to 0.2, exit criteria, risk register, decision gates (working document, Chinese) |
 | [`docs/progress.md`](docs/progress.md) | Completed milestones, verification evidence, per-case breakdown (working log, Chinese) |
+| [`spec/formal/README.md`](spec/formal/README.md) | TLA+ invariant models, TLC results, and model boundaries (M3 working log, Chinese) |
 | [`SECURITY.en.md`](SECURITY.en.md) | Vulnerability disclosure channel, timelines, security review triggers |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history |
 

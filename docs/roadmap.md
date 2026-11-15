@@ -236,18 +236,18 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 
 **任务**
 
-- [ ] 用 TLA+ 定义状态：`Capability`、`Task`、`Receipt`、`RevocationSet`
-- [ ] 建模 `Issue`、`Attenuate`、`Revoke`、`Delegate`、`Cancel`、`Consume`
-- [ ] 写出 4 条 `Invariant`，用 TLC 模型检查
+- [x] 用 TLA+ 定义状态：`Capability`、`Task`、`RevocationSet`（`Receipt` 待补）
+- [x] 建模 `Issue`、`Attenuate`、`Revoke`、`Delegate`、`Cancel`、`Consume`
+- [x] 写出 4 条 `Invariant`，用 TLC 模型检查（`spec/formal/`；Capability 61,267 状态、Task 78,551 状态无违例）
 - [ ] 用 Alloy 做补充（关系约束更直观），或只保留 TLA+
-- [ ] 把模型与规范条文的对应关系写成表（`spec/formal/README.md`）
+- [x] 把模型与规范条文的对应关系写成表（`spec/formal/README.md`）
 - [ ] 增加 §8.11 崩溃对账的三态模型（`intent` / `outcome` / `unknown`）
 
 **退出标准**
 
-- TLC 在限定状态空间内无违例；
-- 每个不变量都能指回具体小节编号；
-- 故意放宽一条约束时，模型检查能报出反例（证明模型不是空转）。
+- TLC 在限定状态空间内无违例（✅ `Capability.cfg`、`Task.cfg`）；
+- 每个不变量都能指回具体小节编号（✅ 见 `spec/formal/README.md` §2）；
+- 故意放宽一条约束时，模型检查能报出反例（✅ `CapabilityBroken.cfg` 报 `AttenuationMonotonic` 违例）。
 
 ---
 
