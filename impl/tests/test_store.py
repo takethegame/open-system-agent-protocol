@@ -46,6 +46,22 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(JsonStore(self.path).get("a"))
         store.delete("missing")
 
+    def test_put_many_replaces_sections_in_one_flush(self):
+        store = JsonStore(self.path)
+        store.put("a", 1)
+        store.put_many({"b": 2, "c": 3})
+        self.assertEqual(store.get("a"), 1)
+        self.assertEqual(store.get("b"), 2)
+        self.assertEqual(store.get("c"), 3)
+        reopened = JsonStore(self.path)
+        self.assertEqual(reopened.sections(), ["a", "b", "c"])
+        self.assertEqual(reopened.get("c"), 3)
+
+    def test_put_many_with_no_sections_is_a_noop(self):
+        store = JsonStore(self.path)
+        store.put_many({})
+        self.assertFalse(self.path.exists())
+
     def test_empty_file_reads_as_empty(self):
         self.path.write_text("", encoding="utf-8")
         self.assertEqual(JsonStore(self.path).sections(), [])

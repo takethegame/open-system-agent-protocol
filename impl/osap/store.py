@@ -54,10 +54,22 @@ class JsonStore:
         """Replace one section and flush the whole document atomically."""
 
         with self._lock:
-            candidate = dict(self._data)
-            candidate[section] = value
-            self._flush(candidate)
-            self._data = candidate
+            self._commit({section: value})
+
+    def put_many(self, sections: dict) -> None:
+        """Replace several sections in one atomic flush."""
+
+        with self._lock:
+            updates = dict(sections)
+            if not updates:
+                return
+            self._commit(updates)
+
+    def _commit(self, updates: dict) -> None:
+        candidate = dict(self._data)
+        candidate.update(updates)
+        self._flush(candidate)
+        self._data = candidate
 
     def delete(self, section: str) -> None:
         """Drop one section; a missing section is a no-op."""

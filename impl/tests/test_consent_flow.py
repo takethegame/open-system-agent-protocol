@@ -4,11 +4,12 @@
 
 import copy
 import json
+import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from osap import capability, consent, consent_flow, pcs
+from osap import JsonStore, capability, consent, consent_flow, pcs
 from osap.clock import parse_timestamp
 from osap.errors import OsapError
 
@@ -470,6 +471,155 @@ class ReceiptProofTests(unittest.TestCase):
     def test_pcs_key_is_public_only(self):
         flow, _, _ = flow_with()
         self.assertEqual(set(flow.pcs_key), {"kid", "public_key"})
+
+
+class PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "consent.json"
+
+    def flow(self, *, store=None, authority=None, clock=None, signer=None):
+        return consent_flow.ConsentFlow(
+            user=USER,
+            authority=authority,
+            clock=clock or Clock(),
+            signer=signer,
+            store=store or JsonStore(self.path),
+        )
+
+    def granted(self):
+        flow = self.flow()
+        payload = request_payload()
+        flow.request(payload)
+        flow.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
+        receipt = flow.grant(
+            payload["request_id"],
+            option="allow_once",
+            receipt_id="receipt_flow",
+        )
+        return flow, payload, receipt
+
+    def test_a_pending_request_survives_reopen(self):
+        payload = request_payload()
+        self.flow().request(payload)
+
+        reopened = self.flow()
+        record = reopened.requests[payload["request_id"]]
+        self.assertEqual(record["status"], "pending")
+        self.assertEqual(record["expires_at"], BASE + timedelta(minutes=10))
+        self.assertEqual(record["payload"], payload)
+
+    def test_reservation_and_grant_survive_reopen(self):
+        payload = request_payload()
+        first = self.flow()
+        first.request(payload)
+        first.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
+
+        second = self.flow()
+        self.assertEqual(second.reservations["cap_flow"]["status"], "reserved")
+        receipt = second.grant(
+            payload["request_id"],
+            option="allow_once",
+            receipt_id="receipt_flow",
+        )
+        self.assertTrue(second.signer.verify(receipt))
+
+        third = self.flow()
+        third.activate("receipt_flow", token_for(receipt))
+        self.assertTrue(third.usable("cap_flow"))
+
+    def test_receipt_and_signing_key_survive_reopen(self):
+        first, _, receipt = self.granted()
+        second = self.flow()
+        self.assertEqual(second.pcs_key, first.pcs_key)
+        self.assertTrue(
+            pcs.verify_receipt(
+                receipt,
+                second.pcs_key["public_key"],
+                kid=second.signer.kid,
+            )
+        )
+
+    def test_a_denial_survives_reopen(self):
+        payload = request_payload()
+        first = self.flow()
+        first.request(payload)
+        first.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
+        first.deny(payload["request_id"], reason="user_declined")
+
+        second = self.flow()
+        self.assertEqual(second.requests[payload["request_id"]]["status"], "denied")
+        self.assertEqual(second.reservations["cap_flow"]["status"], "cancelled")
+        with self.assertRaises(OsapError) as caught:
+            second.grant(payload["request_id"], receipt_id="receipt_late")
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+
+    def test_an_activated_reservation_survives_reopen(self):
+        first, _, receipt = self.granted()
+        first.activate("receipt_flow", token_for(receipt))
+
+        second = self.flow()
+        self.assertTrue(second.usable("cap_flow"))
+        with self.assertRaises(OsapError) as caught:
+            second.activate("receipt_flow", token_for(receipt))
+        self.assertEqual(caught.exception.code, "DUPLICATE")
+
+    def test_revocation_survives_reopen(self):
+        store = JsonStore(self.path)
+        first = self.flow(store=store, authority=capability.CapabilityAuthority(store=store))
+        payload = request_payload()
+        first.request(payload)
+        first.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
+        receipt = first.grant(
+            payload["request_id"],
+            option="allow_once",
+            receipt_id="receipt_flow",
+        )
+        token = token_for(receipt)
+        first.activate("receipt_flow", token)
+        first.revoke("receipt_flow")
+
+        authority = capability.CapabilityAuthority(store=store)
+        second = self.flow(store=store, authority=authority)
+        self.assertEqual(second.reservations["cap_flow"]["status"], "revoked")
+        self.assertTrue(authority.is_revoked(token))
+
+    def test_an_expired_status_survives_reopen(self):
+        clock = Clock()
+        payload = request_payload()
+        first = self.flow(clock=clock)
+        first.request(payload)
+        clock.advance(minutes=11)
+        with self.assertRaises(OsapError) as caught:
+            first.reserve_cap_id(payload["request_id"])
+        self.assertEqual(caught.exception.code, "POLICY_CONSENT_EXPIRED")
+
+        second = self.flow(clock=clock)
+        self.assertEqual(second.requests[payload["request_id"]]["status"], "expired")
+        with self.assertRaises(OsapError) as caught:
+            second.reserve_cap_id(payload["request_id"])
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        self.assertEqual(caught.exception.details["reason"], "expired")
+
+    def test_an_injected_signer_is_not_persisted(self):
+        store = JsonStore(self.path)
+        signer = pcs.ConsentSigner.generate(kid="injected")
+        flow = self.flow(store=store, signer=signer)
+        self.assertIs(flow.signer, signer)
+        self.assertIsNone(store.get(consent_flow.SIGNING_KEY_SECTION))
+
+    def test_a_corrupt_request_section_is_rejected(self):
+        store = JsonStore(self.path)
+        store.put(consent_flow.REQUESTS_SECTION, [])
+        with self.assertRaises(ValueError):
+            self.flow(store=store)
+
+    def test_a_corrupt_signing_key_is_rejected(self):
+        store = JsonStore(self.path)
+        store.put(consent_flow.SIGNING_KEY_SECTION, {"kid": "only-a-kid"})
+        with self.assertRaises(ValueError):
+            self.flow(store=store)
 
 
 class AuditTests(unittest.TestCase):

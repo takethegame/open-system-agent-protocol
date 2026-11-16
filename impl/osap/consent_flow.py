@@ -11,8 +11,11 @@ Reservations are deliberately inert. A reserved `cap_id` is not issued, so it
 fails routing and validity checks until `activate()` succeeds; a denied,
 revoked, or expired request can never promote it. Every grant is signed by the
 PCS `ConsentSigner` and `activate()` verifies that proof before issuing, so an
-Agent cannot self-sign its own consent. Everything is in memory and uses an
-injected clock, matching the rest of the reference implementation.
+Agent cannot self-sign its own consent.
+
+With a `JsonStore`, the requests, receipts, reservations, and a generated
+signing key survive a restart; the audit list stays in memory. The clock is
+injectable, matching the rest of the reference implementation.
 """
 
 from __future__ import annotations
@@ -26,10 +29,16 @@ from .capability import CapabilityAuthority
 from .clock import parse_timestamp
 from .errors import OsapError
 from .pcs import ConsentSigner
+from .store import JsonStore
 
 REQUEST_SCHEMA = "consent-request.schema.json"
 GRANT_OPTIONS = frozenset({"allow_once", "allow_task", "allow_ttl"})
 DENY_OPTION = "deny"
+
+REQUESTS_SECTION = "consent.requests"
+RECEIPTS_SECTION = "consent.receipts"
+RESERVATIONS_SECTION = "consent.reservations"
+SIGNING_KEY_SECTION = "consent.pcs_key"
 
 #: Default request lifetime when `intent_preview.ttl` is absent.
 DEFAULT_TTL = timedelta(minutes=10)
@@ -75,22 +84,101 @@ class ConsentFlow:
         policy_agent: str = "agent://system/policy#0",
         clock=None,
         signer: ConsentSigner | None = None,
+        store: JsonStore | None = None,
     ) -> None:
         self.user = user
         self.authority = authority
         self.policy_agent = policy_agent
         self._clock = clock or _now
-        self.signer = signer or ConsentSigner.generate()
+        self._store = store
         self.requests: dict[str, dict] = {}
         self.receipts: dict[str, dict] = {}
         self.reservations: dict[str, dict] = {}
         self.audit: list[dict] = []
+        if store is not None:
+            self._restore()
+        self.signer = self._restore_signer(signer)
 
     @property
     def pcs_key(self) -> dict:
         """The public half a verifier needs to check this flow's receipts."""
 
         return self.signer.key_record()
+
+    # --- persistence ------------------------------------------------------
+
+    def _restore_signer(self, injected: ConsentSigner | None) -> ConsentSigner:
+        if injected is not None:
+            return injected
+        if self._store is None:
+            return ConsentSigner.generate()
+        stored = self._store.get(SIGNING_KEY_SECTION)
+        if stored is None:
+            generated = ConsentSigner.generate()
+            self._store.put(
+                SIGNING_KEY_SECTION,
+                {
+                    "kid": generated.kid,
+                    "private_key": generated.export_private(),
+                    "public_key": generated.public_key,
+                },
+            )
+            return generated
+        if not isinstance(stored, dict):
+            raise ValueError(f"{SIGNING_KEY_SECTION!r} must be a JSON object")
+        private = stored.get("private_key")
+        kid = stored.get("kid")
+        if not isinstance(private, str) or not isinstance(kid, str):
+            raise ValueError(f"{SIGNING_KEY_SECTION!r} needs a private_key and a kid")
+        restored = ConsentSigner(private, kid=kid)
+        if stored.get("public_key") not in (None, restored.public_key):
+            raise ValueError(f"{SIGNING_KEY_SECTION!r} public_key does not match")
+        return restored
+
+    def _restore(self) -> None:
+        requests = self._read_section(REQUESTS_SECTION)
+        receipts = self._read_section(RECEIPTS_SECTION)
+        reservations = self._read_section(RESERVATIONS_SECTION)
+        for request_id, record in requests.items():
+            if not isinstance(record, dict):
+                raise ValueError(f"consent request {request_id!r} must be a JSON object")
+            try:
+                record["requested_at"] = parse_timestamp(record["requested_at"])
+                record["expires_at"] = parse_timestamp(record["expires_at"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"consent request {request_id!r} has bad timestamps") from error
+        self.requests = requests
+        self.receipts = receipts
+        self.reservations = reservations
+
+    def _read_section(self, section: str) -> dict:
+        loaded = self._store.get(section)
+        if loaded is None:
+            return {}
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{section!r} must be a JSON object")
+        return loaded
+
+    def _persist(self) -> None:
+        if self._store is None:
+            return
+        self._store.put_many(
+            {
+                REQUESTS_SECTION: {
+                    request_id: self._stored_request(record)
+                    for request_id, record in self.requests.items()
+                },
+                RECEIPTS_SECTION: self.receipts,
+                RESERVATIONS_SECTION: self.reservations,
+            }
+        )
+
+    @staticmethod
+    def _stored_request(record: dict) -> dict:
+        stored = dict(record)
+        stored["requested_at"] = _stamp(record["requested_at"])
+        stored["expires_at"] = _stamp(record["expires_at"])
+        return stored
 
     # --- request ----------------------------------------------------------
 
@@ -124,6 +212,7 @@ class ConsentFlow:
                 "agent": payload["agent"],
             }
         )
+        self._persist()
         return {
             "osap": "0.1",
             "type": "consent.request",
@@ -150,6 +239,7 @@ class ConsentFlow:
             )
         if record["expires_at"] <= self._clock():
             record["status"] = "expired"
+            self._persist()
             raise OsapError(
                 "POLICY_CONSENT_EXPIRED",
                 "consent request has expired",
@@ -175,6 +265,7 @@ class ConsentFlow:
             "status": "reserved",
             "receipt_id": None,
         }
+        self._persist()
         return reserved
 
     # --- user decision ----------------------------------------------------
@@ -262,6 +353,7 @@ class ConsentFlow:
                 "cap_id": cap_id,
             }
         )
+        self._persist()
         return receipt
 
     def deny(
@@ -288,6 +380,7 @@ class ConsentFlow:
                 "cap_id": cap_id,
             }
         )
+        self._persist()
         return {
             "request_id": request_id,
             "decision": "deny",
@@ -362,6 +455,7 @@ class ConsentFlow:
                 "cap_id": token["cap_id"],
             }
         )
+        self._persist()
         return token
 
     def usable(self, cap_id: str) -> bool:
@@ -388,4 +482,5 @@ class ConsentFlow:
         self.audit.append(
             {"action": "capability.revoked", "receipt_id": receipt_id, "cap_id": cap_id}
         )
+        self._persist()
         return revoked

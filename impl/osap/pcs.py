@@ -108,3 +108,8 @@ class ConsentSigner:
         """The public half a verifier needs; never include the private key."""
 
         return {"kid": self.kid, "public_key": self.public_key}
+
+    def export_private(self) -> str:
+        """Return the private key for a 0600 store; never send it over a Bus."""
+
+        return self._private_b64
