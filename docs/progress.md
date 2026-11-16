@@ -17,6 +17,7 @@
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
 | M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
 | 持久化基础（M4 前置） | ✅ 完成 | 幂等索引与能力签发/撤销跨重启；原子写入、0600、失败回滚；358 tests | 2026-11-16 |
+| PCS 回执签名（M4 前置） | ✅ 完成 | Ed25519 签名 + 离线验签；`activate` 先验签；375 tests | 2026-11-16 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -30,7 +31,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 20 个模块 + 适配器（4467 行）+ 358 个单元测试 |
+| 参考实现 | 21 个模块 + 适配器（4593 行）+ 375 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -72,6 +73,7 @@
 | `c3268f6` | 2026-11-15 | **M3（第一段）**：TLA+ 能力/任务模型、6 条不变量、负向对照；发现并修复撤销后仍可派生（331 tests） |
 | `17c11ad` | 2026-11-15 | **M3 完成**：同意顺序与 §8.11 崩溃对账模型；四个模型、两个负向对照全部通过 |
 | `48e744e` | 2026-11-16 | **持久化基础**：`JsonStore` 原子分节 JSON；幂等索引与能力签发/撤销跨重启；共享 store 隔离；27 条新测试，累计 358 |
+| `092c710` | 2026-11-16 | **PCS 回执签名**：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签；17 条新测试，累计 375 |
 
 ---
 
@@ -657,7 +659,50 @@ TLA2TOOLS_JAR=... spec/formal/check.sh
 
 ---
 
-## 8. 待确认的规范问题
+## 8. PCS 回执签名（M4 前置，已完成）
+
+### 8.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/pcs.py` | `sign_receipt` / `verify_receipt` / `require_verified_receipt`；`ConsentSigner` 持有 Ed25519 私钥，只导出 `{kid, public_key}` |
+| `impl/osap/consent_flow.py` | `ConsentFlow` 默认生成签名者；`grant` 签回执，`activate` 在检查预约前先验签；可注入稳定 signer |
+| `impl/tests/test_pcs.py` | 签名确定性、篡改字段、错误密钥、`kid` 不匹配、畸形 proof、未知密钥 |
+| `impl/tests/test_consent_flow.py` | 注入 signer、Agent 自签回执、篡改回执、缺 proof 均无法激活；`pcs_key` 只含公钥 |
+| `demo/run_demo.py` | grant 后用 PCS 公钥独立验签，结尾增加 `receipt=verified` |
+
+### 8.2 语义
+
+- **签名范围**：与清单签名共用 `crypto.canonical_bytes`，但 `drop=("proof",)`；`proof` 是算法、`kid`、签名值等元数据，不参与被签正文。
+- **验签顺序**：`activate` 取到回执后先验签，再检查预约是 `cancelled` / `revoked` / `active`。伪造或篡改的回执只能得到 `AUTH_DENIED`，不能通过错误差异探测 `cap_id` 状态。
+- **错误码**：§7.7 的 `AUTH_DENIED` 已覆盖“签名校验失败”，不新增码；`details.reason` 区分 `receipt_signature_invalid` 与 `receipt_key_unknown`。
+- **Agent 不能自签**：签名私钥只存在于 `ConsentSigner`；用另一把密钥重签同一正文，即使 `kid` 相同也无法通过 `ConsentSigner.require`。
+- **离线验证**：验证方只需要 PCS 公钥；`examples/consent-receipt.json` 仍是范围校验夹具，其占位 `proof` 不进入验签路径。
+
+### 8.3 验证证据
+
+2026-11-16，提交 `092c710`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 375 tests ... OK
+
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ ... consent=1 receipt=verified delegated=2 ... audit=verified
+```
+
+### 8.4 已知边界
+
+1. 默认签名密钥是进程内一次性生成；跨重启或跨进程验签必须注入并保存同一把密钥；
+2. PCS 公钥的登记、轮换与撤销没有协议；验证方需要带外获得公钥；
+3. 能力凭证 `proof` 仍是结构校验，未由 CA 私钥覆盖；
+4. 示例回执的 `proof` 是占位串；只有 `ConsentFlow` 产出的回执进入验签路径。
+
+---
+
+## 9. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -673,17 +718,17 @@ TLA2TOOLS_JAR=... spec/formal/check.sh
 
 ---
 
-## 9. 下一步（按顺序）
+## 10. 下一步（按顺序）
 
-1. 把审计账本、上下文、任务树与同意流程接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
-2. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
+1. 把审计账本、上下文、任务树与同意请求/回执/预约接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
+2. 定义 PCS 公钥的登记、轮换与撤销，并把 `ConsentFlow` 的签名密钥持久化；
 3. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
 
 ---
 
-## 10. 变更记录
+## 11. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -703,3 +748,4 @@ TLA2TOOLS_JAR=... spec/formal/check.sh
 | 2026-11-15 | **M3（第一段）**（`c3268f6`）：`spec/formal/` 的 Capability/Task TLA+ 模型与 TLC 检查；负向对照证明模型非空转；TLC 发现“撤销后仍可派生”缺口，`issue` 改为返回 `CAPABILITY_REVOKED`；累计 331 tests |
 | 2026-11-15 | **M3 完成**（`17c11ad`）：新增 `Consent.tla`（预约→授权→激活→撤销）与 `Recovery.tla`（intent/outcome/unknown）；`check.sh` 扩到四个正常模型与两个负向对照；M3 退出标准全部满足 |
 | 2026-11-16 | **持久化基础**（`48e744e`）：`JsonStore` 原子分节写入；幂等索引与能力签发/撤销跨重启；`Bus` 可注入 store；新增 27 条测试，累计 358；`docs/standard.md` 语义未改 |
+| 2026-11-16 | **PCS 回执签名**（`092c710`）：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签再查预约；新增 17 条测试，累计 375；演示增加 `receipt=verified` |

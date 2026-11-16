@@ -1,6 +1,6 @@
-# 参考实现（M2.1 – M2.7）
+# 参考实现（M2.1 – M2.7 + 持久化 / PCS）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等与能力状态持久化（M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等与能力状态持久化、PCS 回执签名与离线验签（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -36,6 +36,8 @@
 | 授权与拒绝 | §10.2、§10.3 | 只接受请求提供的选项；`allow_once` 强制 `max_uses=1`；拒绝返回原因码与替代方案 |
 | 同意激活 | §10.3 | 回执范围校验通过后才 `issue`；重复激活报 `DUPLICATE`；过期回执不可激活 |
 | 同意撤销 | §5.5、§10.3 | 回执撤销级联到已签发能力；未激活的预约直接作废 |
+| 回执签名 | §10.4 | Ed25519 覆盖去掉 `proof` 的规范化 JSON；`activate` 先验签再查预约，Agent 不能自签 |
+| 离线验签 | §10.4 | `pcs.verify_receipt` / `ConsentSigner.verify` 只依赖声明的 PCS 公钥 |
 | 任务树 | §8.2、§8.10 | 父/子索引、状态机与非法转换拒绝 |
 | 委派 | §8.3、§8.5 | 子任务预算 ≤ 父剩余、深度 = 父 + 1、重复 `task_id` 拒绝 |
 | 预算 | §8.6 | 逐维比较；运行期超支报 `TASK_BUDGET_EXCEEDED` |
@@ -86,6 +88,7 @@ impl/
     framing.py          §7.9 两种分帧绑定
     identity.py         注册、保留命名空间、App/公钥绑定
     idempotency.py      §7.8 幂等索引
+    pcs.py              §10.4 PCS 回执签名与离线验签
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等与能力状态）
@@ -275,9 +278,9 @@ D-Bus 的 `native_id` 同时含 bus、interface、path 与 interface.method，�
 
 `grant` 接受调用方给出的 `expires_at`，但最终值取 `min(请求到期, 回执到期)`：用户同意的是这次请求的范围与时限，回执不能把窗口延长到请求之外。`allow_once` 不依赖调用方参数，直接写 `max_uses=1`。
 
-### 5.29 开发期回执的 proof 是占位
+### 5.29 回执签名与范围校验分离
 
-`consent_flow` 生成的回执结构完整并通过 schema，但 `proof.kid` 与 `proof.sig` 是固定占位串；参考实现还没有 PCS 用户密钥，验签链路留给后续里程碑。`consent.validate` 因此只校验范围与时间，不验证 `proof`。
+`consent.validate` 只回答“回执范围是否覆盖能力”；签名验证由 `pcs.require_verified_receipt` 独立完成，`ConsentFlow.activate` 在检查预约状态与范围前先验签。离线审计方可以只验签而不持有能力，也可以只做范围比对；`examples/consent-receipt.json` 仍是范围校验夹具，其 `proof` 不参与验签路径。
 
 ### 5.30 流式绑定用真实的 UDS 监听/连接
 
@@ -301,6 +304,12 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 推荐同一个路径只开一个 `JsonStore` 并让 Bus 与 `CapabilityAuthority` 共享：两个实例各自持有整份快照，后写者会覆盖前者的 section。`CapabilityAuthority` 加载时从 `issued` 重建父→子索引，因此重启后 `revoke(parent)` 仍能级联；`Bus` 命中已落盘的 `id` 时只回放结果，不再执行副作用。
 
+### 5.35 回执签名覆盖去掉 `proof` 的规范化 JSON
+
+`pcs.sign_receipt` 与清单签名共用 `crypto.canonical_bytes`：key 排序、最小分隔符的 UTF-8 JSON，但 `drop=("proof",)`。`proof` 本身是签名元数据（算法、`kid`、签名值），不参与被签正文；这与 JWS 把 `kid` 放在头部、不放进 payload 的做法一致。
+
+`ConsentFlow` 默认生成一个进程内 `ConsentSigner`，`grant` 用私钥签回执，`activate` 在检查预约状态前先验签。验签失败返回 `AUTH_DENIED`，`details.reason` 区分 `receipt_signature_invalid` 与 `receipt_key_unknown`；§7.7 的 `AUTH_DENIED` 明确包含“签名校验失败”，因此不新增错误码。固定顺序保证伪造回执无法通过错误差异探测预约是否已激活。
+
 ## 6. 已知限制
 
 1. **部分内存态**：幂等索引与能力的签发/撤销可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文、任务与同意流程仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
@@ -319,7 +328,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 14. **审计只在内存**：`ContextFabric`、`TaskBoard` 与审计模块都不持久化；重启恢复与真实回放需要持久账本，C7-01 仍是 manual。
 15. **62 个 pass 覆盖全部 automated 用例**，但不覆盖 6 条 manual 的运行时、跨进程与崩溃恢复语义。
 16. **同意流程只在内存**：`ConsentFlow.requests` / `receipts` / `reservations` 都是进程内字典，重启即丢；没有持久化的用户决策日志，也不会把同一请求广播给多个 Bus。
-17. **回执未验签**：`ConsentFlow` 生成的 `proof` 是占位串；PCS 用户密钥的分发与 Ed25519 验签尚未接入。
+17. **回执签名有本地密钥，无分发协议**：`ConsentFlow` 现在用 Ed25519 签回执并在 `activate` 验签，但默认密钥是进程内一次性生成；PCS 公钥如何登记、轮换与撤销尚未定义，示例夹具仍是占位签名，验签密钥需要带外分发。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
 19. **UDS 服务端是串行的**：`serve_forever` 一次只服务一个连接直到 EOF，没有连接并发、admission control、在途请求上限或 rate limit；§7.11 的隔离与背压仍是文字要求。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
@@ -334,6 +343,8 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 | 注册表索引失败的错误码 | 规范未为 RFS 定义专用错误码 | 沿用 C2-01/C2-06 的 `SCHEMA_INVALID`，与用例保持一致 |
 | 签名规范化 | 未采用完整 RFC 8785 | 采用 key 排序的 UTF-8 JSON，并在 `crypto.py` 里写明；M4 打包时再对齐 |
 | 能力凭证 `proof` | 规范要求“MUST 是签名对象”，实现未验签 | 只校验结构；密钥分发与验签待补 |
+| 回执验签失败的错误码 | §7.7 没有回执专用码 | 用标准码 `AUTH_DENIED`，`details.reason` 区分 `receipt_signature_invalid` 与 `receipt_key_unknown` |
+| 示例回执的 `proof` | 夹具签名是占位串，未绑定任何 PCS 公钥 | 只用于范围校验用例；真实回执由 `ConsentSigner` 生成并可离线验签 |
 | 回执中的 `agent` | §5.8 未明确要求回执绑定能力 `subject` | 实现额外校验 `receipt.agent == capability.subject`，不改变任何用例结果 |
 | `audience` 与 `actions` 的检查顺序 | 规范未规定 | 固定为 `cap_id` → `task_id` → `audience` → `actions` → `resources`，保证同一输入总是同一错误码 |
 | 委派超预算的错误码 | §8.6 只定义了执行期超支 | 委派阶段用 `POLICY_DENIED`，执行期用 `TASK_BUDGET_EXCEEDED` |

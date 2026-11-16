@@ -17,7 +17,7 @@ python3 demo/run_demo.py
 
 ```text
 == demo complete ==
-registered=3 discovery=1 consent=1 delegated=2 context=1 audit=verified
+registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
 trace=complete redaction=verified recovery=complete
 ```
 
@@ -29,12 +29,12 @@ trace=complete redaction=verified recovery=complete
 |---|---|---|---|
 | 1. 清单与注册 | `crypto.sign_document`、`identity.Registrar` | §4.1–§4.5、§7.1 | C1-01…C1-06 |
 | 2. 能力发现 | `registry.Registry.index_record` / `discover` | §6.5、§6.6 | C2-02、C2-03 |
-| 3. 同意流程与能力 | `consent_flow.ConsentFlow.request` / `reserve_cap_id` / `grant` / `activate` | §5.2–§5.8、§10.2–§10.3 | C3-02、C3-03 |
+| 3. 同意流程与能力 | `consent_flow.ConsentFlow.request` / `reserve_cap_id` / `grant` / `activate`、`pcs.verify_receipt` | §5.2–§5.8、§10.2–§10.4 | C3-02、C3-03 |
 | 4. 两次委派与结果 | `task.TaskBoard.delegate` / `transition` / `accept_result` | §8.3–§8.8 | C4-02、C4-03、C4-07 |
 | 5. 上下文解析 | `context.ContextFabric.resolve` | §9.2–§9.4 | C5-01、C5-10 |
 | 6. 审计链与导出 | `audit.verify_chain` / `redact_chain` / `recover_effects` / `trace_complete` | §8.11、§10.5–§10.6 | C7-02、C7-03、C7-06 |
 
-第 3 节不是手工拼回执：`ConsentFlow` 依次完成 `request` → `reserve_cap_id` → `grant` → `activate`。预约的 `cap_id` 在激活前对 `usable()` 为假，用户授权也不会自动签发能力；只有 `activate` 通过回执范围校验后才调用 `CapabilityAuthority.issue`。
+第 3 节不是手工拼回执：`ConsentFlow` 依次完成 `request` → `reserve_cap_id` → `grant` → `activate`。预约的 `cap_id` 在激活前对 `usable()` 为假，用户授权也不会自动签发能力；`grant` 用 PCS 私钥签回执，`activate` 先验签、再通过回执范围校验，最后才调用 `CapabilityAuthority.issue`。演示还用 `pcs.verify_receipt` 仅凭 PCS 公钥独立核对签名。
 
 任务树有两条并列支路：`supervisor → notes` 与 `supervisor → calendar`，因此跨过两个委派边界；三条 `trace_id` 相同的消息链（discover → notes delegate/result → calendar delegate/result）证明 trace 完整性。
 
