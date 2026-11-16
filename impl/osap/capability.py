@@ -16,8 +16,12 @@ from datetime import datetime, timezone
 from . import schema
 from .clock import parse_timestamp
 from .errors import OsapError
+from .store import JsonStore
 
 CAPABILITY_SCHEMA = "capability.schema.json"
+
+ISSUED_SECTION = "capability.issued"
+REVOKED_SECTION = "capability.revoked"
 
 HIGH_RISK = frozenset({"L3", "L4"})
 
@@ -132,14 +136,50 @@ def attenuate(parent: dict, requested: dict) -> dict:
 
 
 class CapabilityAuthority:
-    """In-memory CA: issuance, revocation with cascade, and use checks."""
+    """Issuance, revocation with cascade, and use checks.
 
-    def __init__(self, *, clock=None) -> None:
+    Passing a `JsonStore` persists the issuance log and the revoked set; a new
+    authority built over the same store rebuilds the `parent -> children` index
+    so revocation still cascades after a restart.
+    """
+
+    def __init__(self, *, clock=None, store: JsonStore | None = None) -> None:
         self._clock = clock or _now
+        self._store = store
         self.issued: dict[str, dict] = {}
         self.revoked: set[str] = set()
         self.audit: list[dict] = []
         self._children: dict[str, set[str]] = {}
+        if store is not None:
+            self._restore()
+
+    def _restore(self) -> None:
+        issued = self._store.get(ISSUED_SECTION)
+        if issued is None:
+            issued = {}
+        if not isinstance(issued, dict):
+            raise ValueError(f"{ISSUED_SECTION!r} must be a JSON object")
+        revoked = self._store.get(REVOKED_SECTION)
+        if revoked is None:
+            revoked = []
+        if not isinstance(revoked, list):
+            raise ValueError(f"{REVOKED_SECTION!r} must be a JSON array")
+        self.issued = issued
+        self.revoked = set(revoked)
+        self._children = {}
+        for cap_id, token in issued.items():
+            parent = token.get("parent_cap_id") if isinstance(token, dict) else None
+            if parent is not None:
+                self._children.setdefault(parent, set()).add(cap_id)
+
+    def _persist_issued(self) -> None:
+        if self._store is not None:
+            self._store.put(ISSUED_SECTION, self.issued)
+
+    def _persist_revoked(self) -> None:
+        if self._store is not None:
+            # Sorted so the file is deterministic and diff-friendly.
+            self._store.put(REVOKED_SECTION, sorted(self.revoked))
 
     def issue(self, token: dict) -> dict:
         validate_token(token)
@@ -167,6 +207,7 @@ class CapabilityAuthority:
         self.issued[cap_id] = token
         if parent is not None:
             self._children.setdefault(parent, set()).add(cap_id)
+        self._persist_issued()
         return token
 
     def revoke(self, cap_id: str) -> int:
@@ -186,6 +227,8 @@ class CapabilityAuthority:
             self.audit.append({"action": "capability.revoked", "target": current})
             count += 1
             queue.extend(self._children.get(current, ()))
+        if count:
+            self._persist_revoked()
         return count
 
     def is_revoked(self, token: dict) -> bool:

@@ -3,10 +3,11 @@
 """Unit tests for the Bus core (standard.md §7.1, §7.7, §7.8)."""
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from osap import Bus, OsapError, envelope
+from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope
 from osap.clock import Deadline
 from osap.clock import parse_timestamp
 
@@ -75,6 +76,49 @@ class RoutingTests(unittest.TestCase):
         envelope.validate(reply)
         self.assertEqual(reply["body"]["data"]["code"], "POLICY_DENIED")
         self.assertEqual(reply["causation_id"], message["id"])
+
+
+class PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "state.json"
+
+    def test_duplicate_after_restart_is_replayed_without_side_effects(self):
+        message = load("request.json")
+
+        first = Bus(store=self.path)
+        first.handshake({"osap": "0.1"})
+        self.assertFalse(first.receive(message)["replayed"])
+        self.assertEqual(first.side_effects, 1)
+
+        second = Bus(store=self.path)
+        second.handshake({"osap": "0.1"})
+        reply = second.receive(message)
+        self.assertTrue(reply["replayed"])
+        self.assertEqual(second.side_effects, 0)
+        self.assertEqual(second.replays, 1)
+
+    def test_explicit_index_is_used(self):
+        index = IdempotencyIndex()
+        self.assertIs(Bus(idempotency=index).idempotency, index)
+
+    def test_store_and_index_are_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            Bus(store=self.path, idempotency=IdempotencyIndex())
+
+    def test_a_shared_store_carries_more_than_one_subsystem(self):
+        store = JsonStore(self.path)
+        bus = Bus(store=store)
+        bus.handshake({"osap": "0.1"})
+        bus.receive(load("request.json"))
+        authority = capability.CapabilityAuthority(store=store)
+        token = load("capability.json")
+        authority.issue(token)
+        self.assertEqual(
+            JsonStore(self.path).sections(),
+            ["capability.issued", "idempotency"],
+        )
 
 
 class ClockTests(unittest.TestCase):

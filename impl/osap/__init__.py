@@ -17,7 +17,10 @@ Covered so far:
   fabric handles, labels, blackboard, objects (§9); federation adapters
   projecting native descriptors into capability records (§6.7, §6.8);
 - M2.6: audit-chain verification, redacted export, replay, and recovery
-  (§10.5–§10.7, §8.11).
+  (§10.5–§10.7, §8.11);
+- persistence: a sectioned, atomic `JsonStore` that backs the idempotency
+  index and capability issuance/revocation state so a restart replays instead
+  of re-executing (§7.8, §5.5).
 """
 
 from . import (
@@ -31,6 +34,7 @@ from . import (
     identity,
     registry,
     schema,
+    store,
     task,
     transport,
 )
@@ -40,12 +44,14 @@ from .envelope import KNOWN_TYPES, SUPPORTED_MAJOR, validate
 from .errors import STANDARD_CODES, OsapError
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
+from .store import JsonStore
 
 __all__ = [
     "Binding",
     "Bus",
     "Deadline",
     "IdempotencyIndex",
+    "JsonStore",
     "KNOWN_TYPES",
     "MAX_FRAME_BYTES",
     "OsapError",
@@ -61,6 +67,7 @@ __all__ = [
     "identity",
     "registry",
     "schema",
+    "store",
     "task",
     "transport",
     "validate",

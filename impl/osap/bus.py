@@ -9,12 +9,14 @@ so the conformance adapter can report them as `skip` rather than `fail`.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from . import envelope, framing
 from .clock import Deadline
 from .errors import OsapError
 from .idempotency import IdempotencyIndex
+from .store import JsonStore
 
 AWAITING_HELLO = "awaiting_hello"
 READY = "ready"
@@ -25,18 +27,34 @@ def _now() -> str:
 
 
 class Bus:
-    """A single-user, in-process Bus."""
+    """A single-user, in-process Bus.
+
+    The idempotency index is memory-only by default. Pass `store` (a file path
+    or a shared `JsonStore`) or an explicit `idempotency` index to replay
+    duplicates across a restart instead of re-executing their side effects.
+    """
 
     def __init__(
         self,
         *,
         binding: framing.Binding = framing.Binding.STREAM,
         version: str = "0.1",
+        idempotency: IdempotencyIndex | None = None,
+        store: JsonStore | str | os.PathLike[str] | None = None,
     ) -> None:
+        if idempotency is not None and store is not None:
+            raise ValueError("pass either idempotency or store, not both")
+        if idempotency is None:
+            if isinstance(store, JsonStore):
+                idempotency = IdempotencyIndex(store=store)
+            elif store is not None:
+                idempotency = IdempotencyIndex(store=JsonStore(store))
+            else:
+                idempotency = IdempotencyIndex()
         self.binding = binding
         self.version = version
         self.state = AWAITING_HELLO
-        self.idempotency = IdempotencyIndex()
+        self.idempotency = idempotency
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []

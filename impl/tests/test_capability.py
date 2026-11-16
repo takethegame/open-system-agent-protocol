@@ -4,11 +4,13 @@
 
 import copy
 import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from osap import OsapError, capability
+from osap.store import JsonStore
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -340,6 +342,83 @@ class ConsentRequirementTests(unittest.TestCase):
 
     def test_l3_with_a_receipt_is_accepted(self):
         self.authority.require_consent(token(), risk="L3")
+
+
+class PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "state.json"
+
+    def authority(self) -> capability.CapabilityAuthority:
+        return capability.CapabilityAuthority(store=JsonStore(self.path))
+
+    def chain(self) -> tuple[dict, dict, dict]:
+        root = parent()
+        middle = token()
+        middle["cap_id"] = "cap_middle"
+        middle["parent_cap_id"] = PARENT_ID
+        leaf = token()
+        leaf["cap_id"] = "cap_leaf"
+        leaf["parent_cap_id"] = "cap_middle"
+        return root, middle, leaf
+
+    def test_issued_tokens_survive_reopen(self):
+        first = self.authority()
+        first.issue(token())
+        second = self.authority()
+        self.assertIn(CHILD_ID, second.issued)
+        self.assertEqual(second.issued[CHILD_ID], token())
+
+    def test_revocation_survives_reopen(self):
+        first = self.authority()
+        first.issue(token())
+        first.revoke(CHILD_ID)
+
+        second = self.authority()
+        self.assertTrue(second.is_revoked(token()))
+        with self.assertRaises(OsapError) as caught:
+            second.check_validity(token(), now=VALID_AT)
+        self.assertEqual(caught.exception.code, "CAPABILITY_REVOKED")
+
+    def test_cascade_index_is_rebuilt_on_load(self):
+        first = self.authority()
+        for item in self.chain():
+            first.issue(item)
+
+        second = self.authority()
+        self.assertEqual(second.revoke(PARENT_ID), 3)
+        for item in self.chain():
+            self.assertTrue(second.is_revoked(item))
+
+    def test_revoked_parent_blocks_new_children_after_reopen(self):
+        self.authority().issue(parent())
+        self.authority().revoke(PARENT_ID)
+
+        second = self.authority()
+        with self.assertRaises(OsapError) as caught:
+            second.issue(token())
+        self.assertEqual(caught.exception.code, "CAPABILITY_REVOKED")
+
+    def test_unissued_revocation_survives_reopen(self):
+        self.authority().revoke(PARENT_ID)
+        self.assertTrue(self.authority().is_revoked(token()))
+
+    def test_revoked_section_is_sorted(self):
+        authority = self.authority()
+        for item in self.chain():
+            authority.issue(item)
+        authority.revoke(PARENT_ID)
+        self.assertEqual(
+            JsonStore(self.path).get(capability.REVOKED_SECTION),
+            [PARENT_ID, "cap_leaf", "cap_middle"],
+        )
+
+    def test_audit_is_not_persisted(self):
+        first = self.authority()
+        first.issue(token())
+        first.revoke(CHILD_ID)
+        self.assertEqual(self.authority().audit, [])
 
 
 if __name__ == "__main__":
