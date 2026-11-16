@@ -1,6 +1,6 @@
 # OSAP 进展记录
 
-> 更新时间：2026-11-12
+> 更新时间：2026-11-16
 > 关联规划：[`roadmap.md`](roadmap.md)
 > 性质：工作记录（非规范性）。规范性内容以 [`standard.md`](standard.md) 为准。
 
@@ -16,6 +16,7 @@
 | M1 可执行一致性 | ✅ 完成 | 68/68 用例（100%） | 2026-11-12 |
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
 | M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
+| 持久化基础（M4 前置） | ✅ 完成 | 幂等索引与能力签发/撤销跨重启；原子写入、0600、失败回滚；358 tests | 2026-11-16 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -29,7 +30,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 19 个模块 + 适配器（4253 行）+ 331 个单元测试 |
+| 参考实现 | 20 个模块 + 适配器（4467 行）+ 358 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -70,6 +71,7 @@
 | `b95e2c9` | 2026-11-15 | **M2 退出标准**：撤销按父→子索引传播，P95 1.23 ms（1,555 节点、100 样本）；329 tests |
 | `c3268f6` | 2026-11-15 | **M3（第一段）**：TLA+ 能力/任务模型、6 条不变量、负向对照；发现并修复撤销后仍可派生（331 tests） |
 | `17c11ad` | 2026-11-15 | **M3 完成**：同意顺序与 §8.11 崩溃对账模型；四个模型、两个负向对照全部通过 |
+| `48e744e` | 2026-11-16 | **持久化基础**：`JsonStore` 原子分节 JSON；幂等索引与能力签发/撤销跨重启；共享 store 隔离；27 条新测试，累计 358 |
 
 ---
 
@@ -602,7 +604,60 @@ Alloy 补充模型不采用：四条主不变量的关系约束在 TLA+ 中已�
 
 ---
 
-## 7. 待确认的规范问题
+## 7. 持久化基础（M4 前置，已完成）
+
+### 7.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/store.py` | `JsonStore`：按 section 组织的 JSON 文档；整文件原子替换（`os.replace` + `fsync`），文件与临时文件均为 0600；序列化失败时保留旧内容 |
+| `impl/osap/idempotency.py` | 构造时可注入 `JsonStore`；`remember` / `forget` / `clear` 同步落盘，重启后同一 `id` 直接回放 |
+| `impl/osap/capability.py` | 持久化 `issued` 与 `revoked`，加载时重建 `parent_cap_id → children` 索引；撤销与级联跨重启保留 |
+| `impl/osap/bus.py` | `Bus` 接受显式 `IdempotencyIndex` 或 `store` 路径/实例；两者互斥，误传直接 `ValueError` |
+| `impl/tests/test_store.py` 等 | 27 条新测试：store 往返/重开/权限/失败回滚，幂等回放与清理，撤销级联重建，Bus 重启回放与共享 store 分节隔离 |
+
+### 7.2 语义
+
+- **一个路径一个 store 实例**：Bus 与 `CapabilityAuthority` 可以共享同一个 `JsonStore`，各自写不同 section（`idempotency`、`capability.issued`、`capability.revoked`），互不覆盖。两个独立 store 实例同时指向同一文件会各自写整份快照，后写者会丢掉前者的 section；这一限制写在模块文档里。
+- **重启即回放，不重复执行**：`Bus.receive` 命中已持久化的 `id` 时返回缓存结果并把 `replayed` 置真，`side_effects` 不增加。C7-05 的“只执行一次”因此不再依赖进程存活。
+- **撤销跨重启**：`revoke` 在返回前写入排序后的 revoked 列表；重新打开后 `is_revoked`、`check_validity` 与“已撤销父不能派生”都保持原判定。
+- **审计不落盘**：`CapabilityAuthority.audit` 仍是进程内列表；持久账本属于后续工作，避免把“状态持久化”误称为“审计持久化”。
+- **整节重写**：每次变更重写整个 section，换取简单与原子性；参考实现不追求增量写或并发写吞吐。
+
+### 7.3 验证证据
+
+2026-11-16，提交 `48e744e`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 358 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --stub
+→ 68 cases: 0 pass, 0 fail, 68 skip（无适配器）
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 delegated=2 context=1 audit=verified
+TLA2TOOLS_JAR=... spec/formal/check.sh
+→ OK: all positive models pass and both negative controls fail
+```
+
+### 7.4 已知边界
+
+1. 单进程、单写者；没有跨进程文件锁、租约或冲突合并；
+2. 外部副作用没有 write-ahead：动作执行后才落盘幂等结果，进程在两步之间崩溃仍可能重复执行；协议层只能要求实现对账；
+3. 审计、上下文、任务树、同意请求/回执/预约仍未持久化；
+4. 没有 TTL 清理、压缩或归档；长期运行会把所有已见 `id` 与历史凭证留在同一文件里。
+
+---
+
+## 8. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -618,17 +673,17 @@ Alloy 补充模型不采用：四条主不变量的关系约束在 TLA+ 中已�
 
 ---
 
-## 8. 下一步（按顺序）
+## 9. 下一步（按顺序）
 
-1. 完成 M3 剩余：`Receipt` / `RevocationSet` 的持久化状态、§8.11 的 `intent` / `outcome` / `unknown` 三态模型，可选 Alloy 补充；
-2. 用持久账本替换内存索引，补上崩溃恢复、TTL 刷新与真实回放；
-3. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
-4. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
-5. 每个 PR 只对应一个 C 编号用例，避免过度设计。
+1. 把审计账本、上下文、任务树与同意流程接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
+2. 给 `ConsentFlow` 接入真实 PCS 密钥与回执验签；
+3. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
+4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
+5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
 
 ---
 
-## 9. 变更记录
+## 10. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -647,3 +702,4 @@ Alloy 补充模型不采用：四条主不变量的关系约束在 TLA+ 中已�
 | 2026-11-15 | **M2 退出标准**（`b95e2c9`）：撤销传播改为父→子索引的一次遍历，重复撤销幂等；新增 `tools/benchmark_revocation.py`，实测 P95 1.23 ms；累计 329 tests |
 | 2026-11-15 | **M3（第一段）**（`c3268f6`）：`spec/formal/` 的 Capability/Task TLA+ 模型与 TLC 检查；负向对照证明模型非空转；TLC 发现“撤销后仍可派生”缺口，`issue` 改为返回 `CAPABILITY_REVOKED`；累计 331 tests |
 | 2026-11-15 | **M3 完成**（`17c11ad`）：新增 `Consent.tla`（预约→授权→激活→撤销）与 `Recovery.tla`（intent/outcome/unknown）；`check.sh` 扩到四个正常模型与两个负向对照；M3 退出标准全部满足 |
+| 2026-11-16 | **持久化基础**（`48e744e`）：`JsonStore` 原子分节写入；幂等索引与能力签发/撤销跨重启；`Bus` 可注入 store；新增 27 条测试，累计 358；`docs/standard.md` 语义未改 |

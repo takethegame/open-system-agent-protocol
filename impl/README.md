@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等与能力状态持久化（M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -17,7 +17,8 @@
 | 对端认证 | §7.10 | Linux `SO_PEERCRED`、macOS `getpeereid`+`LOCAL_PEERPID`；可校验 uid/gid/pid/可执行文件，缺字段即拒绝 |
 | 8 MiB 上限 | §7.9 | 两种绑定都按 UTF-8 JSON 字节数校验 |
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
-| 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用 |
+| 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用；可注入 `JsonStore` 跨重启回放 |
+| 持久化状态 | §7.8、§5.5 | 分节 JSON、原子替换、`fsync`、0600；幂等索引与能力签发/撤销跨重启 |
 | 单调时钟 deadline | §7.8 | 墙钟回拨或挂起恢复不得延长超时 |
 | Ed25519 签名 | §4.5 | 清单签名、验证、基钥轮换宽限期 |
 | Agent 注册 | §4.1–§4.3 | `hello` 校验、App 绑定、公钥绑定、`welcome` 签发 |
@@ -62,7 +63,7 @@
 | 跨用户 | §11.2 | 默认拒绝；显式开启且双方同意才放行 |
 | 被攻破的 Bus | §3.6、§11.1 | 0.1 不声称 P0 防护；声明了即判不合约 |
 
-**不在本阶段**：持久账本、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
+**不在本阶段**：持久审计账本、跨进程撤销分发、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
 
 ## 2. 目录
 
@@ -87,6 +88,7 @@ impl/
     idempotency.py      §7.8 幂等索引
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
+    store.py            原子分节 JSON 持久化（幂等与能力状态）
     task.py             §8 任务树、预算、取消、结果、handoff
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证
   tests/                单元测试（unittest）
@@ -293,16 +295,22 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `CapabilityAuthority.issue` 同时维护 `parent_cap_id → {child cap_id}`；`revoke` 从目标出发做一次广度优先遍历，每个凭证只访问一次。旧实现的“反复扫描全部已签发凭证直到不再变化”在深链上是 O(n²)，无法支撑 P95 基准。重复撤销返回 0 且不重复写审计，避免重试制造重复事件。
 
+### 5.34 持久化用分节 JSON 与原子替换
+
+`JsonStore` 把状态放在一个 JSON 对象的多个 section 里（`idempotency`、`capability.issued`、`capability.revoked`），每次变更整节重写，用临时文件 + `fsync` + `os.replace` 保证读到的要么是旧版本、要么是新版本。文件与临时文件都以 0600 创建；`put` 先序列化候选文档再更新内存，序列化失败时旧状态仍然可用。
+
+推荐同一个路径只开一个 `JsonStore` 并让 Bus 与 `CapabilityAuthority` 共享：两个实例各自持有整份快照，后写者会覆盖前者的 section。`CapabilityAuthority` 加载时从 `issued` 重建父→子索引，因此重启后 `revoke(parent)` 仍能级联；`Bus` 命中已落盘的 `id` 时只回放结果，不再执行副作用。
+
 ## 6. 已知限制
 
-1. **内存态**：幂等索引、注册表、轮换状态都在进程内，重启即丢；§7.8 要求可重建的持久索引，尚未实现。
+1. **部分内存态**：幂等索引与能力的签发/撤销可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文、任务与同意流程仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
 2. **开发密钥环**：一致性适配器在导入时生成一次性 Ed25519 密钥并为示例 App 签清单。示例里的 `base64url-example-*` 是占位字符串，不是真实密钥。
 3. **OS 认证只覆盖 Linux/macOS 本地 socket**：已实现 `SO_PEERCRED` / `getpeereid` / `LOCAL_PEERPID` 与可执行文件解析；audit token、package identity、代码签名和 Windows SID 都未实现。
 4. **不是平台原生绑定**：只有 `AF_UNIX` stream 与数据报 socketpair，没有 XPC、Binder、named pipe 或 localhost mTLS；对端认证是 uid/gid/pid/可执行文件，不是平台代码签名。
 5. **任务状态只在内存**：`TaskBoard` 没有持久化，重启后无法恢复任务树；§8.11 的 `effect.intent` 与对账也没有实现，C4-08/C4-09 因此仍是 manual。
 6. **凭证只做结构校验**：`proof.sig` 未验证，`cap_id` 也未由 CA 签发密钥覆盖；需要把用户密钥分发与签名纳入 M2.4 之后的里程碑。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
-8. **撤销只在内存**：`CapabilityAuthority.revoked` 是进程内集合，重启即丢，也没有广播；§5.5 要求撤销事件写入审计账本并通知受影响 Agent，尚未实现。
+8. **撤销可持久化但未分发**：`CapabilityAuthority.revoked` 可落盘并在重启后重建，但没有跨进程广播或重试；§5.5 要求的“通知受影响 Agent”尚未实现。
 9. **委派未校验能力链**：`delegate` 只检查任务预算与深度，没有把 `delegated_capability` 与父能力凭证做完整衰减比对（夹具里没有父凭证）。
 10. **上下文只在内存**：`ContextFabric` 的审计与黑板状态不持久化，也没有真正撤销句柄；§9.7 的“谁在何时解析了哪个句柄”目前只能读进程内列表。
 11. **没有真实对象存储**：`delete_object` 只返回判定结果，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
