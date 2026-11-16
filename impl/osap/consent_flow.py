@@ -9,8 +9,10 @@ only a validated grant activates the capability (§10.3 issuance ordering).
 
 Reservations are deliberately inert. A reserved `cap_id` is not issued, so it
 fails routing and validity checks until `activate()` succeeds; a denied,
-revoked, or expired request can never promote it. Everything is in memory and
-uses an injected clock, matching the rest of the reference implementation.
+revoked, or expired request can never promote it. Every grant is signed by the
+PCS `ConsentSigner` and `activate()` verifies that proof before issuing, so an
+Agent cannot self-sign its own consent. Everything is in memory and uses an
+injected clock, matching the rest of the reference implementation.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from . import consent, schema
 from .capability import CapabilityAuthority
 from .clock import parse_timestamp
 from .errors import OsapError
+from .pcs import ConsentSigner
 
 REQUEST_SCHEMA = "consent-request.schema.json"
 GRANT_OPTIONS = frozenset({"allow_once", "allow_task", "allow_ttl"})
@@ -71,15 +74,23 @@ class ConsentFlow:
         authority: CapabilityAuthority | None = None,
         policy_agent: str = "agent://system/policy#0",
         clock=None,
+        signer: ConsentSigner | None = None,
     ) -> None:
         self.user = user
         self.authority = authority
         self.policy_agent = policy_agent
         self._clock = clock or _now
+        self.signer = signer or ConsentSigner.generate()
         self.requests: dict[str, dict] = {}
         self.receipts: dict[str, dict] = {}
         self.reservations: dict[str, dict] = {}
         self.audit: list[dict] = []
+
+    @property
+    def pcs_key(self) -> dict:
+        """The public half a verifier needs to check this flow's receipts."""
+
+        return self.signer.key_record()
 
     # --- request ----------------------------------------------------------
 
@@ -235,12 +246,8 @@ class ConsentFlow:
             "decision": "grant",
             "constraints": constraints,
             "issued_at": _stamp(moment),
-            "proof": {
-                "alg": "EdDSA",
-                "kid": "pcs-development-key",
-                "sig": "base64url-development-signature",
-            },
         }
+        receipt = self.signer.sign(receipt)
         schema.validate("consent-receipt.schema.json", receipt)
 
         self.receipts[receipt_id] = receipt
@@ -310,6 +317,9 @@ class ConsentFlow:
         receipt = self.receipts.get(receipt_id)
         if receipt is None:
             raise OsapError("POLICY_DENIED", f"unknown receipt: {receipt_id}")
+        # Verify the user/OS proof before looking at reservation state, so a
+        # forged or tampered receipt cannot learn whether a cap_id is active.
+        self.signer.require(receipt)
         reservation = self.reservations.get(receipt["cap_id"])
         if reservation is None:
             raise OsapError("POLICY_DENIED", "capability has no reservation")

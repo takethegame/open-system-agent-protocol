@@ -13,6 +13,8 @@ Covered so far:
 - M2.3: capability tokens, attenuation, binding, revocation (§5.1-§5.6);
 - M2.4: consent receipts and capability linkage (§5.8); consent request,
   reservation, grant/deny, activation, and revocation flow (§10.2, §10.3);
+- PCS: Ed25519 consent-receipt signing and offline proof verification
+  (§10.4), so an Agent cannot self-sign its own consent;
 - M2.5: task tree, budgets, cancellation, results, handoff (§8); context
   fabric handles, labels, blackboard, objects (§9); federation adapters
   projecting native descriptors into capability records (§6.7, §6.8);
@@ -32,6 +34,7 @@ from . import (
     crypto,
     federation,
     identity,
+    pcs,
     registry,
     schema,
     store,
@@ -44,11 +47,13 @@ from .envelope import KNOWN_TYPES, SUPPORTED_MAJOR, validate
 from .errors import STANDARD_CODES, OsapError
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
+from .pcs import ConsentSigner
 from .store import JsonStore
 
 __all__ = [
     "Binding",
     "Bus",
+    "ConsentSigner",
     "Deadline",
     "IdempotencyIndex",
     "JsonStore",
@@ -65,6 +70,7 @@ __all__ = [
     "crypto",
     "federation",
     "identity",
+    "pcs",
     "registry",
     "schema",
     "store",

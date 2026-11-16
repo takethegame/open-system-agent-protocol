@@ -33,6 +33,7 @@ from osap import (  # noqa: E402
     context,
     crypto,
     identity,
+    pcs,
     registry,
     task,
 )
@@ -292,6 +293,10 @@ def main() -> int:
         receipt_id=RECEIPT_ID,
     )
     require(not flow.usable(CAP_ID), "a grant must not activate before the CA issues")
+    require(
+        pcs.verify_receipt(receipt, flow.pcs_key["public_key"], kid=flow.signer.kid),
+        "the receipt must verify against the PCS public key",
+    )
 
     token = copy.deepcopy(load("capability.json"))
     token["cap_id"] = CAP_ID
@@ -316,6 +321,7 @@ def main() -> int:
         f"-> {receipt['decision']} max_uses={receipt['constraints']['max_uses']}"
     )
     print(f"receipt {RECEIPT_ID} activated {CAP_ID} for {CALENDAR}")
+    print("receipt proof verified against the PCS public key")
     print("L3 consent prerequisite satisfied; capability is valid at the simulated now")
 
     # --- 4. two delegations, two results ----------------------------------
@@ -575,7 +581,7 @@ def main() -> int:
     )
 
     section("demo complete")
-    print("registered=3 discovery=1 consent=1 delegated=2 context=1 audit=verified")
+    print("registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified")
     print("trace=complete redaction=verified recovery=complete")
     return 0
 

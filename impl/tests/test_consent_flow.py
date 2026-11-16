@@ -8,7 +8,7 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from osap import capability, consent, consent_flow
+from osap import capability, consent, consent_flow, pcs
 from osap.clock import parse_timestamp
 from osap.errors import OsapError
 
@@ -383,10 +383,12 @@ class ActivationTests(unittest.TestCase):
         flow.request(payload)
         flow.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
         flow.deny(payload["request_id"], reason="user_declined")
-        flow.receipts["receipt_orphan"] = {
-            "receipt_id": "receipt_orphan",
-            "cap_id": "cap_flow",
-        }
+        flow.receipts["receipt_orphan"] = flow.signer.sign(
+            {
+                "receipt_id": "receipt_orphan",
+                "cap_id": "cap_flow",
+            }
+        )
         with self.assertRaises(OsapError) as caught:
             flow.activate("receipt_orphan", {"cap_id": "cap_flow"})
         self.assertEqual(caught.exception.code, "POLICY_DENIED")
@@ -415,6 +417,59 @@ class RevocationTests(unittest.TestCase):
         with self.assertRaises(OsapError) as caught:
             flow.revoke("receipt_missing")
         self.assertEqual(caught.exception.code, "POLICY_DENIED")
+
+
+class ReceiptProofTests(unittest.TestCase):
+    def test_grant_signs_with_the_pcs_key(self):
+        flow, _, _, receipt = granted_flow()
+        self.assertEqual(receipt["proof"]["kid"], flow.signer.kid)
+        self.assertTrue(
+            pcs.verify_receipt(
+                receipt,
+                flow.pcs_key["public_key"],
+                kid=flow.signer.kid,
+            )
+        )
+
+    def test_an_injected_signer_is_used(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-injected")
+        flow = consent_flow.ConsentFlow(user=USER, signer=signer)
+        payload = request_payload()
+        flow.request(payload)
+        flow.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
+        receipt = flow.grant(payload["request_id"], receipt_id="receipt_flow")
+        self.assertEqual(receipt["proof"]["kid"], "pcs-injected")
+        self.assertTrue(signer.verify(receipt))
+
+    def test_an_agent_self_signed_receipt_cannot_activate(self):
+        flow, _, _, receipt = granted_flow()
+        forged = pcs.ConsentSigner.generate(kid=flow.signer.kid).sign(
+            {key: value for key, value in receipt.items() if key != "proof"}
+        )
+        flow.receipts[receipt["receipt_id"]] = forged
+        with self.assertRaises(OsapError) as caught:
+            flow.activate(receipt["receipt_id"], token_for(forged))
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+        self.assertEqual(caught.exception.details["reason"], "receipt_signature_invalid")
+        self.assertFalse(flow.usable(receipt["cap_id"]))
+
+    def test_a_tampered_receipt_cannot_activate(self):
+        flow, _, _, receipt = granted_flow()
+        flow.receipts[receipt["receipt_id"]]["actions"] = ["calendar.read"]
+        with self.assertRaises(OsapError) as caught:
+            flow.activate(receipt["receipt_id"], token_for(receipt))
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+
+    def test_a_receipt_without_a_proof_cannot_activate(self):
+        flow, _, _, receipt = granted_flow()
+        del flow.receipts[receipt["receipt_id"]]["proof"]
+        with self.assertRaises(OsapError) as caught:
+            flow.activate(receipt["receipt_id"], token_for(receipt))
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+
+    def test_pcs_key_is_public_only(self):
+        flow, _, _ = flow_with()
+        self.assertEqual(set(flow.pcs_key), {"kid", "public_key"})
 
 
 class AuditTests(unittest.TestCase):
