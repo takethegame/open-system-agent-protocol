@@ -19,6 +19,7 @@
 | 持久化基础（M4 前置） | ✅ 完成 | 幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启；原子分节写入；387 tests | 2026-11-16 |
 | PCS 回执签名（M4 前置） | ✅ 完成 | Ed25519 签名 + 离线验签；`activate` 先验签；375 tests | 2026-11-16 |
 | 流控与背压（M4 前置） | ✅ 完成 | 每身份连接/在途/队列上限与令牌桶速率；FIFO 等待；显式 `RATE_LIMIT`；UDS 可并发服务；422 tests | 2026-11-17 |
+| 任务树持久化（M4 前置） | ✅ 完成 | 整棵树跨重启：状态、预算、`consumed`、`detached`、父子链与 handoff；每次变更一次原子写入；440 tests | 2026-11-17 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -32,7 +33,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 22 个模块 + 适配器（5314 行）+ 422 个单元测试 |
+| 参考实现 | 22 个模块 + 适配器（5439 行）+ 440 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -78,6 +79,7 @@
 | `61a9994` | 2026-11-16 | **同意流程持久化**：请求/回执/预约与签名密钥跨重启；`put_many` 原子多节写入；12 条新测试，累计 387 |
 | `0b13483` | 2026-11-17 | **流控与背压**：`Quota` / `AdmissionController` / `Admission`；每身份令牌桶、在途与 FIFO 等待队列；连接配额与显式 `RATE_LIMIT`；32 条新测试，累计 419 |
 | `eaf8260` | 2026-11-17 | **并发 UDS 服务**：`serve_forever(concurrency=N)` 线程池接受/服务连接；空闲连接不再阻塞他人；同 Agent 跨连接共享在途与排队配额；3 条新测试，累计 422 |
+| `f47abd7` | 2026-11-17 | **任务树持久化**：`TaskBoard(store=...)` 与无损 `Task.to_state`/`from_state`；整树跨重启；每次变更一次原子写入；18 条新测试，累计 440 |
 
 ---
 
@@ -285,7 +287,7 @@ C2/C4/C6 复用 `manifest.json`、`discovery-result.json`、`capability-record.j
 | `impl/osap/capability.py` | 258 | 能力凭证、衰减、绑定、撤销、风险前置 | §5.2–§5.7 | M2.3 |
 | `impl/osap/consent.py` | 120 | 同意回执与能力范围校验 | §5.8 | M2.4 |
 | `impl/osap/consent_flow.py` | 381 | 同意请求、`cap_id` 预约、授权/拒绝、激活、撤销 | §10.2、§10.3 | M2.4b |
-| `impl/osap/task.py` | 425 | 任务树、预算、取消、结果、handoff | §8.2–§8.10 | M2.5a |
+| `impl/osap/task.py` | 550 | 任务树、预算、取消、结果、handoff、整树持久化 | §8.2–§8.10 | M2.5a |
 | `impl/osap/transport.py` | 508 | UDS stream、消息型 socketpair、对端认证 | §7.9、§7.10 | M2.1b |
 | `impl/osap/context.py` | 289 | 句柄、标签、黑板、对象、缓存、存储声明 | §9.2–§9.10 | M2.5b |
 | `impl/osap/federation.py` | 138 | 原生描述符投影、原生身份、命名空间、信任归一 | §6.4、§6.7、§6.8 | M2.5c |
@@ -516,12 +518,12 @@ python3 tools/benchmark_revocation.py
 4. 对端认证覆盖 uid/gid/pid/可执行文件（Linux `SO_PEERCRED`，macOS `getpeereid` + `LOCAL_PEERPID`），没有 audit token、package identity 或代码签名；同 uid 的其他进程只有在设置可执行文件策略后才被排除。
 5. 撤销集合只在内存，重启即丢，也没有广播；§5.5 要求写入审计账本并通知受影响 Agent，尚未实现。
 6. `max_uses` 未计数，`rate` 未限流；衰减只比较声明值。
-7. 任务树只在内存，重启即丢；`TaskBoard` 不产生 `effect.intent`，`audit.recover_effects` 只读已有事件，C4-08/C4-09 仍是 manual。
+7. 任务树在 M2 时只在内存；M4 前置已把整棵树接入 `JsonStore`（见第 10 节）。`TaskBoard` 仍不产生 `effect.intent`，`audit.recover_effects` 只读已有事件，C4-08/C4-09 仍是 manual。
 8. 上下文审计与黑板状态只在内存，没有真正撤销句柄；§9.7 的“谁在何时解析了哪个句柄”只能读进程内列表。
 9. 没有真实对象存储：`delete_object` 只返回判定，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
 10. 联邦只做投影：没有监听原生注册表变化，也没有按 TTL 自动刷新，C6-08 仍是 manual；MCP/A2A/OpenAPI 的签名未验证。
 11. 审计链不重算正文摘要：只验证 schema、trace、`audit_id` 与 `prev_hash` 链接；真正的防篡改需要规范化编码与持久账本。
-12. 审计、上下文与任务状态都只在内存；重启恢复与跨进程回放未实现，C7-01 仍是 manual。
+12. 审计与上下文只在内存；任务树已持久化（见第 10 节），但跨进程回放与 C7-01 仍未实现。
 13. 62 个 pass 覆盖全部 automated 用例；6 条 manual 仍依赖崩溃恢复与跨 App 集成。
 14. 演示是进程内单进程：它证明模块能串起来，不证明真实传输、真实 OS 句柄或持久账本。
 15. `ConsentFlow` 的请求、回执与预约都只在内存；重启即丢，也没有把同一请求广播给多个 Bus。
@@ -625,12 +627,12 @@ Alloy 补充模型不采用：四条主不变量的关系约束在 TLA+ 中已�
 
 ### 7.2 语义
 
-- **一个路径一个 store 实例**：Bus、`CapabilityAuthority` 与 `ConsentFlow` 可以共享同一个 `JsonStore`，各自写不同 section（`idempotency`、`capability.*`、`consent.*`），互不覆盖。两个独立 store 实例同时指向同一文件会各自写整份快照，后写者会丢掉前者的 section；这一限制写在模块文档里。
+- **一个路径一个 store 实例**：Bus、`CapabilityAuthority`、`ConsentFlow` 与 `TaskBoard` 可以共享同一个 `JsonStore`，各自写不同 section（`idempotency`、`capability.*`、`consent.*`、`task.tasks`），互不覆盖。两个独立 store 实例同时指向同一文件会各自写整份快照，后写者会丢掉前者的 section；这一限制写在模块文档里。
 - **重启即回放，不重复执行**：`Bus.receive` 命中已持久化的 `id` 时返回缓存结果并把 `replayed` 置真，`side_effects` 不增加。C7-05 的“只执行一次”因此不再依赖进程存活。
 - **撤销跨重启**：`revoke` 在返回前写入排序后的 revoked 列表；重新打开后 `is_revoked`、`check_validity` 与“已撤销父不能派生”都保持原判定。
 - **同意流程终态跨重启**：`pending` 请求仍可继续预约/授权；`denied`、`expired`、`activated`、`revoked` 保持单向；激活过的回执再次激活返回 `DUPLICATE`。
 - **签名密钥随流程保存**：由 `ConsentFlow` 生成的 PCS 私钥写入 `consent.pcs_key`（文件 0600），重启后回执仍可验签；注入的 signer 不落盘，加载时会校验 `public_key` 与私钥一致。
-- **审计不落盘**：`CapabilityAuthority.audit` 与 `ConsentFlow.audit` 仍是进程内列表；持久账本属于后续工作，避免把“状态持久化”误称为“审计持久化”。
+- **审计不落盘**：`CapabilityAuthority.audit`、`ConsentFlow.audit` 与 `TaskBoard.audit` 仍是进程内列表；持久账本属于后续工作，避免把“状态持久化”误称为“审计持久化”。
 - **整节重写**：每次变更重写整个 section，换取简单与原子性；`put_many` 把多节变更合并为一次 `os.replace`。参考实现不追求增量写或并发写吞吐。
 
 ### 7.3 验证证据
@@ -671,7 +673,7 @@ TLA2TOOLS_JAR=... spec/formal/check.sh
 
 1. 单进程、单写者；没有跨进程文件锁、租约或冲突合并；
 2. 外部副作用没有 write-ahead：动作执行后才落盘幂等结果，进程在两步之间崩溃仍可能重复执行；协议层只能要求实现对账；
-3. 审计、上下文与任务树仍未持久化；
+3. 审计与上下文仍未持久化；任务树已在第 10 节接入 `JsonStore`；
 4. 没有 TTL 清理、压缩或归档；长期运行会把所有已见 `id`、历史凭证与已完成同意流程留在同一文件里；
 5. PCS 私钥落在同一个 JSON 文件里，没有 OS 密钥环集成或密钥轮换。
 
@@ -781,7 +783,58 @@ python3 demo/run_demo.py
 
 ---
 
-## 10. 待确认的规范问题
+## 10. 任务树持久化（M4 前置，已完成）
+
+### 10.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/task.py` | `TaskBoard(store=...)` 把整棵树写入 `task.tasks`；`Task.to_state()` / `from_state()` 无损记录状态、预算、消耗、`detached`、父子链、会话与结果契约；加载时校验结构 |
+| `impl/tests/test_task.py` | 18 条新测试：整树重开、恢复后继续转换、委派/取消/handoff 跨重启、detached 子树、审计不落盘、共享 store 隔离、损坏 section 拒绝，以及每个变更方法只写一次 |
+
+### 10.2 语义
+
+- **无损状态**：`snapshot()` 只用于对外摘要，缺少 `root_task_id`、`parent_task_id`、`session_id`、`result_schema`、`consumed` 与 `detached`。持久化改用 `to_state()`，因此重启后预算消耗与 detached 判定不会丢失。
+- **一次变更一次写入**：`add`、`transition`、`cancel`、`delegate`、`handoff` 在完成内存修改后各写一次整节；`cancel` 遍历整棵子树也只写一次。`transition` 传入相同状态或 `handoff` 被拒绝时不写盘。
+- **加载即校验**：section 必须是对象；每条记录必须是对象，`task_id` 必须与键一致，`status` 必须在 `STATUSES` 内，`budget` / `authority` / `consumed` 必须是对象，`detached` 必须是布尔，可选字符串字段必须是字符串或 null。损坏文件在构造时抛 `ValueError`，不会得到半棵树。
+- **审计仍在内存**：`TaskBoard.audit` 不落盘，与其他子系统一致；它记录的是过程，不是可恢复状态。
+- **共享 store**：任务树写 `task.tasks`，与 `idempotency`、`capability.*`、`consent.*` 并列；同一个 `JsonStore` 上其他 section 不受影响。
+
+### 10.3 验证证据
+
+2026-11-17，提交 `f47abd7`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 440 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --stub
+→ 68 cases: 0 pass, 0 fail, 68 skip（无适配器）
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 18 条测试覆盖：整树重开后的状态、预算、`consumed`、`detached`、父子链、会话与结果契约；恢复后继续状态转换；委派、取消与 handoff 跨重启；detached 子树不被父取消；审计不落盘；共享 store 的其他 section 不被覆盖；损坏 section、未知状态、键不一致与缺预算的拒绝；以及 `add` / `delegate` / `cancel` / `transition` / `handoff` 的单次写入行为。
+
+### 10.4 已知边界
+
+1. **整节重写**：任务数量很大时每次变更都序列化整棵树；没有增量更新或分片。
+2. **单进程单写者**：没有跨进程文件锁；两个 store 实例会互相覆盖。
+3. **过程状态未落盘**：`TaskBoard.audit` 与 `effect.intent` 仍未持久化，C4-08/C4-09 仍是 manual。
+4. **不做引用完整性检查**：加载不要求父任务存在于同一 section（夹具允许父链在外部），也不检测父子环。
+5. **不清理历史**：已终态任务永久留在文件中；长期运行需要归档或 TTL 清理。
+
+---
+
+## 11. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -797,9 +850,9 @@ python3 demo/run_demo.py
 
 ---
 
-## 11. 下一步（按顺序）
+## 12. 下一步（按顺序）
 
-1. 把审计账本、上下文与任务树接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
+1. 把审计账本与上下文接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
 2. 定义 PCS 公钥的登记、轮换与撤销，并把私钥从普通 JSON 迁移到 OS 密钥环；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
@@ -807,7 +860,7 @@ python3 demo/run_demo.py
 
 ---
 
-## 12. 变更记录
+## 13. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -830,3 +883,5 @@ python3 demo/run_demo.py
 | 2026-11-16 | **PCS 回执签名**（`092c710`）：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签再查预约；新增 17 条测试，累计 375；演示增加 `receipt=verified` |
 | 2026-11-16 | **同意流程持久化**（`61a9994`）：请求/回执/预约与 PCS 签名密钥跨重启；`put_many` 原子多节写入；新增 12 条测试，累计 387 |
 | 2026-11-17 | **流控与背压**（`0b13483`）：每身份连接/在途/队列上限与令牌桶；FIFO 等待与显式 `RATE_LIMIT`；UDS 连接配额与拒绝帧；新增 32 条测试，累计 419 |
+| 2026-11-17 | **并发 UDS 服务**（`eaf8260`）：`serve_forever(concurrency=N)` 线程池；空闲连接不再阻塞他人；同 Agent 跨连接共享配额；新增 3 条测试，累计 422 |
+| 2026-11-17 | **任务树持久化**（`f47abd7`）：`TaskBoard(store=...)` 无损整树跨重启；每次变更一次原子写入；新增 18 条测试，累计 440 |

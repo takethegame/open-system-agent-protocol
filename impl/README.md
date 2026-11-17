@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态与同意流程持久化、PCS 回执签名与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程与任务树持久化、PCS 回执签名与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -18,7 +18,7 @@
 | 8 MiB 上限 | §7.9 | 两种绑定都按 UTF-8 JSON 字节数校验 |
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
 | 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用；可注入 `JsonStore` 跨重启回放 |
-| 持久化状态 | §7.8、§5.5、§10.3 | 分节 JSON、原子替换、`fsync`、0600；幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启 |
+| 持久化状态 | §7.8、§5.5、§10.3、§8 | 分节 JSON、原子替换、`fsync`、0600；幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥、整棵任务树跨重启 |
 | 流控与背压 | §7.11、§11.7 | 每身份连接/在途/队列上限与令牌桶；FIFO 等待；`RATE_LIMIT` 带 `reason`、`retry_after_ms` 与队列深度；线程池并发服务 |
 | 单调时钟 deadline | §7.8 | 墙钟回拨或挂起恢复不得延长超时 |
 | Ed25519 签名 | §4.5 | 清单签名、验证、基钥轮换宽限期 |
@@ -39,7 +39,7 @@
 | 同意撤销 | §5.5、§10.3 | 回执撤销级联到已签发能力；未激活的预约直接作废 |
 | 回执签名 | §10.4 | Ed25519 覆盖去掉 `proof` 的规范化 JSON；`activate` 先验签再查预约，Agent 不能自签 |
 | 离线验签 | §10.4 | `pcs.verify_receipt` / `ConsentSigner.verify` 只依赖声明的 PCS 公钥 |
-| 任务树 | §8.2、§8.10 | 父/子索引、状态机与非法转换拒绝 |
+| 任务树 | §8.2、§8.10 | 父/子索引、状态机与非法转换拒绝；可注入 `JsonStore` 持久化整棵树 |
 | 委派 | §8.3、§8.5 | 子任务预算 ≤ 父剩余、深度 = 父 + 1、重复 `task_id` 拒绝 |
 | 预算 | §8.6 | 逐维比较；运行期超支报 `TASK_BUDGET_EXCEEDED` |
 | 取消 | §8.7 | 沿任务树向下传播，`detached` 子任务继续运行 |
@@ -93,8 +93,8 @@ impl/
     pcs.py              §10.4 PCS 回执签名与离线验签
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
-    store.py            原子分节 JSON 持久化（幂等、能力、同意流程）
-    task.py             §8 任务树、预算、取消、结果、handoff
+    store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树）
+    task.py             §8 任务树、预算、取消、结果、handoff、整树持久化
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、并发服务
   tests/                单元测试（unittest）
 ```
@@ -334,13 +334,19 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `close()` 与并发循环的收尾会对所有会话 socket 执行 `shutdown(SHUT_RDWR)`，让阻塞在 `receive` 的 worker 退出。`max_messages` 在并发模式下是 best-effort 停止条件：已受理但尚未完成的回复也占用上限，失败时会归还；它用于有界测试与优雅停止，不是协议级配额。
 
+### 5.39 任务树用无损快照持久化
+
+`Task.snapshot()` 是给调用方的摘要，只有 `task_id`、`owner`、`assignee`、`status`、`budget` 与 `authority`，不足以恢复状态机。持久化改用 `Task.to_state()`：它额外保存 `root_task_id`、`parent_task_id`、`session_id`、`result_schema`、`consumed` 与 `detached`，因此重启后预算消耗、父子链和 detached 子树判定都不会丢失。
+
+`TaskBoard(store=...)` 把整棵树写进 `task.tasks`，每个变更方法在内存修改完成后写一次：`add`、`transition`、`cancel`、`delegate`、`handoff` 各自最多一次整节写入，`cancel` 遍历整棵子树也只写一次。`delegate` 直接调用内部插入，避免再经 `add()` 写第二遍；`transition` 传入相同状态或 `handoff` 被拒绝时不写盘。`Task.from_state()` 在加载时检查对象形状、键与 `task_id` 一致、状态合法、预算/`authority`/`consumed` 为对象、`detached` 为布尔，损坏的 section 直接抛 `ValueError`，不会得到半棵树。`TaskBoard.audit` 与其他子系统的审计一样只在内存。
+
 ## 6. 已知限制
 
-1. **部分内存态**：幂等索引、能力签发/撤销与同意流程可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文与任务仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
+1. **部分内存态**：幂等索引、能力签发/撤销、同意流程与任务树可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计与上下文仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
 2. **开发密钥环**：一致性适配器在导入时生成一次性 Ed25519 密钥并为示例 App 签清单。示例里的 `base64url-example-*` 是占位字符串，不是真实密钥。
 3. **OS 认证只覆盖 Linux/macOS 本地 socket**：已实现 `SO_PEERCRED` / `getpeereid` / `LOCAL_PEERPID` 与可执行文件解析；audit token、package identity、代码签名和 Windows SID 都未实现。
 4. **不是平台原生绑定**：只有 `AF_UNIX` stream 与数据报 socketpair，没有 XPC、Binder、named pipe 或 localhost mTLS；对端认证是 uid/gid/pid/可执行文件，不是平台代码签名。
-5. **任务状态只在内存**：`TaskBoard` 没有持久化，重启后无法恢复任务树；§8.11 的 `effect.intent` 与对账也没有实现，C4-08/C4-09 因此仍是 manual。
+5. **任务过程未落盘**：`TaskBoard` 可持久化整棵树，但 `audit` 与 §8.11 的 `effect.intent` 没有落盘，对账也未实现，C4-08/C4-09 因此仍是 manual。
 6. **凭证只做结构校验**：`proof.sig` 未验证，`cap_id` 也未由 CA 签发密钥覆盖；需要把用户密钥分发与签名纳入 M2.4 之后的里程碑。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
 8. **撤销可持久化但未分发**：`CapabilityAuthority.revoked` 可落盘并在重启后重建，但没有跨进程广播或重试；§5.5 要求的“通知受影响 Agent”尚未实现。
@@ -349,7 +355,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 11. **没有真实对象存储**：`delete_object` 只返回判定结果，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
 12. **联邦只做投影**：没有监听原生注册表变化，也没有按 TTL 自动刷新；C6-08 仍是 manual。MCP/A2A/OpenAPI 的外部签名未验证，因此统一降为 `unverified`。
 13. **审计链不重算正文哈希**：只验证事件 schema、trace、`audit_id` 与 `prev_hash` 链接；夹具的 hash 是占位串，规范也未固定编码。
-14. **审计只在内存**：`ContextFabric`、`TaskBoard` 与审计模块都不持久化；重启恢复与真实回放需要持久账本，C7-01 仍是 manual。
+14. **审计与上下文只在内存**：`ContextFabric` 与审计模块都不持久化；任务树的状态已可落盘，但其审计过程不落盘。重启恢复与真实回放需要持久账本，C7-01 仍是 manual。
 15. **62 个 pass 覆盖全部 automated 用例**，但不覆盖 6 条 manual 的运行时、跨进程与崩溃恢复语义。
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，无分发协议**：`ConsentFlow` 用 Ed25519 签回执并在 `activate` 验签；接入 `JsonStore` 时密钥写入 `consent.pcs_key` 并复用，不接 store 时仍是一次性生成。PCS 公钥如何登记、轮换与撤销尚未定义，私钥与回执同处一个 0600 JSON 文件，验签密钥仍需带外分发。
