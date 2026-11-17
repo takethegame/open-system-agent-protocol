@@ -4,10 +4,11 @@
 
 import copy
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from osap import OsapError, task
+from osap import JsonStore, OsapError, task
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -305,6 +306,193 @@ class HandoffTests(unittest.TestCase):
         entry = self.board.audit[-1]
         self.assertEqual(entry["action"], "task.handoff")
         self.assertEqual(entry["to"], CALENDAR)
+
+
+class PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.json"
+
+    def board(self) -> task.TaskBoard:
+        return task.TaskBoard(store=JsonStore(self.path))
+
+    def test_the_whole_tree_survives_reopen(self):
+        first = self.board()
+        root = first.add(parent_task())
+        child = child_record("task_child", parent=root.task_id)
+        child.consumed = {"wall_ms": 250, "tool_calls": 1}
+        child.detached = True
+        child.result_schema = "osap.child/v1"
+        first.add(child)
+
+        second = self.board()
+        self.assertEqual(second.require(root.task_id).to_state(), root.to_state())
+        restored = second.require("task_child")
+        self.assertEqual(restored.to_state(), child.to_state())
+        self.assertEqual(restored.parent_task_id, root.task_id)
+        self.assertEqual(restored.consumed, {"wall_ms": 250, "tool_calls": 1})
+        self.assertTrue(restored.detached)
+
+    def test_a_restored_task_continues_transitioning(self):
+        first = self.board()
+        record = first.add(parent_task())
+        first.transition(record, "accepted")
+        first.transition(record, "running")
+
+        second = self.board()
+        resumed = second.require(record.task_id)
+        second.transition(resumed, "succeeded")
+        self.assertEqual(self.board().require(record.task_id).status, "succeeded")
+
+    def test_delegation_survives_reopen(self):
+        first = self.board()
+        parent = first.add(parent_task())
+        child = first.delegate(parent.task_id, load("delegate.json"))
+
+        second = self.board()
+        restored = second.require(child.task_id)
+        self.assertEqual(restored.to_state(), child.to_state())
+        self.assertEqual(restored.parent_task_id, parent.task_id)
+        self.assertEqual(restored.authority["cap_id"], child.authority["cap_id"])
+
+    def test_cancellation_survives_reopen(self):
+        first = self.board()
+        root = first.add(parent_task())
+        child = first.add(child_record("task_child", parent=root.task_id))
+        first.cancel(root.task_id)
+
+        second = self.board()
+        self.assertEqual(second.require(root.task_id).status, "cancelled")
+        self.assertEqual(second.require(child.task_id).status, "cancelled")
+
+    def test_a_detached_child_stays_running_across_reopen(self):
+        first = self.board()
+        root = first.add(parent_task())
+        child = child_record("task_child", parent=root.task_id)
+        child.detached = True
+        first.add(child)
+        first.cancel(root.task_id)
+
+        second = self.board()
+        self.assertTrue(second.require(child.task_id).detached)
+        self.assertEqual(second.require(child.task_id).status, "running")
+        self.assertEqual(second.require(root.task_id).status, "cancelled")
+
+    def test_handoff_survives_reopen(self):
+        first = self.board()
+        record = first.add(parent_task())
+        first.handoff(record, load("handoff.json"))
+
+        second = self.board()
+        restored = second.require(record.task_id)
+        self.assertEqual(restored.owner, CALENDAR)
+        self.assertEqual(restored.assignee, CALENDAR)
+        self.assertEqual(restored.authority["cap_id"], "cap_01J9Z6Q3V8N2K4M7P1R5T0WXAF")
+
+    def test_audit_is_not_persisted(self):
+        first = self.board()
+        record = first.add(parent_task())
+        first.transition(record, "accepted")
+        first.transition(record, "running")
+        self.assertTrue(first.audit)
+
+        self.assertEqual(self.board().audit, [])
+
+    def test_another_section_of_the_shared_store_is_kept(self):
+        store = JsonStore(self.path)
+        store.put("other.section", {"kept": True})
+        board = task.TaskBoard(store=store)
+        board.add(parent_task())
+
+        self.assertEqual(JsonStore(self.path).get("other.section"), {"kept": True})
+        self.assertIn(
+            parent_task().task_id,
+            JsonStore(self.path).get(task.TASKS_SECTION),
+        )
+
+    def test_a_corrupt_section_is_rejected(self):
+        store = JsonStore(self.path)
+        store.put(task.TASKS_SECTION, [])
+        with self.assertRaises(ValueError):
+            task.TaskBoard(store=store)
+
+    def test_a_record_with_an_unknown_status_is_rejected(self):
+        store = JsonStore(self.path)
+        store.put(task.TASKS_SECTION, {"task_x": {**parent_task().to_state(), "status": "sleeping"}})
+        with self.assertRaises(ValueError):
+            task.TaskBoard(store=store)
+
+    def test_a_record_under_the_wrong_key_is_rejected(self):
+        store = JsonStore(self.path)
+        store.put(task.TASKS_SECTION, {"task_other": parent_task().to_state()})
+        with self.assertRaises(ValueError):
+            task.TaskBoard(store=store)
+
+    def test_a_record_without_a_budget_is_rejected(self):
+        state = parent_task().to_state()
+        del state["budget"]
+        store = JsonStore(self.path)
+        store.put(task.TASKS_SECTION, {state["task_id"]: state})
+        with self.assertRaises(ValueError):
+            task.TaskBoard(store=store)
+
+
+class RecordingStore:
+    """A tiny store that records one section name per write."""
+
+    def __init__(self):
+        self.data: dict = {}
+        self.puts: list[str] = []
+
+    def get(self, section, default=None):
+        return copy.deepcopy(self.data.get(section, default))
+
+    def put(self, section, value):
+        self.puts.append(section)
+        self.data[section] = copy.deepcopy(value)
+
+
+class WriteCountTests(unittest.TestCase):
+    def setUp(self):
+        self.store = RecordingStore()
+        self.board = task.TaskBoard(store=self.store)
+
+    def test_add_writes_once(self):
+        self.board.add(parent_task())
+        self.assertEqual(self.store.puts, [task.TASKS_SECTION])
+
+    def test_a_no_op_transition_does_not_write(self):
+        record = self.board.add(parent_task())
+        self.store.puts.clear()
+        self.board.transition(record, "created")
+        self.assertEqual(self.store.puts, [])
+
+    def test_delegate_writes_once_not_twice(self):
+        parent = self.board.add(parent_task())
+        self.store.puts.clear()
+        self.board.delegate(parent.task_id, load("delegate.json"))
+        self.assertEqual(self.store.puts, [task.TASKS_SECTION])
+
+    def test_cancel_writes_once_for_the_whole_subtree(self):
+        root = self.board.add(parent_task())
+        self.board.add(child_record("task_child", parent=root.task_id))
+        self.board.add(child_record("task_grandchild", parent="task_child"))
+        self.store.puts.clear()
+        self.board.cancel(root.task_id)
+        self.assertEqual(self.store.puts, [task.TASKS_SECTION])
+
+    def test_rejected_handoff_does_not_write(self):
+        record = self.board.add(parent_task())
+        self.store.puts.clear()
+        self.board.handoff(record, load("handoff.json"), accepted=False)
+        self.assertEqual(self.store.puts, [])
+
+    def test_accepted_handoff_writes_once(self):
+        record = self.board.add(parent_task())
+        self.store.puts.clear()
+        self.board.handoff(record, load("handoff.json"))
+        self.assertEqual(self.store.puts, [task.TASKS_SECTION])
 
 
 class OwnershipTests(unittest.TestCase):

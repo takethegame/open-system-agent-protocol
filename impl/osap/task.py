@@ -16,6 +16,11 @@ Two error codes carry the budget rules. Delegating a budget larger than the
 parent's remainder is a policy refusal (`POLICY_DENIED`): the standard defines
 no delegation-specific code. Exceeding a budget while executing is
 `TASK_BUDGET_EXCEEDED` (§8.6).
+
+Passing a `JsonStore` to `TaskBoard` persists the whole tree, including
+`consumed` counters, parent links, and the detached flag. Canonical state is
+written once at the end of each mutating public method, so a crash sees either
+the previous tree or the new one, never a half-applied transition.
 """
 
 from __future__ import annotations
@@ -25,10 +30,12 @@ from dataclasses import dataclass, field
 from . import schema
 from .capability import HIGH_RISK
 from .errors import OsapError
+from .store import JsonStore
 
 TASK_SCHEMA = "task.schema.json"
 DELEGATE_SCHEMA = "delegate.schema.json"
 HANDOFF_SCHEMA = "handoff.schema.json"
+TASKS_SECTION = "task.tasks"
 
 STATUSES = (
     "created",
@@ -177,17 +184,126 @@ class Task:
             "authority": dict(self.authority),
         }
 
+    def to_state(self) -> dict:
+        """A lossless record for durable storage, unlike `snapshot()`."""
+
+        return {
+            "task_id": self.task_id,
+            "root_task_id": self.root_task_id,
+            "mode": self.mode,
+            "owner": self.owner,
+            "assignee": self.assignee,
+            "budget": dict(self.budget),
+            "status": self.status,
+            "parent_task_id": self.parent_task_id,
+            "session_id": self.session_id,
+            "result_schema": self.result_schema,
+            "authority": dict(self.authority),
+            "consumed": dict(self.consumed),
+            "detached": self.detached,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> "Task":
+        """Rebuild a task from `to_state()` output, rejecting bad records.
+
+        Stored records are stricter than `task.schema.json`: the board can hold
+        tasks built from envelopes rather than fixtures, and `consumed` is not
+        part of the wire schema. Structural checks here keep a corrupt section
+        from silently becoming a half-restored tree.
+        """
+
+        if not isinstance(state, dict):
+            raise ValueError("a stored task must be a JSON object")
+        for key in ("task_id", "root_task_id", "mode", "owner", "assignee"):
+            if not isinstance(state.get(key), str) or not state[key]:
+                raise ValueError(f"stored task needs a non-empty {key}")
+        status = state.get("status")
+        if status not in STATUSES:
+            raise ValueError(f"stored task has an unknown status: {status!r}")
+        budget = state.get("budget")
+        if not isinstance(budget, dict):
+            raise ValueError("stored task budget must be a JSON object")
+        authority = state.get("authority", {})
+        consumed = state.get("consumed", {})
+        if not isinstance(authority, dict):
+            raise ValueError("stored task authority must be a JSON object")
+        if not isinstance(consumed, dict):
+            raise ValueError("stored task consumed must be a JSON object")
+        detached = state.get("detached", False)
+        if not isinstance(detached, bool):
+            raise ValueError("stored task detached must be a boolean")
+        for key in ("parent_task_id", "session_id", "result_schema"):
+            if state.get(key) is not None and not isinstance(state[key], str):
+                raise ValueError(f"stored task {key} must be a string or null")
+        return cls(
+            task_id=state["task_id"],
+            root_task_id=state["root_task_id"],
+            mode=state["mode"],
+            owner=state["owner"],
+            assignee=state["assignee"],
+            budget=dict(budget),
+            status=status,
+            parent_task_id=state.get("parent_task_id"),
+            session_id=state.get("session_id"),
+            result_schema=state.get("result_schema"),
+            authority=dict(authority),
+            consumed=dict(consumed),
+            detached=detached,
+        )
+
 
 class TaskBoard:
-    """In-memory task tree, enough for delegation, cancel, result, and handoff."""
+    """Task tree with delegation, cancel, result, and handoff.
 
-    def __init__(self) -> None:
+    An optional `JsonStore` makes the tree survive a restart. The board writes
+    the canonical `task.tasks` section once per mutating public method; the
+    in-memory `audit` list is not persisted, matching the other subsystems.
+    """
+
+    def __init__(self, *, store: JsonStore | None = None) -> None:
         self.tasks: dict[str, Task] = {}
         self.audit: list[dict] = []
+        self._store = store
+        if store is not None:
+            self._restore()
+
+    # --- persistence -------------------------------------------------------
+
+    def _restore(self) -> None:
+        loaded = self._store.get(TASKS_SECTION)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{TASKS_SECTION!r} must be a JSON object")
+        tasks: dict[str, Task] = {}
+        for task_id, state in loaded.items():
+            if not isinstance(task_id, str) or not task_id:
+                raise ValueError("stored task ids must be non-empty strings")
+            record = Task.from_state(state)
+            if record.task_id != task_id:
+                raise ValueError(
+                    f"stored task {task_id!r} carries task_id {record.task_id!r}"
+                )
+            tasks[task_id] = record
+        self.tasks = tasks
+
+    def _persist(self) -> None:
+        if self._store is None:
+            return
+        self._store.put(
+            TASKS_SECTION,
+            {task_id: record.to_state() for task_id, record in self.tasks.items()},
+        )
 
     # --- index -------------------------------------------------------------
 
     def add(self, task: Task) -> Task:
+        self._insert(task)
+        self._persist()
+        return task
+
+    def _insert(self, task: Task) -> Task:
         self.tasks[task.task_id] = task
         return task
 
@@ -208,10 +324,15 @@ class TaskBoard:
     def transition(self, task: Task, status: str) -> Task:
         """Apply one legal state transition, or refuse it (§8.10)."""
 
+        if self._apply_transition(task, status):
+            self._persist()
+        return task
+
+    def _apply_transition(self, task: Task, status: str) -> bool:
         if status not in STATUSES:
             raise OsapError("SCHEMA_INVALID", f"unknown task status: {status!r}")
         if status == task.status:
-            return task
+            return False
         if status not in TRANSITIONS.get(task.status, frozenset()):
             raise OsapError(
                 "POLICY_DENIED",
@@ -222,7 +343,7 @@ class TaskBoard:
             {"action": "task.status", "task_id": task.task_id, "from": task.status, "to": status}
         )
         task.status = status
-        return task
+        return True
 
     # --- cancellation ------------------------------------------------------
 
@@ -238,9 +359,11 @@ class TaskBoard:
                 # Detached children keep running but lose the parent's authority (§8.7).
                 continue
             if task.status not in TERMINAL:
-                self.transition(task, "cancelled")
+                self._apply_transition(task, "cancelled")
                 cancelled.append(task.task_id)
             stack.extend(self.children(task.task_id))
+        if cancelled:
+            self._persist()
         return cancelled
 
     # --- delegation --------------------------------------------------------
@@ -298,7 +421,7 @@ class TaskBoard:
             result_schema=data["result_schema"],
             authority={"cap_id": data["delegated_capability"]["cap_id"]},
         )
-        self.add(child)
+        self._insert(child)
         self.audit.append(
             {
                 "action": "task.delegated",
@@ -306,6 +429,7 @@ class TaskBoard:
                 "parent": parent.task_id,
             }
         )
+        self._persist()
         return child
 
     # --- results -----------------------------------------------------------
@@ -408,6 +532,7 @@ class TaskBoard:
                 "cap_id": capability["cap_id"],
             }
         )
+        self._persist()
         return "accepted"
 
     # --- ownership ---------------------------------------------------------
