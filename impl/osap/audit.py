@@ -2,11 +2,19 @@
 # Copyright 2026 The OSAP Authors
 """Audit chain, redacted export, replay, and recovery (§10.5–§10.7, §8.11).
 
-The chain check verifies what the fixtures actually contain: each event is a
+`verify_chain` checks what the fixtures actually contain: each event is a
 valid audit event, every event shares the chain trace, and every `prev_hash`
 links to the previous `hash`. It does not recompute hashes from event bodies,
 because the example hashes are short placeholders and the standard does not
 fix a canonical audit encoding.
+
+`AuditLedger` is the writable side. It records one trace, fills `audit_id`,
+`ts`, `prev_hash`, and `hash`, and can persist the chain through a
+`JsonStore`. Because the ledger defines its own encoding — key-sorted,
+separator-minimal UTF-8 JSON with `hash` removed — it also rechecks each body
+hash on restore, so a rewritten event cannot pass with a stale hash. A corrupt
+or broken chain raises `AUDIT_CHAIN_INVALID`, which keeps L3/L4 state closed
+after a restart (§3.7).
 
 Redaction replaces target, policy, consent receipt, and context references
 with per-export salted commitments. The hash chain stays untouched, so a
@@ -22,19 +30,43 @@ from __future__ import annotations
 import copy
 import hashlib
 import secrets
+from datetime import datetime, timezone
 
-from . import schema
+from . import crypto, schema
 from .errors import OsapError
 from .idempotency import IdempotencyIndex
+from .store import JsonStore
 
 EVENT_SCHEMA = "audit-event.schema.json"
 CHAIN_INVALID = "AUDIT_CHAIN_INVALID"
+
+#: Prefix of the per-trace section a persisted ledger writes.
+LEDGER_SECTION_PREFIX = "audit.chain."
+
+#: `prev_hash` of the first event in a new chain.
+GENESIS_HASH = "sha256:0000000000000000"
 
 #: Fields replaced by commitments in a redacted export (§10.6).
 REDACTED_FIELDS = ("target", "policy", "consent_receipt_id", "context_refs")
 
 #: Effect events and the phase each must carry (§10.5).
 EFFECT_PHASES = {"effect.intent": "intent", "effect.executed": "outcome"}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _event_hash(event: dict) -> str:
+    """Hash one event body with the ledger's canonical encoding."""
+
+    body = {key: value for key, value in event.items() if key != "hash"}
+    digest = hashlib.sha256(crypto.canonical_bytes(body, drop=())).hexdigest()
+    return f"sha256:{digest}"
 
 
 def verify_chain(chain: dict) -> bool:
@@ -81,6 +113,162 @@ def verify_chain(chain: dict) -> bool:
             )
 
     return True
+
+
+class AuditLedger:
+    """One trace's append-only audit chain, optionally durable.
+
+    The ledger owns hash computation. `append` fills `trace_id`, `audit_id`,
+    `ts`, `prev_hash`, and `hash` when absent, while callers provide the
+    semantic fields (`actor`, `action`, `target`, `decision`, and optional
+    references). The chain is validated before the first append is recorded,
+    and `verify` rechecks schemas, links, and body hashes.
+
+    Persisting writes one `audit.chain.<trace_id>` section per append. A
+    ledger reopened over the same store must carry the same `trace_id`; a
+    mismatched or corrupt section raises instead of returning a partial chain,
+    so a Bus can keep L3/L4 actions closed (§3.7).
+    """
+
+    def __init__(
+        self,
+        *,
+        trace_id: str,
+        store: JsonStore | None = None,
+        clock=None,
+        section: str | None = None,
+    ) -> None:
+        if not isinstance(trace_id, str) or not trace_id:
+            raise ValueError("trace_id must be a non-empty string")
+        self.trace_id = trace_id
+        self.chain_id = f"audit_chain_{trace_id}"
+        self.created_at = _stamp((clock or _now)())
+        self.events: list[dict] = []
+        self._clock = clock or _now
+        self._store = store
+        self._section = section or f"{LEDGER_SECTION_PREFIX}{trace_id}"
+        if store is not None:
+            self._restore()
+
+    # --- persistence -------------------------------------------------------
+
+    def _restore(self) -> None:
+        loaded = self._store.get(self._section)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{self._section!r} must be a JSON object")
+        if loaded.get("trace_id") != self.trace_id:
+            raise ValueError(
+                f"{self._section!r} holds trace {loaded.get('trace_id')!r}, "
+                f"not {self.trace_id!r}"
+            )
+        events = loaded.get("events")
+        if not isinstance(events, list):
+            raise ValueError(f"{self._section!r} events must be a JSON array")
+        chain_id = loaded.get("chain_id", self.chain_id)
+        created_at = loaded.get("created_at", self.created_at)
+        if not isinstance(chain_id, str) or not chain_id:
+            raise ValueError(f"{self._section!r} chain_id must be a string")
+        if not isinstance(created_at, str) or not created_at:
+            raise ValueError(f"{self._section!r} created_at must be a string")
+        self.chain_id = chain_id
+        self.created_at = created_at
+        self.events = copy.deepcopy(events)
+        try:
+            self.verify()
+        except OsapError as error:
+            if error.code == CHAIN_INVALID:
+                raise
+            raise OsapError(
+                CHAIN_INVALID,
+                "stored audit chain is invalid",
+                details={"reason": error.code, "message": error.message},
+            ) from error
+
+    def _persist(self) -> None:
+        if self._store is None:
+            return
+        self._store.put(
+            self._section,
+            {
+                "chain_id": self.chain_id,
+                "trace_id": self.trace_id,
+                "created_at": self.created_at,
+                "events": copy.deepcopy(self.events),
+            },
+        )
+
+    # --- writing -----------------------------------------------------------
+
+    @property
+    def head(self) -> str:
+        """The last hash, or the genesis marker for an empty chain."""
+
+        return self.events[-1]["hash"] if self.events else GENESIS_HASH
+
+    def __len__(self) -> int:
+        return len(self.events)
+
+    def append(self, event: dict) -> dict:
+        """Validate, hash, and append one event, then flush it."""
+
+        if not isinstance(event, dict):
+            raise ValueError("an audit event must be a JSON object")
+        record = copy.deepcopy(event)
+        record.setdefault("trace_id", self.trace_id)
+        if record["trace_id"] != self.trace_id:
+            raise OsapError(
+                CHAIN_INVALID,
+                "audit event does not belong to this ledger's trace",
+                details={"trace_id": record["trace_id"], "ledger_trace_id": self.trace_id},
+            )
+        record.setdefault("audit_id", f"audit_{secrets.token_hex(8)}")
+        record.setdefault("ts", _stamp(self._clock()))
+        record["prev_hash"] = self.head
+        record.pop("hash", None)
+        record["hash"] = _event_hash(record)
+        schema.validate(EVENT_SCHEMA, record)
+        if any(existing["audit_id"] == record["audit_id"] for existing in self.events):
+            raise OsapError(
+                CHAIN_INVALID,
+                "duplicate audit_id in the chain",
+                details={"audit_id": record["audit_id"]},
+            )
+        self.events.append(record)
+        self._persist()
+        return copy.deepcopy(record)
+
+    # --- verification and export ------------------------------------------
+
+    def verify(self) -> bool:
+        """Require valid schemas and links, then recheck every body hash."""
+
+        verify_chain(self.chain())
+        for index, event in enumerate(self.events):
+            expected = _event_hash(event)
+            if event["hash"] != expected:
+                raise OsapError(
+                    CHAIN_INVALID,
+                    "audit event body does not match its hash",
+                    details={
+                        "index": index,
+                        "audit_id": event["audit_id"],
+                        "expected": expected,
+                        "actual": event["hash"],
+                    },
+                )
+        return True
+
+    def chain(self) -> dict:
+        """Return a detached chain object suitable for redaction or export."""
+
+        return {
+            "chain_id": self.chain_id,
+            "trace_id": self.trace_id,
+            "created_at": self.created_at,
+            "events": copy.deepcopy(self.events),
+        }
 
 
 def _commitment(salt: str, value: str) -> str:
