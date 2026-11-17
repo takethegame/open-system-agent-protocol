@@ -13,7 +13,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from osap import framing, transport
+from osap import AdmissionController, Quota, framing, transport
 from osap.bus import Bus
 from osap.errors import OsapError
 
@@ -233,6 +233,112 @@ class StreamTransportTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             transport.UnixStreamServer(self.path)
         self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "not a socket")
+
+
+class AdmissionTransportTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "bus.sock")
+        self.controller = AdmissionController(Quota(max_connections=1, rate=None))
+        self.server = transport.UnixStreamServer(
+            self.path, admission=self.controller
+        )
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp.cleanup()
+
+    def connect(self):
+        return transport.UnixStreamClient.connect(self.path, timeout=2)
+
+    def test_connection_quota_sends_rate_limit_before_closing(self):
+        first_client = self.connect()
+        first = self.server.accept()
+        second_client = self.connect()
+        try:
+            with self.assertRaises(OsapError) as caught:
+                self.server.accept()
+            self.assertEqual(caught.exception.code, "RATE_LIMIT")
+            reply = second_client.receive()
+            self.assertEqual(reply["type"], "error")
+            data = reply["body"]["data"]
+            self.assertEqual(data["code"], "RATE_LIMIT")
+            self.assertEqual(data["details"]["reason"], "connection_limit")
+        finally:
+            first.close()
+            first_client.close()
+            second_client.close()
+
+        third_client = self.connect()
+        third = self.server.accept()
+        try:
+            self.assertIs(third.bus.admission, self.controller)
+        finally:
+            third.close()
+            third_client.close()
+
+    def test_default_bus_factory_shares_the_controller(self):
+        client = self.connect()
+        session = self.server.accept()
+        try:
+            self.assertIs(session.bus.admission, self.controller)
+        finally:
+            session.close()
+            client.close()
+
+    def test_message_rate_limit_is_per_agent_over_the_wire(self):
+        self.server.close()
+        controller = AdmissionController(
+            Quota(rate=1, window=60.0, max_connections=None)
+        )
+        self.controller = controller
+        self.server = transport.UnixStreamServer(self.path, admission=controller)
+        thread = start(self.server.serve_forever, max_messages=3)
+        client = self.connect()
+        hello_message = hello()
+        request_message = request()
+        request_message["from"] = hello_message["from"]
+        other_message = request()
+        other_message["id"] = "req_other"
+        other_message["from"] = "agent://com.example.orchestrator/main#1a2b"
+        try:
+            self.assertEqual(client.call(hello_message)["type"], "welcome")
+            rejected = client.call(request_message)
+            self.assertEqual(rejected["type"], "error")
+            self.assertEqual(rejected["body"]["data"]["code"], "RATE_LIMIT")
+            self.assertEqual(
+                rejected["body"]["data"]["details"]["identity"],
+                hello_message["from"],
+            )
+            accepted = client.call(other_message)
+            self.assertEqual(accepted["type"], "result")
+        finally:
+            client.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+
+class ConnectionIdentityTests(unittest.TestCase):
+    def test_executable_wins_then_pid_then_uid(self):
+        executable = transport.PeerCredentials(
+            uid=1, pid=2, executable="/bin/sh"
+        )
+        self.assertEqual(
+            transport.connection_identity(executable),
+            "exe:" + os.path.realpath("/bin/sh"),
+        )
+        self.assertEqual(
+            transport.connection_identity(transport.PeerCredentials(uid=1, pid=2)),
+            "pid:2",
+        )
+        self.assertEqual(
+            transport.connection_identity(transport.PeerCredentials(uid=1)),
+            "uid:1",
+        )
+        self.assertEqual(
+            transport.connection_identity(transport.PeerCredentials()),
+            "unknown",
+        )
 
 
 if __name__ == "__main__":

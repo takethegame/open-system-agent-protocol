@@ -22,7 +22,9 @@ Covered so far:
   (§10.5–§10.7, §8.11);
 - persistence: a sectioned, atomic `JsonStore` that backs the idempotency
   index and capability issuance/revocation state so a restart replays instead
-  of re-executing (§7.8, §5.5).
+  of re-executing (§7.8, §5.5);
+- flow control: per-Agent connection, in-flight, queue, and token-bucket rate
+  limits with explicit `RATE_LIMIT` backpressure (§7.11, §11.7).
 """
 
 from . import (
@@ -33,6 +35,7 @@ from . import (
     context,
     crypto,
     federation,
+    flowcontrol,
     identity,
     pcs,
     registry,
@@ -41,25 +44,30 @@ from . import (
     task,
     transport,
 )
-from .bus import Bus
+from .bus import Bus, sender_identity
 from .clock import Deadline
 from .envelope import KNOWN_TYPES, SUPPORTED_MAJOR, validate
 from .errors import STANDARD_CODES, OsapError
+from .flowcontrol import Admission, AdmissionController, DEFAULT_QUOTA, Quota
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
 from .pcs import ConsentSigner
 from .store import JsonStore
 
 __all__ = [
+    "Admission",
+    "AdmissionController",
     "Binding",
     "Bus",
     "ConsentSigner",
+    "DEFAULT_QUOTA",
     "Deadline",
     "IdempotencyIndex",
     "JsonStore",
     "KNOWN_TYPES",
     "MAX_FRAME_BYTES",
     "OsapError",
+    "Quota",
     "STANDARD_CODES",
     "SUPPORTED_MAJOR",
     "audit",
@@ -69,10 +77,12 @@ __all__ = [
     "context",
     "crypto",
     "federation",
+    "flowcontrol",
     "identity",
     "pcs",
     "registry",
     "schema",
+    "sender_identity",
     "store",
     "task",
     "transport",

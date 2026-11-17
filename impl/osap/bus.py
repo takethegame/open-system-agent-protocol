@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from . import envelope, framing
 from .clock import Deadline
 from .errors import OsapError
+from .flowcontrol import AdmissionController
 from .idempotency import IdempotencyIndex
 from .store import JsonStore
 
@@ -26,12 +27,37 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def sender_identity(message: object) -> str:
+    """The per-Agent admission key for an envelope.
+
+    `from` is a string in the current schema. The dict form is accepted too so
+    an older or extended envelope cannot silently share the `unknown` bucket.
+    """
+
+    if not isinstance(message, dict):
+        return "unknown"
+    sender = message.get("from")
+    if isinstance(sender, str) and sender:
+        return sender
+    if isinstance(sender, dict):
+        agent = sender.get("agent")
+        if isinstance(agent, str) and agent:
+            return agent
+    return "unknown"
+
+
 class Bus:
     """A single-user, in-process Bus.
 
     The idempotency index is memory-only by default. Pass `store` (a file path
     or a shared `JsonStore`) or an explicit `idempotency` index to replay
     duplicates across a restart instead of re-executing their side effects.
+
+    Every envelope passes through an `AdmissionController` (§7.11). The default
+    is generous; pass one controller to several Buses to enforce one message
+    quota per Agent across connections. `admission_wait` is how long a caller
+    may wait for an in-flight slot before `RATE_LIMIT` is returned (default 0,
+    which never blocks).
     """
 
     def __init__(
@@ -41,6 +67,8 @@ class Bus:
         version: str = "0.1",
         idempotency: IdempotencyIndex | None = None,
         store: JsonStore | str | os.PathLike[str] | None = None,
+        admission: AdmissionController | None = None,
+        admission_wait: float = 0.0,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -51,10 +79,14 @@ class Bus:
                 idempotency = IdempotencyIndex(store=JsonStore(store))
             else:
                 idempotency = IdempotencyIndex()
+        if admission_wait < 0:
+            raise ValueError("admission_wait must not be negative")
         self.binding = binding
         self.version = version
         self.state = AWAITING_HELLO
         self.idempotency = idempotency
+        self.admission = admission or AdmissionController()
+        self.admission_wait = admission_wait
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []
@@ -104,19 +136,21 @@ class Bus:
     # --- receive -----------------------------------------------------------
 
     def receive(self, message: dict) -> dict:
-        """Validate and dispatch one logical message."""
+        """Validate and dispatch one logical message through admission control."""
 
-        if self.state == AWAITING_HELLO:
-            if not isinstance(message, dict) or message.get("type") != "hello":
-                raise OsapError(
-                    "TRANSPORT_HANDSHAKE_REQUIRED",
-                    "hello/welcome has not completed on this connection",
-                )
-            return self.handshake(message)
+        identity = sender_identity(message)
+        with self.admission.admit(identity, timeout=self.admission_wait):
+            if self.state == AWAITING_HELLO:
+                if not isinstance(message, dict) or message.get("type") != "hello":
+                    raise OsapError(
+                        "TRANSPORT_HANDSHAKE_REQUIRED",
+                        "hello/welcome has not completed on this connection",
+                    )
+                return self.handshake(message)
 
-        envelope.validate(message)
-        self.received.append(message["id"])
-        return self.dispatch(message)
+            envelope.validate(message)
+            self.received.append(message["id"])
+            return self.dispatch(message)
 
     def receive_bytes(self, data: bytes) -> list[dict]:
         """Decode a stream binding buffer and dispatch every complete frame."""

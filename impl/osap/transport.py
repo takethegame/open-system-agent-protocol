@@ -33,6 +33,7 @@ from pathlib import Path
 from . import framing
 from .bus import Bus
 from .errors import OsapError
+from .flowcontrol import Admission, AdmissionController
 
 _UCRED_BYTES = struct.calcsize("3i")
 
@@ -58,6 +59,24 @@ class PeerCredentials:
             "executable": self.executable,
             "source": self.source,
         }
+
+
+def connection_identity(peer: PeerCredentials) -> str:
+    """A stable admission key for a kernel-attested peer.
+
+    Before the OSAP handshake there is no Agent URI, so the listener keys
+    connection quotas by what the kernel can attest: the executable path when
+    available, then the pid, then the uid. An unidentifiable peer shares the
+    `unknown` bucket instead of bypassing the quota.
+    """
+
+    if peer.executable:
+        return f"exe:{os.path.realpath(peer.executable)}"
+    if peer.pid is not None:
+        return f"pid:{peer.pid}"
+    if peer.uid is not None:
+        return f"uid:{peer.uid}"
+    return "unknown"
 
 
 def _getpeereid(fd: int) -> tuple[int | None, int | None]:
@@ -259,6 +278,7 @@ class UnixSession:
         self.peer = peer_credentials(sock)
         if peer_policy is not None:
             peer_policy.check(self.peer)
+        self.admission_lease: Admission | None = None
         self.closed = False
 
     # --- wire -------------------------------------------------------------
@@ -344,6 +364,9 @@ class UnixSession:
         if not self.closed:
             self.closed = True
             self.sock.close()
+            if self.admission_lease is not None:
+                self.admission_lease.release()
+                self.admission_lease = None
 
     def __enter__(self) -> "UnixSession":
         return self
@@ -361,13 +384,15 @@ class UnixStreamServer:
         *,
         bus_factory: Callable[[], Bus] | None = None,
         peer_policy: PeerPolicy | None = None,
+        admission: AdmissionController | None = None,
         backlog: int = 8,
     ) -> None:
         self.path = Path(path)
         self._remove_stale_socket()
         self.peer_policy = peer_policy
+        self.admission = admission or AdmissionController()
         self._bus_factory = bus_factory or (
-            lambda: Bus(binding=framing.Binding.STREAM)
+            lambda: Bus(binding=framing.Binding.STREAM, admission=self.admission)
         )
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -395,12 +420,26 @@ class UnixStreamServer:
     def accept(self) -> UnixSession:
         connection, _ = self.sock.accept()
         try:
-            return UnixSession(
+            session = UnixSession(
                 connection,
                 binding=framing.Binding.STREAM,
                 bus=self._bus_factory(),
                 peer_policy=self.peer_policy,
             )
+            try:
+                session.admission_lease = self.admission.open_connection(
+                    connection_identity(session.peer)
+                )
+            except OsapError as error:
+                # Tell the peer why it was dropped; a silent close looks like a
+                # network fault and invites an immediate retry storm.
+                try:
+                    session.send(session.bus.error_envelope({}, error))
+                except (OSError, OsapError):
+                    pass
+                session.close()
+                raise
+            return session
         except Exception:
             connection.close()
             raise
