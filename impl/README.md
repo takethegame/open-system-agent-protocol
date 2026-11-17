@@ -12,14 +12,14 @@
 | 错误模型 | §7.7 | 27 个标准错误码、`retryable` 默认值、`osap.error/v1` body |
 | 流式分帧 | §7.9 | 4 字节大端长度前缀 + UTF-8 JSON，增量解码 |
 | 消息型分帧 | §7.9、§7.10 | 保留原生消息边界，不强制长度前缀 |
-| UDS stream 绑定 | §7.9、§7.10 | `AF_UNIX` 监听/连接、长度前缀、每连接独立 `Bus`、`chmod 0600` |
+| UDS stream 绑定 | §7.9、§7.10 | `AF_UNIX` 监听/连接、长度前缀、每连接独立 `Bus`、`chmod 0600`、可选并发服务 |
 | 消息型本地绑定 | §7.9、§7.10 | `AF_UNIX` 数据报 socketpair，一报一消息，无长度前缀 |
 | 对端认证 | §7.10 | Linux `SO_PEERCRED`、macOS `getpeereid`+`LOCAL_PEERPID`；可校验 uid/gid/pid/可执行文件，缺字段即拒绝 |
 | 8 MiB 上限 | §7.9 | 两种绑定都按 UTF-8 JSON 字节数校验 |
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
 | 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用；可注入 `JsonStore` 跨重启回放 |
 | 持久化状态 | §7.8、§5.5、§10.3 | 分节 JSON、原子替换、`fsync`、0600；幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启 |
-| 流控与背压 | §7.11、§11.7 | 每身份连接/在途/队列上限与令牌桶；FIFO 等待；`RATE_LIMIT` 带 `reason`、`retry_after_ms` 与队列深度 |
+| 流控与背压 | §7.11、§11.7 | 每身份连接/在途/队列上限与令牌桶；FIFO 等待；`RATE_LIMIT` 带 `reason`、`retry_after_ms` 与队列深度；线程池并发服务 |
 | 单调时钟 deadline | §7.8 | 墙钟回拨或挂起恢复不得延长超时 |
 | Ed25519 签名 | §4.5 | 清单签名、验证、基钥轮换宽限期 |
 | Agent 注册 | §4.1–§4.3 | `hello` 校验、App 绑定、公钥绑定、`welcome` 签发 |
@@ -95,7 +95,7 @@ impl/
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程）
     task.py             §8 任务树、预算、取消、结果、handoff
-    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证
+    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、并发服务
   tests/                单元测试（unittest）
 ```
 
@@ -326,6 +326,14 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `UnixStreamServer` 的默认 Bus 工厂把同一个控制器传给每个连接，因此消息速率跨连接生效；拒绝连接时先回一个 `RATE_LIMIT` 错误帧再关闭，避免静默断开诱发重试风暴。
 
+### 5.38 并发服务用线程池，连接与消息配额共享控制器
+
+`UnixStreamServer.serve_forever(concurrency=N)` 把 accept 与 worker 分开：监听循环只负责接受连接，已接受的连接提交给大小为 N 的线程池，每个 worker 在自己的 session 上 `select` 后调用 `serve()`。`concurrency=1` 保持原来的串行路径，因此现有调用不需要迁移。
+
+默认 Bus 工厂同时传入服务器的 `AdmissionController` 和 `admission_wait`。同一 Agent 的多个连接因此共享在途与排队配额：一个连接里的慢请求会占住该 Agent 的在途槽位，同 Agent 的新连接按 FIFO 等待或被 `RATE_LIMIT` 拒绝；不同 Agent 仍有自己的令牌桶和队列，不会被对方的慢请求拖住。
+
+`close()` 与并发循环的收尾会对所有会话 socket 执行 `shutdown(SHUT_RDWR)`，让阻塞在 `receive` 的 worker 退出。`max_messages` 在并发模式下是 best-effort 停止条件：已受理但尚未完成的回复也占用上限，失败时会归还；它用于有界测试与优雅停止，不是协议级配额。
+
 ## 6. 已知限制
 
 1. **部分内存态**：幂等索引、能力签发/撤销与同意流程可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文与任务仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
@@ -346,7 +354,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，无分发协议**：`ConsentFlow` 用 Ed25519 签回执并在 `activate` 验签；接入 `JsonStore` 时密钥写入 `consent.pcs_key` 并复用，不接 store 时仍是一次性生成。PCS 公钥如何登记、轮换与撤销尚未定义，私钥与回执同处一个 0600 JSON 文件，验签密钥仍需带外分发。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
-19. **UDS 服务端仍是串行的**：`serve_forever` 一次只服务一个连接直到 EOF。已有每身份连接/在途/队列与速率配额，但慢客户端仍会阻塞其他连接被 accept；等待队列只在并发调用同一控制器时才有意义，§7.11 的并发调度仍待补。
+19. **并发上限由线程池决定**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；没有事件循环、异步 I/O 或按 Agent 的加权调度。`max_messages` 在并发模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 
