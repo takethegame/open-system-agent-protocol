@@ -1,6 +1,6 @@
-# 参考实现（M2.1 – M2.7 + 持久化 / PCS）
+# 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态与同意流程持久化、PCS 回执签名与离线验签（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态与同意流程持久化、PCS 回执签名与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -19,6 +19,7 @@
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
 | 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用；可注入 `JsonStore` 跨重启回放 |
 | 持久化状态 | §7.8、§5.5、§10.3 | 分节 JSON、原子替换、`fsync`、0600；幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启 |
+| 流控与背压 | §7.11、§11.7 | 每身份连接/在途/队列上限与令牌桶；FIFO 等待；`RATE_LIMIT` 带 `reason`、`retry_after_ms` 与队列深度 |
 | 单调时钟 deadline | §7.8 | 墙钟回拨或挂起恢复不得延长超时 |
 | Ed25519 签名 | §4.5 | 清单签名、验证、基钥轮换宽限期 |
 | Agent 注册 | §4.1–§4.3 | `hello` 校验、App 绑定、公钥绑定、`welcome` 签发 |
@@ -85,6 +86,7 @@ impl/
     envelope.py         §7.1 校验（版本 → 类型 → schema）
     errors.py           §7.7 错误码与 OsapError
     federation.py       §6.7、§6.8 原生描述符投影与命名空间映射
+    flowcontrol.py      §7.11、§11.7 admission control、令牌桶与背压
     framing.py          §7.9 两种分帧绑定
     identity.py         注册、保留命名空间、App/公钥绑定
     idempotency.py      §7.8 幂等索引
@@ -316,6 +318,14 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 未注入 `signer` 时，生成的 PCS 私钥写入 `consent.pcs_key`（同一 0600 文件），重启后回执仍能验签；注入的 signer 不落盘，适合外部密钥管理。加载时会用私钥重新导出公钥并与存储值比对，不一致就拒绝启动，避免“密钥换了但回执还在”的静默失败。私钥与回执同处一个文件只是单用户参考实现的选择，生产应改用 OS 密钥环或独立 PCS 服务。
 
+### 5.37 流控以身份为键，等待是显式选择
+
+`AdmissionController` 的每个身份拥有独立的令牌桶、在途计数与 FIFO 等待队列。令牌桶用 `time.monotonic()` 连续补充，上限是 `rate`；`retry_after_ms` 只在 `rate > 0` 时给出。连接配额在握手前按内核可证属性（可执行文件 → pid → uid）计数，消息配额在握手后按 `from` 计数，两者不互相冒充。
+
+`Bus` 默认不等待（`admission_wait=0`），超限直接返回 `RATE_LIMIT`；需要排队的调用方显式传 `timeout`。等待超时只移除自己的 waiter、保留别人的在途槽位，并归还本次预扣的令牌。队列是 FIFO，`priority` 未接入；这满足“不得饥饿”的 MUST，加权公平队列仍是 SHOULD。
+
+`UnixStreamServer` 的默认 Bus 工厂把同一个控制器传给每个连接，因此消息速率跨连接生效；拒绝连接时先回一个 `RATE_LIMIT` 错误帧再关闭，避免静默断开诱发重试风暴。
+
 ## 6. 已知限制
 
 1. **部分内存态**：幂等索引、能力签发/撤销与同意流程可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文与任务仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
@@ -336,7 +346,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，无分发协议**：`ConsentFlow` 用 Ed25519 签回执并在 `activate` 验签；接入 `JsonStore` 时密钥写入 `consent.pcs_key` 并复用，不接 store 时仍是一次性生成。PCS 公钥如何登记、轮换与撤销尚未定义，私钥与回执同处一个 0600 JSON 文件，验签密钥仍需带外分发。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
-19. **UDS 服务端是串行的**：`serve_forever` 一次只服务一个连接直到 EOF，没有连接并发、admission control、在途请求上限或 rate limit；§7.11 的隔离与背压仍是文字要求。
+19. **UDS 服务端仍是串行的**：`serve_forever` 一次只服务一个连接直到 EOF。已有每身份连接/在途/队列与速率配额，但慢客户端仍会阻塞其他连接被 accept；等待队列只在并发调用同一控制器时才有意义，§7.11 的并发调度仍待补。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 
@@ -352,6 +362,8 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 | 回执验签失败的错误码 | §7.7 没有回执专用码 | 用标准码 `AUTH_DENIED`，`details.reason` 区分 `receipt_signature_invalid` 与 `receipt_key_unknown` |
 | 示例回执的 `proof` | 夹具签名是占位串，未绑定任何 PCS 公钥 | 只用于范围校验用例；真实回执由 `ConsentSigner` 生成并可离线验签 |
 | PCS 私钥存储 | 规范未定义密钥存储方式 | 参考实现把生成的私钥写入 0600 `JsonStore`；生产应使用 OS 密钥环或独立 PCS 服务 |
+| 流控的 `priority` | §7.11 把 `priority` 定为提示，SHOULD 使用加权公平队列 | 参考实现使用 FIFO 且不读取 `priority`；满足 MUST 的“不得饥饿”要求 |
+| 流控等待的默认值 | §7.11 允许返回 `RATE_LIMIT` 或让发送方等待 | `Bus.admission_wait` 默认 0，直接拒绝；需要背压等待的调用方显式设置 |
 | 回执中的 `agent` | §5.8 未明确要求回执绑定能力 `subject` | 实现额外校验 `receipt.agent == capability.subject`，不改变任何用例结果 |
 | `audience` 与 `actions` 的检查顺序 | 规范未规定 | 固定为 `cap_id` → `task_id` → `audience` → `actions` → `resources`，保证同一输入总是同一错误码 |
 | 委派超预算的错误码 | §8.6 只定义了执行期超支 | 委派阶段用 `POLICY_DENIED`，执行期用 `TASK_BUDGET_EXCEEDED` |

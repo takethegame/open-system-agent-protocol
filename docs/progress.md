@@ -18,6 +18,7 @@
 | M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
 | 持久化基础（M4 前置） | ✅ 完成 | 幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启；原子分节写入；387 tests | 2026-11-16 |
 | PCS 回执签名（M4 前置） | ✅ 完成 | Ed25519 签名 + 离线验签；`activate` 先验签；375 tests | 2026-11-16 |
+| 流控与背压（M4 前置） | ✅ 完成 | 每身份连接/在途/队列上限与令牌桶速率；FIFO 等待；显式 `RATE_LIMIT`；419 tests | 2026-11-17 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -31,7 +32,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 21 个模块 + 适配器（4705 行）+ 387 个单元测试 |
+| 参考实现 | 22 个模块 + 适配器（5205 行）+ 419 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -75,6 +76,7 @@
 | `48e744e` | 2026-11-16 | **持久化基础**：`JsonStore` 原子分节 JSON；幂等索引与能力签发/撤销跨重启；共享 store 隔离；27 条新测试，累计 358 |
 | `092c710` | 2026-11-16 | **PCS 回执签名**：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签；17 条新测试，累计 375 |
 | `61a9994` | 2026-11-16 | **同意流程持久化**：请求/回执/预约与签名密钥跨重启；`put_many` 原子多节写入；12 条新测试，累计 387 |
+| `0b13483` | 2026-11-17 | **流控与背压**：`Quota` / `AdmissionController` / `Admission`；每身份令牌桶、在途与 FIFO 等待队列；连接配额与显式 `RATE_LIMIT`；32 条新测试，累计 419 |
 
 ---
 
@@ -717,7 +719,64 @@ python3 demo/run_demo.py
 
 ---
 
-## 9. 待确认的规范问题
+## 9. 流控与背压（M4 前置，已完成）
+
+### 9.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/flowcontrol.py` | `Quota` / `AdmissionController` / `Admission`：每身份连接、在途、队列上限与令牌桶；`RATE_LIMIT` 附带 `reason`、`retry_after_ms`、队列深度与配额 |
+| `impl/osap/bus.py` | `Bus(admission=..., admission_wait=...)`；每条信封先过 admission 再校验/路由；默认配额为 32 连接 / 16 在途 / 32 排队 / 200 条每秒 |
+| `impl/osap/transport.py` | 监听器按内核可证身份限制连接数；拒绝时先回 `RATE_LIMIT` 再关闭；默认 Bus 工厂共享同一控制器 |
+| `impl/tests/test_flowcontrol.py` 等 | 32 条新测试：28 条 controller/Bus，4 条真实传输 |
+
+### 9.2 语义
+
+- **每身份隔离**：令牌桶、在途计数与等待队列都以身份为键。一个 Agent 排满自己的队列不会占用另一个 Agent 的槽位，避免全局队头阻塞。
+- **连接配额用内核身份**：握手前没有 Agent URI，因此按可执行文件路径 → pid → uid 回退；无法识别的对端共享 `unknown` 桶，而不是绕过配额。
+- **消息配额用 `from`**：握手后按信封 `from` 的 Agent URI 计数；`from` 缺失或不是字符串时落入 `unknown`。连接配额与消息配额是两套键，互不冒充。
+- **令牌桶**：初始满桶，按 `time.monotonic()` 连续补充，上限为 `rate`；`rate=0` 表示全部拒绝；`rate=None` 表示不限速。`retry_after_ms` 只在 `rate > 0` 时给出。
+- **有界 FIFO 队列**：`max_in_flight` 满时可等待，等待人数由 `max_queued` 限制；先到先得，因此低优先级/晚到请求不会永久饥饿。`priority` 未接入，加权公平队列属于规范的 SHOULD，未实现。
+- **等待是显式选择**：`AdmissionController.admit(timeout=...)` 才会等待；`Bus.admission_wait` 默认 0，即不排队、直接 `RATE_LIMIT`。等待超时只移除自己的 waiter，不释放别人占用的在途槽位，并归还本次预扣的令牌。
+- **显式背压**：所有拒绝都用标准码 `RATE_LIMIT`，`details.reason` 为 `rate_limited`、`in_flight_limit`、`queue_full`、`queue_timeout` 或 `connection_limit`；`details.quota` 给出完整配额，`details.in_flight` / `queued` / `connections` 给出当时计数。
+- **失败也释放**：`Admission` 是上下文管理器；`dispatch` 抛 `OsapError` 或 `NotImplementedError` 时槽位照常归还。被限流的消息不执行副作用，也不进入 `Bus.received`。
+- **连接拒绝可诊断**：`UnixStreamServer.accept` 在配额拒绝时先发送一个 `osap.error/v1` 帧再关闭，避免客户端把“静默断开”误判为网络故障并立即重试。
+
+### 9.3 验证证据
+
+2026-11-17，提交 `0b13483`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 419 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --stub
+→ 68 cases: 0 pass, 0 fail, 68 skip（无适配器）
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 32 条测试覆盖：配额校验；满桶、补充、封顶与零速率；同身份限流与跨身份隔离；在途上限、队列满、队列超时与令牌归还；连接上限与释放；真实 UDS 连接拒绝与 `RATE_LIMIT` 帧；共享控制器；dispatch 失败后的槽位释放。
+
+### 9.4 已知边界
+
+1. **UDS 服务端仍是串行**：`serve_forever` 一次只服务一个连接直到 EOF。连接配额与消息配额已生效，但慢客户端仍会阻塞其他连接被 accept；真正的并发调度（每连接线程或事件循环 + 每身份队列）尚未实现。
+2. **`priority` 只是规范提示**：参考实现不读取 `priority`，FIFO 满足“不得饥饿”的 MUST；加权公平队列与 credit-based 流控是 SHOULD，未实现。
+3. **配额状态在内存**：令牌桶与计数器重启清零，没有跨进程共享或持久化；多进程部署需要外部限流器。
+4. **等待队列的公平性限于单进程**：`max_queued` 只约束同一控制器实例的等待者；多个 Bus 只有共享同一个 `AdmissionController` 时才共享配额。
+5. **`status` 消息尚未路由**：队列深度通过 `AdmissionController.snapshot()` 提供，尚未作为 `status` 消息正文返回。
+
+---
+
+## 10. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -733,17 +792,17 @@ python3 demo/run_demo.py
 
 ---
 
-## 10. 下一步（按顺序）
+## 11. 下一步（按顺序）
 
 1. 把审计账本、上下文与任务树接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
 2. 定义 PCS 公钥的登记、轮换与撤销，并把私钥从普通 JSON 迁移到 OS 密钥环；
-3. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
+3. 把 UDS 服务端改为并发服务（每连接线程或事件循环 + 每身份队列），让 §7.11 的等待队列真正生效，并加入平台原生绑定（XPC/Binder/named pipe）；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
 
 ---
 
-## 11. 变更记录
+## 12. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -765,3 +824,4 @@ python3 demo/run_demo.py
 | 2026-11-16 | **持久化基础**（`48e744e`）：`JsonStore` 原子分节写入；幂等索引与能力签发/撤销跨重启；`Bus` 可注入 store；新增 27 条测试，累计 358；`docs/standard.md` 语义未改 |
 | 2026-11-16 | **PCS 回执签名**（`092c710`）：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签再查预约；新增 17 条测试，累计 375；演示增加 `receipt=verified` |
 | 2026-11-16 | **同意流程持久化**（`61a9994`）：请求/回执/预约与 PCS 签名密钥跨重启；`put_many` 原子多节写入；新增 12 条测试，累计 387 |
+| 2026-11-17 | **流控与背压**（`0b13483`）：每身份连接/在途/队列上限与令牌桶；FIFO 等待与显式 `RATE_LIMIT`；UDS 连接配额与拒绝帧；新增 32 条测试，累计 419 |
