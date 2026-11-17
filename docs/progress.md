@@ -1,6 +1,6 @@
 # OSAP 进展记录
 
-> 更新时间：2026-11-16
+> 更新时间：2026-11-17
 > 关联规划：[`roadmap.md`](roadmap.md)
 > 性质：工作记录（非规范性）。规范性内容以 [`standard.md`](standard.md) 为准。
 
@@ -16,7 +16,7 @@
 | M1 可执行一致性 | ✅ 完成 | 68/68 用例（100%） | 2026-11-12 |
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
 | M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
-| 持久化基础（M4 前置） | ✅ 完成 | 幂等索引与能力签发/撤销跨重启；原子写入、0600、失败回滚；358 tests | 2026-11-16 |
+| 持久化基础（M4 前置） | ✅ 完成 | 幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启；原子分节写入；387 tests | 2026-11-16 |
 | PCS 回执签名（M4 前置） | ✅ 完成 | Ed25519 签名 + 离线验签；`activate` 先验签；375 tests | 2026-11-16 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
@@ -31,7 +31,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 21 个模块 + 适配器（4593 行）+ 375 个单元测试 |
+| 参考实现 | 21 个模块 + 适配器（4705 行）+ 387 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -74,6 +74,7 @@
 | `17c11ad` | 2026-11-15 | **M3 完成**：同意顺序与 §8.11 崩溃对账模型；四个模型、两个负向对照全部通过 |
 | `48e744e` | 2026-11-16 | **持久化基础**：`JsonStore` 原子分节 JSON；幂等索引与能力签发/撤销跨重启；共享 store 隔离；27 条新测试，累计 358 |
 | `092c710` | 2026-11-16 | **PCS 回执签名**：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签；17 条新测试，累计 375 |
+| `61a9994` | 2026-11-16 | **同意流程持久化**：请求/回执/预约与签名密钥跨重启；`put_many` 原子多节写入；12 条新测试，累计 387 |
 
 ---
 
@@ -616,23 +617,26 @@ Alloy 补充模型不采用：四条主不变量的关系约束在 TLA+ 中已�
 | `impl/osap/idempotency.py` | 构造时可注入 `JsonStore`；`remember` / `forget` / `clear` 同步落盘，重启后同一 `id` 直接回放 |
 | `impl/osap/capability.py` | 持久化 `issued` 与 `revoked`，加载时重建 `parent_cap_id → children` 索引；撤销与级联跨重启保留 |
 | `impl/osap/bus.py` | `Bus` 接受显式 `IdempotencyIndex` 或 `store` 路径/实例；两者互斥，误传直接 `ValueError` |
-| `impl/tests/test_store.py` 等 | 27 条新测试：store 往返/重开/权限/失败回滚，幂等回放与清理，撤销级联重建，Bus 重启回放与共享 store 分节隔离 |
+| `impl/osap/consent_flow.py` | 持久化 `requests` / `receipts` / `reservations` 与生成的 PCS 签名密钥；`put_many` 一次原子写入三节；加载时恢复时间戳与签名者 |
+| `impl/tests/test_store.py` 等 | 39 条新测试：store 往返/重开/权限/失败回滚/多节写入，幂等回放与清理，撤销级联重建，Bus 重启回放，同意流程请求/拒绝/激活/撤销/过期状态跨重启，签名密钥复用与注入 |
 
 ### 7.2 语义
 
-- **一个路径一个 store 实例**：Bus 与 `CapabilityAuthority` 可以共享同一个 `JsonStore`，各自写不同 section（`idempotency`、`capability.issued`、`capability.revoked`），互不覆盖。两个独立 store 实例同时指向同一文件会各自写整份快照，后写者会丢掉前者的 section；这一限制写在模块文档里。
+- **一个路径一个 store 实例**：Bus、`CapabilityAuthority` 与 `ConsentFlow` 可以共享同一个 `JsonStore`，各自写不同 section（`idempotency`、`capability.*`、`consent.*`），互不覆盖。两个独立 store 实例同时指向同一文件会各自写整份快照，后写者会丢掉前者的 section；这一限制写在模块文档里。
 - **重启即回放，不重复执行**：`Bus.receive` 命中已持久化的 `id` 时返回缓存结果并把 `replayed` 置真，`side_effects` 不增加。C7-05 的“只执行一次”因此不再依赖进程存活。
 - **撤销跨重启**：`revoke` 在返回前写入排序后的 revoked 列表；重新打开后 `is_revoked`、`check_validity` 与“已撤销父不能派生”都保持原判定。
-- **审计不落盘**：`CapabilityAuthority.audit` 仍是进程内列表；持久账本属于后续工作，避免把“状态持久化”误称为“审计持久化”。
-- **整节重写**：每次变更重写整个 section，换取简单与原子性；参考实现不追求增量写或并发写吞吐。
+- **同意流程终态跨重启**：`pending` 请求仍可继续预约/授权；`denied`、`expired`、`activated`、`revoked` 保持单向；激活过的回执再次激活返回 `DUPLICATE`。
+- **签名密钥随流程保存**：由 `ConsentFlow` 生成的 PCS 私钥写入 `consent.pcs_key`（文件 0600），重启后回执仍可验签；注入的 signer 不落盘，加载时会校验 `public_key` 与私钥一致。
+- **审计不落盘**：`CapabilityAuthority.audit` 与 `ConsentFlow.audit` 仍是进程内列表；持久账本属于后续工作，避免把“状态持久化”误称为“审计持久化”。
+- **整节重写**：每次变更重写整个 section，换取简单与原子性；`put_many` 把多节变更合并为一次 `os.replace`。参考实现不追求增量写或并发写吞吐。
 
 ### 7.3 验证证据
 
-2026-11-16，提交 `48e744e`：
+2026-11-16，提交 `48e744e`（幂等/能力）与 `61a9994`（同意流程）：
 
 ```
 python3 -m unittest discover -s impl/tests -t impl
-→ Ran 358 tests ... OK
+→ Ran 387 tests ... OK
 
 python3 tools/check_schemas.py
 → OK: 45 checks passed across 15 schemas
@@ -645,17 +649,28 @@ python3 tools/conformance_run.py --stub
 python3 tools/conformance_run.py --impl impl/adapter.py
 → 68 cases: 62 pass, 0 fail, 6 skip
 python3 demo/run_demo.py
-→ registered=3 discovery=1 consent=1 delegated=2 context=1 audit=verified
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
 TLA2TOOLS_JAR=... spec/formal/check.sh
 → OK: all positive models pass and both negative controls fail
 ```
 
-### 7.4 已知边界
+新增的 39 条测试中，27 条覆盖 `JsonStore`、幂等回放、能力撤销与 Bus 重启；12 条覆盖同意流程的请求/拒绝/激活/撤销/过期状态、签名密钥复用与注入、损坏 section 的拒绝。
+
+### 7.4 同意流程与签名密钥
+
+- **section 布局**：`consent.requests`、`consent.receipts`、`consent.reservations` 与 `consent.pcs_key`；每次变更通过 `put_many` 一次原子替换，避免请求已记下但预约尚未落盘的中间态。
+- **时间戳**：`requested_at` / `expires_at` 在存储中写成 UTC ISO 字符串，加载时解析回 `datetime`；判定仍使用注入时钟。
+- **终态单向**：拒绝把预约标为 `cancelled`，撤销标为 `revoked`，激活标为 `active`；重新打开后 `usable()` 与再次 `activate()` 都保持原判定。
+- **签名者恢复**：未注入 `signer` 时优先复用 `consent.pcs_key`；没有则生成并保存。注入的 `signer` 不写入 store，适合外部密钥管理；加载时若 `public_key` 与私钥不匹配则拒绝启动。
+- **边界**：私钥与回执同处一个 0600 JSON 文件，只适用于单用户参考实现；生产环境应使用 OS 密钥环或独立 PCS 服务。
+
+### 7.5 已知边界
 
 1. 单进程、单写者；没有跨进程文件锁、租约或冲突合并；
 2. 外部副作用没有 write-ahead：动作执行后才落盘幂等结果，进程在两步之间崩溃仍可能重复执行；协议层只能要求实现对账；
-3. 审计、上下文、任务树、同意请求/回执/预约仍未持久化；
-4. 没有 TTL 清理、压缩或归档；长期运行会把所有已见 `id` 与历史凭证留在同一文件里。
+3. 审计、上下文与任务树仍未持久化；
+4. 没有 TTL 清理、压缩或归档；长期运行会把所有已见 `id`、历史凭证与已完成同意流程留在同一文件里；
+5. PCS 私钥落在同一个 JSON 文件里，没有 OS 密钥环集成或密钥轮换。
 
 ---
 
@@ -695,7 +710,7 @@ python3 demo/run_demo.py
 
 ### 8.4 已知边界
 
-1. 默认签名密钥是进程内一次性生成；跨重启或跨进程验签必须注入并保存同一把密钥；
+1. 使用 `JsonStore` 时签名密钥写入 `consent.pcs_key` 并在重启后复用；不接 store 时仍是进程内一次性生成。跨进程验签需要带外获得公钥；
 2. PCS 公钥的登记、轮换与撤销没有协议；验证方需要带外获得公钥；
 3. 能力凭证 `proof` 仍是结构校验，未由 CA 私钥覆盖；
 4. 示例回执的 `proof` 是占位串；只有 `ConsentFlow` 产出的回执进入验签路径。
@@ -720,8 +735,8 @@ python3 demo/run_demo.py
 
 ## 10. 下一步（按顺序）
 
-1. 把审计账本、上下文、任务树与同意请求/回执/预约接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
-2. 定义 PCS 公钥的登记、轮换与撤销，并把 `ConsentFlow` 的签名密钥持久化；
+1. 把审计账本、上下文与任务树接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
+2. 定义 PCS 公钥的登记、轮换与撤销，并把私钥从普通 JSON 迁移到 OS 密钥环；
 3. 补 §7.11 的连接并发、admission control 与 rate limit，并加入平台原生绑定（XPC/Binder/named pipe）；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
@@ -749,3 +764,4 @@ python3 demo/run_demo.py
 | 2026-11-15 | **M3 完成**（`17c11ad`）：新增 `Consent.tla`（预约→授权→激活→撤销）与 `Recovery.tla`（intent/outcome/unknown）；`check.sh` 扩到四个正常模型与两个负向对照；M3 退出标准全部满足 |
 | 2026-11-16 | **持久化基础**（`48e744e`）：`JsonStore` 原子分节写入；幂等索引与能力签发/撤销跨重启；`Bus` 可注入 store；新增 27 条测试，累计 358；`docs/standard.md` 语义未改 |
 | 2026-11-16 | **PCS 回执签名**（`092c710`）：Ed25519 覆盖去 `proof` 的规范化 JSON；离线验签；`activate` 先验签再查预约；新增 17 条测试，累计 375；演示增加 `receipt=verified` |
+| 2026-11-16 | **同意流程持久化**（`61a9994`）：请求/回执/预约与 PCS 签名密钥跨重启；`put_many` 原子多节写入；新增 12 条测试，累计 387 |

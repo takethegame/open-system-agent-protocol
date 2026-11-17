@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等与能力状态持久化、PCS 回执签名与离线验签（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态与同意流程持久化、PCS 回执签名与离线验签（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -18,7 +18,7 @@
 | 8 MiB 上限 | §7.9 | 两种绑定都按 UTF-8 JSON 字节数校验 |
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
 | 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用；可注入 `JsonStore` 跨重启回放 |
-| 持久化状态 | §7.8、§5.5 | 分节 JSON、原子替换、`fsync`、0600；幂等索引与能力签发/撤销跨重启 |
+| 持久化状态 | §7.8、§5.5、§10.3 | 分节 JSON、原子替换、`fsync`、0600；幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启 |
 | 单调时钟 deadline | §7.8 | 墙钟回拨或挂起恢复不得延长超时 |
 | Ed25519 签名 | §4.5 | 清单签名、验证、基钥轮换宽限期 |
 | Agent 注册 | §4.1–§4.3 | `hello` 校验、App 绑定、公钥绑定、`welcome` 签发 |
@@ -91,7 +91,7 @@ impl/
     pcs.py              §10.4 PCS 回执签名与离线验签
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
-    store.py            原子分节 JSON 持久化（幂等与能力状态）
+    store.py            原子分节 JSON 持久化（幂等、能力、同意流程）
     task.py             §8 任务树、预算、取消、结果、handoff
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证
   tests/                单元测试（unittest）
@@ -300,9 +300,9 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 ### 5.34 持久化用分节 JSON 与原子替换
 
-`JsonStore` 把状态放在一个 JSON 对象的多个 section 里（`idempotency`、`capability.issued`、`capability.revoked`），每次变更整节重写，用临时文件 + `fsync` + `os.replace` 保证读到的要么是旧版本、要么是新版本。文件与临时文件都以 0600 创建；`put` 先序列化候选文档再更新内存，序列化失败时旧状态仍然可用。
+`JsonStore` 把状态放在一个 JSON 对象的多个 section 里（`idempotency`、`capability.issued`、`capability.revoked`、`consent.requests`、`consent.receipts`、`consent.reservations`、`consent.pcs_key`），每次变更整节重写，用临时文件 + `fsync` + `os.replace` 保证读到的要么是旧版本、要么是新版本。文件与临时文件都以 0600 创建；`put` 先序列化候选文档再更新内存，序列化失败时旧状态仍然可用。`put_many` 把多节变更合并为一次替换，同意流程因此不会出现“请求已记下、预约还没落盘”的中间态。
 
-推荐同一个路径只开一个 `JsonStore` 并让 Bus 与 `CapabilityAuthority` 共享：两个实例各自持有整份快照，后写者会覆盖前者的 section。`CapabilityAuthority` 加载时从 `issued` 重建父→子索引，因此重启后 `revoke(parent)` 仍能级联；`Bus` 命中已落盘的 `id` 时只回放结果，不再执行副作用。
+推荐同一个路径只开一个 `JsonStore` 并让 Bus、`CapabilityAuthority` 与 `ConsentFlow` 共享：两个实例各自持有整份快照，后写者会覆盖前者的 section。`CapabilityAuthority` 加载时从 `issued` 重建父→子索引，因此重启后 `revoke(parent)` 仍能级联；`Bus` 命中已落盘的 `id` 时只回放结果，不再执行副作用。
 
 ### 5.35 回执签名覆盖去掉 `proof` 的规范化 JSON
 
@@ -310,9 +310,15 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `ConsentFlow` 默认生成一个进程内 `ConsentSigner`，`grant` 用私钥签回执，`activate` 在检查预约状态前先验签。验签失败返回 `AUTH_DENIED`，`details.reason` 区分 `receipt_signature_invalid` 与 `receipt_key_unknown`；§7.7 的 `AUTH_DENIED` 明确包含“签名校验失败”，因此不新增错误码。固定顺序保证伪造回执无法通过错误差异探测预约是否已激活。
 
+### 5.36 同意流程与签名密钥一起持久化
+
+`ConsentFlow(store=...)` 把三类状态放在 `consent.requests` / `consent.receipts` / `consent.reservations`：请求记录里的 `requested_at`、`expires_at` 以 UTC ISO 字符串保存，加载时解析回 `datetime`；拒绝、撤销、激活都是单向终态，重启后 `usable()` 与再次 `activate()` 保持原判定。
+
+未注入 `signer` 时，生成的 PCS 私钥写入 `consent.pcs_key`（同一 0600 文件），重启后回执仍能验签；注入的 signer 不落盘，适合外部密钥管理。加载时会用私钥重新导出公钥并与存储值比对，不一致就拒绝启动，避免“密钥换了但回执还在”的静默失败。私钥与回执同处一个文件只是单用户参考实现的选择，生产应改用 OS 密钥环或独立 PCS 服务。
+
 ## 6. 已知限制
 
-1. **部分内存态**：幂等索引与能力的签发/撤销可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文、任务与同意流程仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
+1. **部分内存态**：幂等索引、能力签发/撤销与同意流程可通过 `JsonStore` 跨重启，但注册表、轮换状态、审计、上下文与任务仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
 2. **开发密钥环**：一致性适配器在导入时生成一次性 Ed25519 密钥并为示例 App 签清单。示例里的 `base64url-example-*` 是占位字符串，不是真实密钥。
 3. **OS 认证只覆盖 Linux/macOS 本地 socket**：已实现 `SO_PEERCRED` / `getpeereid` / `LOCAL_PEERPID` 与可执行文件解析；audit token、package identity、代码签名和 Windows SID 都未实现。
 4. **不是平台原生绑定**：只有 `AF_UNIX` stream 与数据报 socketpair，没有 XPC、Binder、named pipe 或 localhost mTLS；对端认证是 uid/gid/pid/可执行文件，不是平台代码签名。
@@ -327,8 +333,8 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 13. **审计链不重算正文哈希**：只验证事件 schema、trace、`audit_id` 与 `prev_hash` 链接；夹具的 hash 是占位串，规范也未固定编码。
 14. **审计只在内存**：`ContextFabric`、`TaskBoard` 与审计模块都不持久化；重启恢复与真实回放需要持久账本，C7-01 仍是 manual。
 15. **62 个 pass 覆盖全部 automated 用例**，但不覆盖 6 条 manual 的运行时、跨进程与崩溃恢复语义。
-16. **同意流程只在内存**：`ConsentFlow.requests` / `receipts` / `reservations` 都是进程内字典，重启即丢；没有持久化的用户决策日志，也不会把同一请求广播给多个 Bus。
-17. **回执签名有本地密钥，无分发协议**：`ConsentFlow` 现在用 Ed25519 签回执并在 `activate` 验签，但默认密钥是进程内一次性生成；PCS 公钥如何登记、轮换与撤销尚未定义，示例夹具仍是占位签名，验签密钥需要带外分发。
+16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
+17. **回执签名有本地密钥，无分发协议**：`ConsentFlow` 用 Ed25519 签回执并在 `activate` 验签；接入 `JsonStore` 时密钥写入 `consent.pcs_key` 并复用，不接 store 时仍是一次性生成。PCS 公钥如何登记、轮换与撤销尚未定义，私钥与回执同处一个 0600 JSON 文件，验签密钥仍需带外分发。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
 19. **UDS 服务端是串行的**：`serve_forever` 一次只服务一个连接直到 EOF，没有连接并发、admission control、在途请求上限或 rate limit；§7.11 的隔离与背压仍是文字要求。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
@@ -345,6 +351,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 | 能力凭证 `proof` | 规范要求“MUST 是签名对象”，实现未验签 | 只校验结构；密钥分发与验签待补 |
 | 回执验签失败的错误码 | §7.7 没有回执专用码 | 用标准码 `AUTH_DENIED`，`details.reason` 区分 `receipt_signature_invalid` 与 `receipt_key_unknown` |
 | 示例回执的 `proof` | 夹具签名是占位串，未绑定任何 PCS 公钥 | 只用于范围校验用例；真实回执由 `ConsentSigner` 生成并可离线验签 |
+| PCS 私钥存储 | 规范未定义密钥存储方式 | 参考实现把生成的私钥写入 0600 `JsonStore`；生产应使用 OS 密钥环或独立 PCS 服务 |
 | 回执中的 `agent` | §5.8 未明确要求回执绑定能力 `subject` | 实现额外校验 `receipt.agent == capability.subject`，不改变任何用例结果 |
 | `audience` 与 `actions` 的检查顺序 | 规范未规定 | 固定为 `cap_id` → `task_id` → `audience` → `actions` → `resources`，保证同一输入总是同一错误码 |
 | 委派超预算的错误码 | §8.6 只定义了执行期超支 | 委派阶段用 `POLICY_DENIED`，执行期用 `TASK_BUDGET_EXCEEDED` |
