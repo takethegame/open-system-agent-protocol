@@ -22,11 +22,14 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import select
 import socket
 import stat
 import struct
 import sys
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -385,14 +388,20 @@ class UnixStreamServer:
         bus_factory: Callable[[], Bus] | None = None,
         peer_policy: PeerPolicy | None = None,
         admission: AdmissionController | None = None,
+        admission_wait: float = 0.0,
         backlog: int = 8,
     ) -> None:
         self.path = Path(path)
         self._remove_stale_socket()
         self.peer_policy = peer_policy
         self.admission = admission or AdmissionController()
+        self.admission_wait = admission_wait
         self._bus_factory = bus_factory or (
-            lambda: Bus(binding=framing.Binding.STREAM, admission=self.admission)
+            lambda: Bus(
+                binding=framing.Binding.STREAM,
+                admission=self.admission,
+                admission_wait=self.admission_wait,
+            )
         )
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -448,9 +457,34 @@ class UnixStreamServer:
         with self.accept() as session:
             return session.serve()
 
-    def serve_forever(self, *, max_messages: int | None = None) -> int:
-        """Serve connections until closed or `max_messages` replies were sent."""
+    def serve_forever(
+        self,
+        *,
+        max_messages: int | None = None,
+        concurrency: int = 1,
+    ) -> int:
+        """Serve connections until closed or `max_messages` replies were sent.
 
+        `concurrency=1` keeps the original serial behavior. A higher value
+        accepts and serves that many connections in parallel, so an idle or
+        slow peer cannot block another peer's handshake. Every session still
+        owns its own `Bus`; per-Agent quotas and wait queues are shared through
+        the server's `AdmissionController`.
+
+        With concurrency above 1, `max_messages` is a best-effort stop
+        condition: no new reply is started once the count is reached, but
+        replies already in flight may finish.
+        """
+
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int):
+            raise ValueError("concurrency must be a positive int")
+        if concurrency < 1:
+            raise ValueError("concurrency must be a positive int")
+        if concurrency == 1:
+            return self._serve_serial(max_messages)
+        return self._serve_concurrent(max_messages, concurrency)
+
+    def _serve_serial(self, max_messages: int | None) -> int:
         served = 0
         while not self.closed and (max_messages is None or served < max_messages):
             try:
@@ -467,6 +501,81 @@ class UnixStreamServer:
                 pass
             finally:
                 session.close()
+        return served
+
+    def _serve_concurrent(self, max_messages: int | None, concurrency: int) -> int:
+        served = 0
+        lock = threading.Lock()
+        stop = threading.Event()
+        sessions: set[UnixSession] = set()
+
+        def worker(session: UnixSession) -> None:
+            nonlocal served
+            try:
+                while not stop.is_set():
+                    try:
+                        readable, _, _ = select.select(
+                            [session.sock], [], [], 0.05
+                        )
+                    except (OSError, ValueError):
+                        break
+                    if not readable:
+                        continue
+                    with lock:
+                        if max_messages is not None and served >= max_messages:
+                            break
+                        if max_messages is not None:
+                            served += 1
+                    try:
+                        session.serve()
+                    except (ConnectionError, OSError, OsapError, NotImplementedError):
+                        # The claim above was for a reply that was never sent;
+                        # return it so the budget still reflects delivered
+                        # replies.
+                        with lock:
+                            if max_messages is not None:
+                                served -= 1
+                        break
+                    with lock:
+                        if max_messages is not None and served >= max_messages:
+                            stop.set()
+            finally:
+                with lock:
+                    sessions.discard(session)
+                session.close()
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            try:
+                while not self.closed and not stop.is_set():
+                    try:
+                        readable, _, _ = select.select([self.sock], [], [], 0.05)
+                    except (OSError, ValueError):
+                        break
+                    if not readable:
+                        continue
+                    try:
+                        session = self.accept()
+                    except OsapError:
+                        continue
+                    except OSError:
+                        break
+                    with lock:
+                        if stop.is_set() or (
+                            max_messages is not None and served >= max_messages
+                        ):
+                            session.close()
+                            break
+                        sessions.add(session)
+                    pool.submit(worker, session)
+            finally:
+                stop.set()
+                with lock:
+                    pending = list(sessions)
+                for session in pending:
+                    try:
+                        session.sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
         return served
 
     def close(self) -> None:

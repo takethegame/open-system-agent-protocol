@@ -10,6 +10,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +40,36 @@ def start(target, **kwargs):
     thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
     thread.start()
     return thread
+
+
+def wait_until(predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.001)
+    raise AssertionError("condition was not reached before the timeout")
+
+
+class Gate:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+
+class GatedBus(Bus):
+    """A Bus whose busy-Agent dispatch waits for the test to release it."""
+
+    def __init__(self, gate, **kwargs):
+        super().__init__(**kwargs)
+        self.gate = gate
+
+    def dispatch(self, message):
+        if message.get("from") == "agent://busy":
+            self.gate.started.set()
+            if not self.gate.release.wait(2):
+                raise TimeoutError("gate was not released")
+        return super().dispatch(message)
 
 
 class PeerCredentialTests(unittest.TestCase):
@@ -233,6 +264,82 @@ class StreamTransportTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             transport.UnixStreamServer(self.path)
         self.assertEqual(Path(self.path).read_text(encoding="utf-8"), "not a socket")
+
+
+class ConcurrentStreamTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "bus.sock")
+        self.server = transport.UnixStreamServer(self.path)
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp.cleanup()
+
+    def connect(self):
+        return transport.UnixStreamClient.connect(self.path, timeout=2)
+
+    def test_concurrency_must_be_a_positive_int(self):
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(concurrency=0)
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(concurrency=True)
+
+    def test_an_idle_connection_does_not_block_another(self):
+        thread = start(self.server.serve_forever, max_messages=2, concurrency=2)
+        idle = self.connect()
+        active = self.connect()
+        try:
+            self.assertEqual(active.call(hello())["type"], "welcome")
+            self.assertEqual(active.call(request())["type"], "result")
+        finally:
+            idle.close()
+            active.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_the_same_agent_queues_on_its_shared_in_flight_slot(self):
+        self.server.close()
+        gate = Gate()
+        controller = AdmissionController(
+            Quota(max_in_flight=1, max_queued=1, rate=None)
+        )
+        self.server = transport.UnixStreamServer(
+            self.path,
+            admission=controller,
+            admission_wait=2.0,
+            bus_factory=lambda: GatedBus(
+                gate,
+                binding=framing.Binding.STREAM,
+                admission=controller,
+                admission_wait=2.0,
+            ),
+        )
+        thread = start(self.server.serve_forever, concurrency=2)
+        first = self.connect()
+        second = self.connect()
+        hello_message = hello()
+        hello_message["from"] = "agent://busy"
+        request_message = request()
+        request_message["from"] = "agent://busy"
+        try:
+            self.assertEqual(first.call(hello_message)["type"], "welcome")
+            first.send(request_message)
+            self.assertTrue(gate.started.wait(2))
+            second.send(hello_message)
+            wait_until(
+                lambda: controller.snapshot("agent://busy")["queued"] == 1
+            )
+            gate.release.set()
+            self.assertEqual(first.receive()["type"], "result")
+            self.assertEqual(second.receive()["type"], "welcome")
+        finally:
+            gate.release.set()
+            self.server.close()
+            first.close()
+            second.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
 
 
 class AdmissionTransportTests(unittest.TestCase):
