@@ -20,6 +20,7 @@
 | PCS 回执签名（M4 前置） | ✅ 完成 | Ed25519 签名 + 离线验签；`activate` 先验签；375 tests | 2026-11-16 |
 | 流控与背压（M4 前置） | ✅ 完成 | 每身份连接/在途/队列上限与令牌桶速率；FIFO 等待；显式 `RATE_LIMIT`；UDS 可并发服务；422 tests | 2026-11-17 |
 | 任务树持久化（M4 前置） | ✅ 完成 | 整棵树跨重启：状态、预算、`consumed`、`detached`、父子链与 handoff；每次变更一次原子写入；440 tests | 2026-11-17 |
+| 审计账本持久化（M4 前置） | ✅ 完成 | 单 trace 追加链：自动生成 `audit_id`/`ts`/`prev_hash`/`hash`；重启重算正文哈希；损坏 fail closed；457 tests | 2026-11-17 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -33,7 +34,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 22 个模块 + 适配器（5439 行）+ 440 个单元测试 |
+| 参考实现 | 22 个模块 + 适配器（5631 行）+ 457 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -80,6 +81,7 @@
 | `0b13483` | 2026-11-17 | **流控与背压**：`Quota` / `AdmissionController` / `Admission`；每身份令牌桶、在途与 FIFO 等待队列；连接配额与显式 `RATE_LIMIT`；32 条新测试，累计 419 |
 | `eaf8260` | 2026-11-17 | **并发 UDS 服务**：`serve_forever(concurrency=N)` 线程池接受/服务连接；空闲连接不再阻塞他人；同 Agent 跨连接共享在途与排队配额；3 条新测试，累计 422 |
 | `f47abd7` | 2026-11-17 | **任务树持久化**：`TaskBoard(store=...)` 与无损 `Task.to_state`/`from_state`；整树跨重启；每次变更一次原子写入；18 条新测试，累计 440 |
+| `ca808b9` | 2026-11-17 | **审计账本持久化**：`AuditLedger` 单 trace 追加链；规范哈希与重启重算；损坏 fail closed；按 trace 分区；17 条新测试，累计 457 |
 
 ---
 
@@ -291,7 +293,7 @@ C2/C4/C6 复用 `manifest.json`、`discovery-result.json`、`capability-record.j
 | `impl/osap/transport.py` | 508 | UDS stream、消息型 socketpair、对端认证 | §7.9、§7.10 | M2.1b |
 | `impl/osap/context.py` | 289 | 句柄、标签、黑板、对象、缓存、存储声明 | §9.2–§9.10 | M2.5b |
 | `impl/osap/federation.py` | 138 | 原生描述符投影、原生身份、命名空间、信任归一 | §6.4、§6.7、§6.8 | M2.5c |
-| `impl/osap/audit.py` | 226 | 审计链、脱敏导出、回放、恢复、跨用户 | §8.11、§10.5–§10.6、§11.2 | M2.6 |
+| `impl/osap/audit.py` | 415 | 审计链、持久账本、脱敏导出、回放、恢复、跨用户 | §8.11、§10.5–§10.6、§11.2 | M2.6 |
 | `impl/adapter.py` | 761 | 一致性适配器 | — | M2.1a–M2.7 |
 | `demo/run_demo.py` | 575 | 三 Agent 端到端演示：注册、发现、同意、委派、上下文、审计 | §4–§10 | M2.7 |
 
@@ -522,8 +524,8 @@ python3 tools/benchmark_revocation.py
 8. 上下文审计与黑板状态只在内存，没有真正撤销句柄；§9.7 的“谁在何时解析了哪个句柄”只能读进程内列表。
 9. 没有真实对象存储：`delete_object` 只返回判定，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
 10. 联邦只做投影：没有监听原生注册表变化，也没有按 TTL 自动刷新，C6-08 仍是 manual；MCP/A2A/OpenAPI 的签名未验证。
-11. 审计链不重算正文摘要：只验证 schema、trace、`audit_id` 与 `prev_hash` 链接；真正的防篡改需要规范化编码与持久账本。
-12. 审计与上下文只在内存；任务树已持久化（见第 10 节），但跨进程回放与 C7-01 仍未实现。
+11. `verify_chain` 对夹具链仍只验证 schema、trace、`audit_id` 与 `prev_hash` 链接；新增的 `AuditLedger` 对自己的事件重算正文哈希，因此损坏的持久链会在重启时 fail closed。
+12. 上下文只在内存；任务树与审计账本已持久化（见第 10、11 节），但跨进程回放与 C7-01 仍未实现。
 13. 62 个 pass 覆盖全部 automated 用例；6 条 manual 仍依赖崩溃恢复与跨 App 集成。
 14. 演示是进程内单进程：它证明模块能串起来，不证明真实传输、真实 OS 句柄或持久账本。
 15. `ConsentFlow` 的请求、回执与预约都只在内存；重启即丢，也没有把同一请求广播给多个 Bus。
@@ -673,7 +675,7 @@ TLA2TOOLS_JAR=... spec/formal/check.sh
 
 1. 单进程、单写者；没有跨进程文件锁、租约或冲突合并；
 2. 外部副作用没有 write-ahead：动作执行后才落盘幂等结果，进程在两步之间崩溃仍可能重复执行；协议层只能要求实现对账；
-3. 审计与上下文仍未持久化；任务树已在第 10 节接入 `JsonStore`；
+3. 上下文仍未持久化；任务树与审计账本已在第 10、11 节接入 `JsonStore`；
 4. 没有 TTL 清理、压缩或归档；长期运行会把所有已见 `id`、历史凭证与已完成同意流程留在同一文件里；
 5. PCS 私钥落在同一个 JSON 文件里，没有 OS 密钥环集成或密钥轮换。
 
@@ -834,7 +836,61 @@ python3 demo/run_demo.py
 
 ---
 
-## 11. 待确认的规范问题
+## 11. 审计账本持久化（M4 前置，已完成）
+
+### 11.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/audit.py` | `AuditLedger`：单 trace 追加链，自动填充 `audit_id`、`ts`、`prev_hash`、`hash`；`chain()` 导出可脱敏对象；`verify()` 在链接校验后重算正文哈希；按 `audit.chain.<trace_id>` 持久化 |
+| `impl/tests/test_audit.py` | 17 条新测试：字段填充与链接、重复 `audit_id`/外部 trace/非法事件拒绝、返回副本、正文哈希重算、脱敏、重开、按 trace 隔离，以及损坏 section/断链/错误 trace/错误形状的 fail closed |
+
+### 11.2 语义
+
+- **账本拥有哈希**：`append` 在调用方给出的语义字段上补齐 `trace_id`、`audit_id`、`ts`，把 `prev_hash` 设为当前链头，再对去掉 `hash` 的事件计算规范哈希。编码与签名共用 `crypto.canonical_bytes`：key 排序、最小分隔符、UTF-8 JSON。
+- **一次追加一次写入**：每条事件通过 `JsonStore.put` 原子替换该 trace 的 section；被拒绝的事件不会进入 `events`，也不会产生写入。
+- **重启即校验**：`_restore` 先要求 section 是对象、`trace_id` 与构造参数一致、`events` 是数组，再调用 `verify()`。`verify()` 先跑原有的 schema/trace/链接检查，再逐条重算正文哈希，因此“改了正文却保留旧 hash”会在重启时被拒绝。
+- **失败关闭**：断链、重复 `audit_id`、正文哈希不匹配、section 内 trace 不一致都抛 `AUDIT_CHAIN_INVALID`；section 形状错误抛 `ValueError`。加载失败不会留下半个账本，L3/L4 调用方应据此保持关闭（§3.7）。
+- **按 trace 分区**：每个 trace 写自己的 `audit.chain.<trace_id>` section，多个 `AuditLedger` 可以共享同一个 `JsonStore` 而互不覆盖；没有跨 trace 的全局顺序。
+- **与只读校验共存**：`verify_chain` 对夹具链的行为不变，仍只验证 schema、trace、`audit_id` 唯一性与 `prev_hash` 链接；重算正文哈希只发生在账本自己的事件上，因为夹具 hash 是占位串、规范也未固定编码。
+- **导出可继续脱敏**：`chain()` 返回深拷贝，可直接传给 `redact_chain`；脱敏保留 hash 链，只替换敏感字段。
+
+### 11.3 验证证据
+
+2026-11-17，提交 `ca808b9`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 457 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --stub
+→ 68 cases: 0 pass, 0 fail, 68 skip（无适配器）
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 17 条测试覆盖：自动字段与首尾链接；显式 `audit_id`/`ts` 保留；重复 id、外部 trace、非法事件不落盘；返回值与内部状态隔离；正文哈希重算；账本链脱敏；重开后事件与链头一致；多 trace 共享 store；正文篡改、断链、错误 trace、非对象 section、非数组 events 与损坏事件形状的拒绝；空账本不写 section。
+
+### 11.4 已知边界
+
+1. **一个账本一个 trace**：没有跨 trace 的全局顺序、合并链头或统一的查询接口。
+2. **整节重写**：长链每次追加都序列化全部事件；没有分段、日志结构或增量写。
+3. **没有保留策略**：没有归档、截断、TTL 或按用户分区；§3.7 的多实例 leader election 仍未实现，单写者约束靠调用方保证。
+4. **未自动接入**：`Bus`、`TaskBoard` 与 `ContextFabric` 不会自动向账本追加事件；调用方显式调用 `append`。
+5. **编码仍是参考实现约定**：账本哈希与签名共用 `crypto.canonical_bytes`，不是完整 RFC 8785；其他实现若要逐字节复现需要采用同一编码。
+6. **夹具链不重算**：`verify_chain` 对 `examples/audit-chain.json` 仍只验证链接，不能据此推断夹具中的短 hash 是真实摘要。
+
+---
+
+## 12. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -850,9 +906,9 @@ python3 demo/run_demo.py
 
 ---
 
-## 12. 下一步（按顺序）
+## 13. 下一步（按顺序）
 
-1. 把审计账本与上下文接到 `JsonStore`（或专用账本），补 TTL 清理、压缩与真实回放；
+1. 把上下文接到 `JsonStore`，并为审计账本补保留/归档、按用户分区与真实回放；
 2. 定义 PCS 公钥的登记、轮换与撤销，并把私钥从普通 JSON 迁移到 OS 密钥环；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
@@ -860,7 +916,7 @@ python3 demo/run_demo.py
 
 ---
 
-## 13. 变更记录
+## 14. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -885,3 +941,4 @@ python3 demo/run_demo.py
 | 2026-11-17 | **流控与背压**（`0b13483`）：每身份连接/在途/队列上限与令牌桶；FIFO 等待与显式 `RATE_LIMIT`；UDS 连接配额与拒绝帧；新增 32 条测试，累计 419 |
 | 2026-11-17 | **并发 UDS 服务**（`eaf8260`）：`serve_forever(concurrency=N)` 线程池；空闲连接不再阻塞他人；同 Agent 跨连接共享配额；新增 3 条测试，累计 422 |
 | 2026-11-17 | **任务树持久化**（`f47abd7`）：`TaskBoard(store=...)` 无损整树跨重启；每次变更一次原子写入；新增 18 条测试，累计 440 |
+| 2026-11-17 | **审计账本持久化**（`ca808b9`）：`AuditLedger` 单 trace 追加链；规范哈希与重启重算；损坏 fail closed；按 trace 分区；新增 17 条测试，累计 457 |
