@@ -669,6 +669,145 @@ class RegistryVerificationTests(unittest.TestCase):
         self.assertIs(verifier.verify_receipt(receipt), receipt)
 
 
+class SeparatedKeyStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.state_path = Path(self.directory.name) / "state.json"
+        self.key_path = Path(self.directory.name) / "key.json"
+
+    def flow(self, *, store=None, key_store=None, registry=None, signer=None, clock=None):
+        return consent_flow.ConsentFlow(
+            user=USER,
+            clock=clock or Clock(),
+            signer=signer,
+            store=store,
+            key_store=key_store,
+            registry=registry,
+        )
+
+    @staticmethod
+    def grant(flow):
+        payload = request_payload()
+        flow.request(payload)
+        flow.reserve_cap_id(payload["request_id"], cap_id="cap_flow")
+        return flow.grant(
+            payload["request_id"], option="allow_once", receipt_id="receipt_flow"
+        )
+
+    def test_the_private_key_goes_only_to_the_key_store(self):
+        state = JsonStore(self.state_path)
+        keys = JsonStore(self.key_path)
+        flow = self.flow(store=state, key_store=keys)
+
+        self.assertIsNone(state.get(consent_flow.SIGNING_KEY_SECTION))
+        stored = keys.get(consent_flow.SIGNING_KEY_SECTION)
+        self.assertEqual(stored["kid"], flow.signer.kid)
+        self.assertEqual(stored["public_key"], flow.signer.public_key)
+        self.assertTrue(stored["private_key"])
+
+    def test_a_reopened_flow_reuses_the_key_store_signer(self):
+        first = self.flow(
+            store=JsonStore(self.state_path), key_store=JsonStore(self.key_path)
+        )
+        second = self.flow(
+            store=JsonStore(self.state_path), key_store=JsonStore(self.key_path)
+        )
+        self.assertEqual(second.signer.kid, first.signer.kid)
+        self.assertEqual(second.signer.public_key, first.signer.public_key)
+        self.assertEqual(second.pcs_key, first.pcs_key)
+
+    def test_a_verifier_writes_no_key_to_the_receipt_store(self):
+        state = JsonStore(self.state_path)
+        keys = JsonStore(self.key_path)
+        clock = Clock()
+        issuer = self.flow(
+            store=state,
+            key_store=keys,
+            registry=pcs.KeyRegistry(store=state, clock=clock),
+            clock=clock,
+        )
+        issuer.publish_pcs_key()
+        receipt = self.grant(issuer)
+
+        verifier = consent_flow.ConsentFlow.verifier(
+            user=USER,
+            registry=pcs.KeyRegistry(store=state, clock=clock),
+            store=state,
+            clock=clock,
+        )
+        self.assertIsNone(state.get(consent_flow.SIGNING_KEY_SECTION))
+        self.assertNotEqual(verifier.signer.kid, issuer.signer.kid)
+        verifier.activate(receipt["receipt_id"], token_for(receipt))
+        self.assertTrue(verifier.usable(receipt["cap_id"]))
+        self.assertIsNone(state.get(consent_flow.SIGNING_KEY_SECTION))
+
+    def test_the_state_store_alone_cannot_resolve_an_unpublished_kid(self):
+        state = JsonStore(self.state_path)
+        issuer = self.flow(store=state, key_store=JsonStore(self.key_path))
+        receipt = self.grant(issuer)
+        verifier = consent_flow.ConsentFlow.verifier(
+            user=USER,
+            registry=pcs.KeyRegistry(clock=Clock()),
+            store=state,
+            clock=Clock(),
+        )
+        with self.assertRaises(OsapError) as caught:
+            verifier.verify_receipt(receipt)
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+        self.assertEqual(
+            caught.exception.details["reason"], "receipt_key_unknown"
+        )
+
+    def test_a_verifier_requires_a_registry(self):
+        with self.assertRaises(ValueError):
+            consent_flow.ConsentFlow.verifier(user=USER, registry=None)
+
+    def test_a_verifier_accepts_an_injected_signer(self):
+        state = JsonStore(self.state_path)
+        clock = Clock()
+        issuer = self.flow(
+            store=state,
+            key_store=JsonStore(self.key_path),
+            registry=pcs.KeyRegistry(store=state, clock=clock),
+            clock=clock,
+        )
+        issuer.publish_pcs_key()
+        receipt = self.grant(issuer)
+        injected = pcs.ConsentSigner.generate(kid="pcs-verifier-injected")
+        verifier = consent_flow.ConsentFlow.verifier(
+            user=USER,
+            registry=pcs.KeyRegistry(store=state, clock=clock),
+            store=state,
+            clock=clock,
+            signer=injected,
+        )
+        self.assertIs(verifier.signer, injected)
+        self.assertIs(verifier.verify_receipt(receipt), receipt)
+
+    def test_a_verifier_can_reopen_the_state_store_and_reverify(self):
+        state = JsonStore(self.state_path)
+        clock = Clock()
+        issuer = self.flow(
+            store=state,
+            key_store=JsonStore(self.key_path),
+            registry=pcs.KeyRegistry(store=state, clock=clock),
+            clock=clock,
+        )
+        issuer.publish_pcs_key()
+        receipt = self.grant(issuer)
+
+        reopened = JsonStore(self.state_path)
+        verifier = consent_flow.ConsentFlow.verifier(
+            user=USER,
+            registry=pcs.KeyRegistry(store=reopened, clock=clock),
+            store=reopened,
+            clock=clock,
+        )
+        self.assertIs(verifier.verify_receipt(receipt), receipt)
+        self.assertIsNone(reopened.get(consent_flow.SIGNING_KEY_SECTION))
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

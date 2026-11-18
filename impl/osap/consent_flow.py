@@ -20,8 +20,11 @@ another process check receipts without holding the PCS private key;
 falls back to its signer's public key, preserving the single-process path.
 
 With a `JsonStore`, the requests, receipts, reservations, and a generated
-signing key survive a restart; the audit list stays in memory. The clock is
-injectable, matching the rest of the reference implementation.
+signing key survive a restart; the audit list stays in memory. Pass
+`key_store=...` to keep `consent.pcs_key` out of the receipt store, so a
+verifier can share only receipts and reservations; `ConsentFlow.verifier()`
+builds a registry-backed verifier whose ephemeral signer is never persisted.
+The clock is injectable, matching the rest of the reference implementation.
 """
 
 from __future__ import annotations
@@ -91,6 +94,7 @@ class ConsentFlow:
         clock=None,
         signer: ConsentSigner | None = None,
         store: JsonStore | None = None,
+        key_store: JsonStore | None = None,
         registry: KeyRegistry | None = None,
     ) -> None:
         self.user = user
@@ -98,6 +102,7 @@ class ConsentFlow:
         self.policy_agent = policy_agent
         self._clock = clock or _now
         self._store = store
+        self._key_store = key_store
         self.registry = registry
         self.requests: dict[str, dict] = {}
         self.receipts: dict[str, dict] = {}
@@ -106,6 +111,38 @@ class ConsentFlow:
         if store is not None:
             self._restore()
         self.signer = self._restore_signer(signer)
+
+    @classmethod
+    def verifier(
+        cls,
+        *,
+        user: str,
+        registry: KeyRegistry,
+        store: JsonStore | None = None,
+        authority: CapabilityAuthority | None = None,
+        policy_agent: str = "agent://system/policy#0",
+        clock=None,
+        signer: ConsentSigner | None = None,
+    ) -> "ConsentFlow":
+        """Build a registry-backed verifier that never persists a PCS key.
+
+        The verifier's own signer is ephemeral and unrelated to the issuer's;
+        receipts are checked by resolving `proof.kid` in `registry`. Closing
+        over `store` gives access to receipts and reservations without
+        `consent.pcs_key`, provided the issuer kept its key in `key_store`.
+        """
+
+        if registry is None:
+            raise ValueError("a verifier needs a PCS key registry")
+        return cls(
+            user=user,
+            authority=authority,
+            policy_agent=policy_agent,
+            clock=clock,
+            signer=signer or ConsentSigner.generate(kid="pcs-verifier"),
+            store=store,
+            registry=registry,
+        )
 
     @property
     def pcs_key(self) -> dict:
@@ -151,12 +188,13 @@ class ConsentFlow:
     def _restore_signer(self, injected: ConsentSigner | None) -> ConsentSigner:
         if injected is not None:
             return injected
-        if self._store is None:
+        key_store = self._key_store or self._store
+        if key_store is None:
             return ConsentSigner.generate()
-        stored = self._store.get(SIGNING_KEY_SECTION)
+        stored = key_store.get(SIGNING_KEY_SECTION)
         if stored is None:
             generated = ConsentSigner.generate()
-            self._store.put(
+            key_store.put(
                 SIGNING_KEY_SECTION,
                 {
                     "kid": generated.kid,
