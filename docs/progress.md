@@ -23,6 +23,7 @@
 | 审计账本持久化（M4 前置） | ✅ 完成 | 单 trace 追加链：自动生成 `audit_id`/`ts`/`prev_hash`/`hash`；重启重算正文哈希；损坏 fail closed；457 tests | 2026-11-17 |
 | PCS 公钥登记（M4 前置） | ✅ 完成 | 按 `kid` 登记/轮换/撤销/过期；`KeyRegistry` + `pcs.keys` 持久化；`ConsentFlow` 可选注册表验签；私钥可独立 `key_store`；516 tests | 2026-11-18 |
 | 私钥存储后端（M4 前置） | ✅ 完成 | `KeyStore` 契约；JSON / 内存 / OS 密钥环（macOS `security`、Linux `secret-tool`）三种后端；统一记录校验；563 tests | 2026-11-18 |
+| 上下文事件持久化（M4 前置） | ✅ 完成 | `ContextFabric(store=...)` 把 `context.resolve` 写入 `context.events`；重开逐条校验；`limit` 保留最新 N 条；582 tests | 2026-11-18 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -36,7 +37,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 23 个模块 + 适配器（6343 行）+ 563 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（6427 行）+ 582 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -88,6 +89,7 @@
 | `c035be5` | 2026-11-18 | **同意流程接入注册表**：`ConsentFlow(registry=...)` 按 `proof.kid` 验签；`publish_pcs_key()` 幂等登记；跨 signer 激活；13 条新测试，累计 509 |
 | `5419b00` | 2026-11-18 | **私钥与回执分库**：`key_store=` 把 `consent.pcs_key` 移出回执 store；`ConsentFlow.verifier()` 用临时 signer 验证；7 条新测试，累计 516 |
 | `b0068ab` | 2026-11-18 | **私钥存储后端**：`keystore.py` 的 `KeyStore` 契约；JSON / 内存 / OS 密钥环后端；`as_key_store` 兼容裸 `JsonStore`；47 条新测试，累计 563 |
+| `7274a27` | 2026-11-18 | **上下文事件持久化**：`ContextFabric(store=...)` 写 `context.events`；重开逐条校验；`limit` 保留最新 N 条；19 条新测试，累计 582 |
 
 ---
 
@@ -1014,7 +1016,58 @@ python3 demo/run_demo.py
 
 ---
 
-## 14. 待确认的规范问题
+## 14. 上下文解析事件持久化（M4 前置，已完成）
+
+### 14.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/context.py` | `ContextFabric(store=..., section=..., limit=...)`；每次 `resolve` 原子重写 `context.events`；重开逐条校验；`limit` 保留最新 N 条；无标识句柄在写入前拒绝 |
+| `impl/tests/test_context.py` | 19 条新测试：事件往返、允许/拒绝顺序、损坏分节与事件、保留上限、自定义分节、纯内存默认 |
+
+### 14.2 语义
+
+- **只记决策**：事件仍是 §9.2 的 `context.resolve`，包含 `handle`、`agent`、`label`、`decision` 与 `reason`；句柄本体由调用方传入，fabric 不持有句柄注册表。
+- **每次解析一次写入**：`allow` 与 `deny` 走同一条 `_event` 路径，追加后一次性重写整个分节；写入失败会抛错，不会出现“内存成功、磁盘失败”的静默分叉。
+- **重开校验**：分节必须是数组；每条事件必须是对象、`action` 为 `context.resolve`、`decision` 为 `allow`/`deny`、`handle` 与 `reason` 为非空字符串、`agent`/`label` 为字符串或 `null`；未知字段被丢弃，任何损坏抛 `ValueError`。
+- **保留上限**：`limit` 在追加与重开时都保留最新 N 条；`limit=0` 写出空数组，负数、布尔与非整数在构造时拒绝。
+- **写入前拒绝畸形句柄**：没有 `handle` 标识的解析请求在写盘前抛 `ValueError`，避免产生无法通过重开校验的事件。
+- **默认不变**：不传 `store` 时完全保持原来的内存行为，适配器与演示无需改动。
+
+### 14.3 验证证据
+
+2026-11-18，提交 `7274a27`（私钥后端 `b0068ab`）：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 582 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 19 条测试覆盖：一次解析写一条事件、允许与拒绝事件按顺序恢复且与内存列表一致、空 store 无事件、非数组分节、非对象事件、未知 `action`、未知 `decision`、缺失或空 `handle`、缺失 `reason`、非字符串 `agent`/`label`、`null` 的 `agent`/`label`、未知字段被丢弃、`limit` 追加时保留最新、`limit=0`、重开时按 `limit` 截断、非法 `limit`、自定义分节、写入前拒绝无标识句柄，以及不传 store 时仍为纯内存。
+
+### 14.4 已知边界
+
+1. **只持久化事件**：句柄、黑板、对象元数据与缓存窗口不落盘，仍由调用方或上层存储负责。
+2. **整节重写**：每次解析都序列化全部保留事件，长日志会线性变慢；`limit` 只是截断，不是归档。
+3. **单写者**：同一 `JsonStore` 仍要求一个进程写入；多进程解析需要外部协调或按用户分区。
+4. **没有时间戳**：事件保持 §9.2 的字段集，没有 `ts`；跨重启只能依赖顺序，不能按时间检索。
+5. **没有按用户分区**：需要隔离时由调用方传不同的 `section`，例如 `ctx.user.<id>`。
+6. **拒绝事件也写盘**：失败的解析同样持久化，因此反复重试的调用方会持续增长日志，直到 `limit` 生效。
+
+---
+
+## 15. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1030,9 +1083,9 @@ python3 demo/run_demo.py
 
 ---
 
-## 15. 下一步（按顺序）
+## 16. 下一步（按顺序）
 
-1. 把上下文接到 `JsonStore`，并为审计账本补保留/归档与按用户分区；
+1. 为上下文句柄、黑板与对象元数据补存储层，并为审计账本补归档与按用户分区；
 2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
@@ -1040,7 +1093,7 @@ python3 demo/run_demo.py
 
 ---
 
-## 16. 变更记录
+## 17. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1070,3 +1123,4 @@ python3 demo/run_demo.py
 | 2026-11-18 | **同意流程接入注册表**（`c035be5`）：`ConsentFlow(registry=...)` 按 `proof.kid` 验签；`publish_pcs_key()` 幂等登记；跨 signer 激活与无注册表回退；新增 13 条测试，累计 509 |
 | 2026-11-18 | **私钥与回执分库**（`5419b00`）：`key_store=` 移出 `consent.pcs_key`；`ConsentFlow.verifier()` 临时 signer 不落盘；新增 7 条测试，累计 516 |
 | 2026-11-18 | **私钥存储后端**（`b0068ab`）：`KeyStore` 契约与 JSON / 内存 / OS 密钥环后端；统一 `signer_of` 校验；新增 47 条测试，累计 563 |
+| 2026-11-18 | **上下文事件持久化**（`7274a27`）：`ContextFabric(store=...)` 写 `context.events`；重开校验与 `limit` 保留；新增 19 条测试，累计 582 |
