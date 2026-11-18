@@ -3,11 +3,12 @@
 """Unit tests for the context fabric (standard.md §9)."""
 
 import json
+import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
 
-from osap import OsapError, context
+from osap import JsonStore, OsapError, context
 from osap.clock import parse_timestamp
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
@@ -234,7 +235,9 @@ class DeleteTests(unittest.TestCase):
         self.assertTrue(report["conforming"])
 
     def test_hard_deleting_a_referenced_object_is_non_conforming(self):
-        report = context.delete_object("obj://sha256:9f2c7b1a", reference_count=2, hard_delete=True)
+        report = context.delete_object(
+            "obj://sha256:9f2c7b1a", reference_count=2, hard_delete=True
+        )
         self.assertFalse(report["deleted"])
         self.assertFalse(report["conforming"])
         self.assertEqual(report["reference_count"], 2)
@@ -306,6 +309,179 @@ class MemoryTests(unittest.TestCase):
         report = context.memory_promotions(["memory_entries", "contacts"])
         self.assertTrue(report["conforming"])
         self.assertEqual(report["promoted_to_memory"], [])
+
+
+class PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "context.json"
+
+    def fabric(self, **kwargs):
+        return context.ContextFabric(store=JsonStore(self.path), **kwargs)
+
+    @staticmethod
+    def allow(fabric, document):
+        return fabric.resolve(
+            document,
+            agent=document["audience"],
+            granted_actions=["resolve"],
+            now=now_of(document),
+        )
+
+    @staticmethod
+    def deny(fabric, document):
+        return fabric.resolve(
+            document,
+            agent=document["audience"],
+            granted_actions=["read"],
+            now=now_of(document),
+        )
+
+    @staticmethod
+    def event(**overrides):
+        event = {
+            "action": "context.resolve",
+            "handle": "ctx://user/profile#display_name",
+            "agent": NOTES,
+            "label": "personal",
+            "decision": "allow",
+            "reason": "resolved",
+        }
+        event.update(overrides)
+        return event
+
+    def seed(self, value):
+        JsonStore(self.path).put(context.EVENTS_SECTION, value)
+
+    def test_a_resolution_writes_one_event(self):
+        document = handle()
+        self.allow(self.fabric(), document)
+        stored = JsonStore(self.path).get(context.EVENTS_SECTION)
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["decision"], "allow")
+        self.assertEqual(stored[0]["handle"], document["handle"])
+        self.assertEqual(stored[0]["action"], "context.resolve")
+
+    def test_a_reopen_restores_allowed_and_denied_events(self):
+        document = handle()
+        first = self.fabric()
+        self.allow(first, document)
+        with self.assertRaises(OsapError):
+            self.deny(first, document)
+        second = self.fabric()
+        self.assertEqual([item["decision"] for item in second.audit], ["allow", "deny"])
+        self.assertEqual(second.audit[1]["reason"], "missing_grant")
+        self.assertEqual(second.audit, first.audit)
+
+    def test_an_empty_store_starts_without_events(self):
+        self.assertEqual(self.fabric().audit, [])
+
+    def test_a_non_list_section_is_rejected(self):
+        self.seed({"action": "context.resolve"})
+        with self.assertRaises(ValueError):
+            context.ContextFabric(store=JsonStore(self.path))
+
+    def test_a_non_object_event_is_rejected(self):
+        self.seed([["not", "an", "event"]])
+        with self.assertRaises(ValueError):
+            context.ContextFabric(store=JsonStore(self.path))
+
+    def test_an_unknown_action_is_rejected(self):
+        self.seed([self.event(action="context.open")])
+        with self.assertRaises(ValueError):
+            context.ContextFabric(store=JsonStore(self.path))
+
+    def test_an_unknown_decision_is_rejected(self):
+        self.seed([self.event(decision="maybe")])
+        with self.assertRaises(ValueError):
+            context.ContextFabric(store=JsonStore(self.path))
+
+    def test_a_missing_or_empty_handle_is_rejected(self):
+        for value in (None, ""):
+            seeded = self.event()
+            if value is None:
+                del seeded["handle"]
+            else:
+                seeded["handle"] = value
+            self.seed([seeded])
+            with self.assertRaises(ValueError):
+                context.ContextFabric(store=JsonStore(self.path))
+
+    def test_a_missing_reason_is_rejected(self):
+        seeded = self.event()
+        del seeded["reason"]
+        self.seed([seeded])
+        with self.assertRaises(ValueError):
+            context.ContextFabric(store=JsonStore(self.path))
+
+    def test_a_non_string_agent_or_label_is_rejected(self):
+        for field in ("agent", "label"):
+            self.seed([self.event(**{field: 7})])
+            with self.assertRaises(ValueError):
+                context.ContextFabric(store=JsonStore(self.path))
+
+    def test_a_null_agent_and_label_are_accepted(self):
+        self.seed([self.event(agent=None, label=None)])
+        fabric = context.ContextFabric(store=JsonStore(self.path))
+        self.assertIsNone(fabric.audit[0]["agent"])
+        self.assertIsNone(fabric.audit[0]["label"])
+
+    def test_unknown_fields_are_dropped_on_restore(self):
+        self.seed([self.event(extra="ignored")])
+        fabric = context.ContextFabric(store=JsonStore(self.path))
+        self.assertNotIn("extra", fabric.audit[0])
+
+    def test_a_limit_keeps_only_the_newest_events(self):
+        document = handle()
+        fabric = self.fabric(limit=2)
+        for _ in range(4):
+            self.allow(fabric, document)
+        self.assertEqual(len(fabric.audit), 2)
+        self.assertEqual(len(JsonStore(self.path).get(context.EVENTS_SECTION)), 2)
+
+    def test_a_zero_limit_keeps_nothing(self):
+        document = handle()
+        fabric = self.fabric(limit=0)
+        self.allow(fabric, document)
+        self.assertEqual(fabric.audit, [])
+        self.assertEqual(JsonStore(self.path).get(context.EVENTS_SECTION), [])
+
+    def test_a_limit_clamps_events_restored_from_disk(self):
+        self.seed([self.event(reason=f"r{index}") for index in range(5)])
+        fabric = context.ContextFabric(store=JsonStore(self.path), limit=2)
+        self.assertEqual([item["reason"] for item in fabric.audit], ["r3", "r4"])
+
+    def test_an_invalid_limit_is_rejected(self):
+        for value in (-1, "3", True, 1.5):
+            with self.assertRaises(ValueError):
+                context.ContextFabric(limit=value)
+
+    def test_a_custom_section_is_used(self):
+        document = handle()
+        fabric = context.ContextFabric(store=JsonStore(self.path), section="ctx.user.a")
+        self.allow(fabric, document)
+        self.assertEqual(len(JsonStore(self.path).get("ctx.user.a")), 1)
+        self.assertIsNone(JsonStore(self.path).get(context.EVENTS_SECTION))
+
+    def test_an_event_without_a_handle_identifier_is_rejected(self):
+        fabric = self.fabric()
+        with self.assertRaises(ValueError):
+            fabric.resolve(
+                {"scheme": "ctx"},
+                agent=NOTES,
+                granted_actions=["resolve"],
+                now=now_of(handle()),
+            )
+        self.assertEqual(fabric.audit, [])
+        self.assertIsNone(JsonStore(self.path).get(context.EVENTS_SECTION))
+
+    def test_an_in_memory_fabric_still_works(self):
+        document = handle()
+        fabric = context.ContextFabric()
+        self.allow(fabric, document)
+        self.assertEqual(len(fabric.audit), 1)
+        self.assertFalse(self.path.exists())
 
 
 if __name__ == "__main__":

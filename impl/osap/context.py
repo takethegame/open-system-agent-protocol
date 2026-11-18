@@ -15,8 +15,12 @@ not a new file system (§9.9). It covers what the C5 cases exercise:
 - deletion of a referenced object tombstones instead of hard-deleting (§9.6);
 - cache TTLs are clamped to the handle TTL (§9.7).
 
-Audit events are kept in memory. `context.resolve` records the caller, the
-handle, the label, and the decision, as §9.2 requires.
+Audit events are kept in memory by default. With a `JsonStore` they are also
+written to one `context.events` section after every resolution, and a restart
+restores the list so "who resolved which handle when" survives the process.
+`context.resolve` records the caller, the handle, the label, and the decision,
+as §9.2 requires. Handles themselves are still passed in by the caller, so the
+fabric persists decisions, not a handle registry.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from datetime import timedelta
 
 from .clock import parse_timestamp
 from .errors import OsapError
+from .store import JsonStore
 
 LABELS = ("public", "personal", "sensitive", "secret")
 LABEL_RANK = {label: rank for rank, label in enumerate(LABELS)}
@@ -45,6 +50,10 @@ STORAGE_DUTIES = (
     "path_safety",
     "deletion",
 )
+
+#: Section a persistent fabric writes its resolution events to.
+EVENTS_SECTION = "context.events"
+DECISIONS = frozenset({"allow", "deny"})
 
 #: State that must never be promoted to long-term memory (§3.7, §9.3, §9.5).
 NON_MEMORY_SOURCES = frozenset(
@@ -118,21 +127,96 @@ def label_violation(handle: dict, source_labels: dict) -> dict:
 
 
 class ContextFabric:
-    """In-memory CF that resolves handles and records audit events."""
+    """CF that resolves handles and records audit events.
 
-    def __init__(self) -> None:
+    A `JsonStore` makes the event list durable: every resolution rewrites the
+    `context.events` section, and a reopen validates each stored event before
+    restoring it. `limit` optionally keeps only the newest events, which is a
+    retention floor rather than an archive; the in-memory list follows the
+    same rule so memory and disk cannot drift.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: JsonStore | None = None,
+        section: str = EVENTS_SECTION,
+        limit: int | None = None,
+    ) -> None:
+        if limit is not None and (
+            not isinstance(limit, int) or isinstance(limit, bool) or limit < 0
+        ):
+            raise ValueError("limit must be a non-negative integer")
+        self._store = store
+        self._section = section
+        self.limit = limit
         self.audit: list[dict] = []
+        if store is not None:
+            self._restore()
+
+    # --- persistence ------------------------------------------------------
+
+    def _restore(self) -> None:
+        loaded = self._store.get(self._section)
+        if loaded is None:
+            return
+        if not isinstance(loaded, list):
+            raise ValueError(f"{self._section!r} must be a JSON array")
+        events = [self._restore_event(index, item) for index, item in enumerate(loaded)]
+        self.audit = self._clamp(events)
+
+    def _restore_event(self, index: int, event) -> dict:
+        where = f"context event {index}"
+        if not isinstance(event, dict):
+            raise ValueError(f"{where} must be a JSON object")
+        if event.get("action") != "context.resolve":
+            raise ValueError(f"{where} has an unknown action")
+        if event.get("decision") not in DECISIONS:
+            raise ValueError(f"{where} has an unknown decision")
+        if not isinstance(event.get("handle"), str) or not event["handle"]:
+            raise ValueError(f"{where} needs a handle")
+        if not isinstance(event.get("reason"), str) or not event["reason"]:
+            raise ValueError(f"{where} needs a reason")
+        for field in ("agent", "label"):
+            if event.get(field) is not None and not isinstance(event[field], str):
+                raise ValueError(f"{where} has a non-string {field}")
+        return {
+            "action": event["action"],
+            "handle": event["handle"],
+            "agent": event.get("agent"),
+            "label": event.get("label"),
+            "decision": event["decision"],
+            "reason": event["reason"],
+        }
+
+    def _clamp(self, events: list[dict]) -> list[dict]:
+        if self.limit is None:
+            return events
+        if self.limit == 0:
+            return []
+        return events[-self.limit :]
+
+    def _persist(self) -> None:
+        if self._store is not None:
+            self._store.put(self._section, [dict(event) for event in self.audit])
 
     def _event(self, handle: dict, agent: str | None, decision: str, reason: str) -> dict:
+        identifier = handle.get("handle")
+        if not isinstance(identifier, str) or not identifier:
+            # Every persisted event must be restorable, so refuse a handle
+            # without an identifier before it reaches the store.
+            raise ValueError("a context event needs a non-empty handle")
         event = {
             "action": "context.resolve",
-            "handle": handle.get("handle"),
+            "handle": identifier,
             "agent": agent,
             "label": handle.get("label"),
             "decision": decision,
             "reason": reason,
         }
         self.audit.append(event)
+        self.audit = self._clamp(self.audit)
+        self._persist()
         return event
 
     def _deny(self, handle: dict, agent: str | None, reason: str, **details) -> None:
