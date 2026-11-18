@@ -13,6 +13,12 @@ revoked, or expired request can never promote it. Every grant is signed by the
 PCS `ConsentSigner` and `activate()` verifies that proof before issuing, so an
 Agent cannot self-sign its own consent.
 
+A `KeyRegistry` may be attached with `registry=...`. Then receipt verification
+resolves `proof.kid` to a registered public key, which lets a verifier on
+another process check receipts without holding the PCS private key;
+`publish_pcs_key()` registers this flow's own key. Without a registry the flow
+falls back to its signer's public key, preserving the single-process path.
+
 With a `JsonStore`, the requests, receipts, reservations, and a generated
 signing key survive a restart; the audit list stays in memory. The clock is
 injectable, matching the rest of the reference implementation.
@@ -28,7 +34,7 @@ from . import consent, schema
 from .capability import CapabilityAuthority
 from .clock import parse_timestamp
 from .errors import OsapError
-from .pcs import ConsentSigner
+from .pcs import REVOKED, ConsentSigner, KeyRegistry
 from .store import JsonStore
 
 REQUEST_SCHEMA = "consent-request.schema.json"
@@ -85,12 +91,14 @@ class ConsentFlow:
         clock=None,
         signer: ConsentSigner | None = None,
         store: JsonStore | None = None,
+        registry: KeyRegistry | None = None,
     ) -> None:
         self.user = user
         self.authority = authority
         self.policy_agent = policy_agent
         self._clock = clock or _now
         self._store = store
+        self.registry = registry
         self.requests: dict[str, dict] = {}
         self.receipts: dict[str, dict] = {}
         self.reservations: dict[str, dict] = {}
@@ -104,6 +112,39 @@ class ConsentFlow:
         """The public half a verifier needs to check this flow's receipts."""
 
         return self.signer.key_record()
+
+    def publish_pcs_key(self) -> dict:
+        """Register this flow's public signing key in the configured registry.
+
+        Idempotent while the registry already holds the same key. A different
+        key under the same `kid`, or a revoked key, is rejected instead of
+        silently replaced.
+        """
+
+        if self.registry is None:
+            raise ValueError("no PCS key registry is configured")
+        kid = self.signer.kid
+        public_key = self.signer.public_key
+        existing = self.registry.key(kid)
+        if existing is None:
+            return self.registry.register(kid, public_key)
+        if existing["public_key"] != public_key:
+            raise ValueError(f"registry already holds a different key for {kid!r}")
+        if existing["status"] == REVOKED:
+            raise ValueError(f"PCS key {kid!r} is revoked")
+        return existing
+
+    def verify_receipt(self, receipt: dict) -> dict:
+        """Verify a receipt proof, preferring the registry when configured.
+
+        With a registry, `proof.kid` is resolved and checked for revocation,
+        expiry, and the retirement grace window. Without one, the flow checks
+        the proof against its own signer, which is the single-process path.
+        """
+
+        if self.registry is not None:
+            return self.registry.require_receipt(receipt, at=self._clock())
+        return self.signer.require(receipt)
 
     # --- persistence ------------------------------------------------------
 
@@ -412,7 +453,7 @@ class ConsentFlow:
             raise OsapError("POLICY_DENIED", f"unknown receipt: {receipt_id}")
         # Verify the user/OS proof before looking at reservation state, so a
         # forged or tampered receipt cannot learn whether a cap_id is active.
-        self.signer.require(receipt)
+        self.verify_receipt(receipt)
         reservation = self.reservations.get(receipt["cap_id"])
         if reservation is None:
             raise OsapError("POLICY_DENIED", "capability has no reservation")

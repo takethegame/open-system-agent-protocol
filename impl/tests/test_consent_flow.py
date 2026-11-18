@@ -473,6 +473,202 @@ class ReceiptProofTests(unittest.TestCase):
         self.assertEqual(set(flow.pcs_key), {"kid", "public_key"})
 
 
+class RegistryVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "consent-registry.json"
+
+    def flow(self, *, registry=None, signer=None, clock=None, store=None):
+        return consent_flow.ConsentFlow(
+            user=USER,
+            clock=clock or Clock(),
+            signer=signer,
+            registry=registry,
+            store=store,
+        )
+
+    @staticmethod
+    def grant(flow, *, cap_id: str = "cap_flow") -> dict:
+        payload = request_payload()
+        flow.request(payload)
+        flow.reserve_cap_id(payload["request_id"], cap_id=cap_id)
+        return flow.grant(
+            payload["request_id"], option="allow_once", receipt_id="receipt_flow"
+        )
+
+    def test_publish_registers_the_signer_key(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        flow = self.flow(registry=registry)
+        record = flow.publish_pcs_key()
+        self.assertEqual(record["kid"], flow.signer.kid)
+        self.assertEqual(record["public_key"], flow.signer.public_key)
+        self.assertEqual(registry.state_of(flow.signer.kid), pcs.ACTIVE)
+
+    def test_publish_is_idempotent(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        flow = self.flow(registry=registry)
+        self.assertEqual(flow.publish_pcs_key(), flow.publish_pcs_key())
+        self.assertEqual(len(registry.keys()), 1)
+
+    def test_publish_without_a_registry_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.flow().publish_pcs_key()
+
+    def test_publish_rejects_a_different_key_for_the_same_kid(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        registry.register("pcs-shared", pcs.ConsentSigner.generate().public_key)
+        flow = self.flow(
+            registry=registry,
+            signer=pcs.ConsentSigner.generate(kid="pcs-shared"),
+        )
+        with self.assertRaises(ValueError):
+            flow.publish_pcs_key()
+
+    def test_publish_rejects_a_revoked_key(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        flow = self.flow(registry=registry)
+        flow.publish_pcs_key()
+        registry.revoke(flow.signer.kid)
+        with self.assertRaises(ValueError):
+            flow.publish_pcs_key()
+
+    def test_grant_still_signs_with_the_flows_own_key(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        flow = self.flow(registry=registry)
+        flow.publish_pcs_key()
+        receipt = self.grant(flow)
+        self.assertEqual(receipt["proof"]["kid"], flow.signer.kid)
+        self.assertTrue(registry.verify_receipt(receipt))
+
+    def test_another_flows_receipt_verifies_through_the_registry(self):
+        store = JsonStore(self.path)
+        clock = Clock()
+        issuer_signer = pcs.ConsentSigner.generate(kid="pcs-issuer")
+        issuer = self.flow(
+            registry=pcs.KeyRegistry(store=store, clock=clock),
+            signer=issuer_signer,
+            clock=clock,
+            store=store,
+        )
+        issuer.publish_pcs_key()
+        receipt = self.grant(issuer)
+
+        verifier = self.flow(
+            registry=pcs.KeyRegistry(store=store, clock=clock),
+            signer=pcs.ConsentSigner.generate(kid="pcs-verifier"),
+            clock=clock,
+            store=store,
+        )
+        verifier.activate(receipt["receipt_id"], token_for(receipt))
+        self.assertTrue(verifier.usable(receipt["cap_id"]))
+        self.assertEqual(
+            verifier.audit[-1],
+            {
+                "action": "capability.issued",
+                "request_id": verifier.reservations[receipt["cap_id"]]["request_id"],
+                "receipt_id": receipt["receipt_id"],
+                "cap_id": receipt["cap_id"],
+            },
+        )
+
+    def test_a_verifier_without_the_registry_rejects_the_receipt(self):
+        store = JsonStore(self.path)
+        clock = Clock()
+        issuer = self.flow(
+            signer=pcs.ConsentSigner.generate(kid="pcs-issuer"),
+            clock=clock,
+            store=store,
+        )
+        receipt = self.grant(issuer)
+
+        verifier = self.flow(
+            signer=pcs.ConsentSigner.generate(kid="pcs-verifier"),
+            clock=clock,
+            store=store,
+        )
+        with self.assertRaises(OsapError) as caught:
+            verifier.activate(receipt["receipt_id"], token_for(receipt))
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+        self.assertEqual(
+            caught.exception.details["reason"], "receipt_signature_invalid"
+        )
+        self.assertFalse(verifier.usable(receipt["cap_id"]))
+
+    def test_a_revoked_registry_key_blocks_activation(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        flow = self.flow(registry=registry)
+        flow.publish_pcs_key()
+        receipt = self.grant(flow)
+        registry.revoke(flow.signer.kid)
+
+        with self.assertRaises(OsapError) as caught:
+            flow.activate(receipt["receipt_id"], token_for(receipt))
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+        self.assertEqual(caught.exception.details["reason"], "receipt_key_revoked")
+        self.assertFalse(flow.usable(receipt["cap_id"]))
+
+    def test_a_retired_key_verifies_only_inside_the_grace_window(self):
+        clock = Clock()
+        registry = pcs.KeyRegistry(clock=clock)
+        flow = self.flow(registry=registry, clock=clock)
+        flow.publish_pcs_key()
+        receipt = self.grant(flow)
+
+        replacement = pcs.ConsentSigner.generate(kid="pcs-next")
+        registry.rotate(
+            flow.signer.kid,
+            replacement.public_key,
+            new_kid="pcs-next",
+            grace_seconds=60,
+        )
+        clock.advance(seconds=30)
+        self.assertIs(flow.verify_receipt(receipt), receipt)
+        clock.advance(seconds=31)
+        with self.assertRaises(OsapError) as caught:
+            flow.verify_receipt(receipt)
+        self.assertEqual(caught.exception.details["reason"], "receipt_key_expired")
+
+    def test_a_tampered_receipt_is_rejected_through_the_registry(self):
+        registry = pcs.KeyRegistry(clock=Clock())
+        flow = self.flow(registry=registry)
+        flow.publish_pcs_key()
+        receipt = self.grant(flow)
+        receipt["actions"] = ["calendar.read"]
+
+        with self.assertRaises(OsapError) as caught:
+            flow.verify_receipt(receipt)
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+        self.assertEqual(
+            caught.exception.details["reason"], "receipt_signature_invalid"
+        )
+
+    def test_without_a_registry_verify_receipt_uses_the_signer(self):
+        flow, _, _, receipt = granted_flow()
+        self.assertIs(flow.verify_receipt(receipt), receipt)
+
+    def test_a_reopened_registry_still_resolves_the_kid(self):
+        store = JsonStore(self.path)
+        clock = Clock()
+        issuer = self.flow(
+            registry=pcs.KeyRegistry(store=store, clock=clock),
+            signer=pcs.ConsentSigner.generate(kid="pcs-issuer"),
+            clock=clock,
+            store=store,
+        )
+        issuer.publish_pcs_key()
+        receipt = self.grant(issuer)
+
+        reopened = JsonStore(self.path)
+        verifier = self.flow(
+            registry=pcs.KeyRegistry(store=reopened, clock=clock),
+            signer=pcs.ConsentSigner.generate(kid="pcs-verifier"),
+            clock=clock,
+            store=reopened,
+        )
+        self.assertIs(verifier.verify_receipt(receipt), receipt)
+
+
 class PersistenceTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
