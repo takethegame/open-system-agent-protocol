@@ -1,6 +1,6 @@
 # OSAP 进展记录
 
-> 更新时间：2026-11-17
+> 更新时间：2026-11-18
 > 关联规划：[`roadmap.md`](roadmap.md)
 > 性质：工作记录（非规范性）。规范性内容以 [`standard.md`](standard.md) 为准。
 
@@ -22,6 +22,7 @@
 | 任务树持久化（M4 前置） | ✅ 完成 | 整棵树跨重启：状态、预算、`consumed`、`detached`、父子链与 handoff；每次变更一次原子写入；440 tests | 2026-11-17 |
 | 审计账本持久化（M4 前置） | ✅ 完成 | 单 trace 追加链：自动生成 `audit_id`/`ts`/`prev_hash`/`hash`；重启重算正文哈希；损坏 fail closed；457 tests | 2026-11-17 |
 | PCS 公钥登记（M4 前置） | ✅ 完成 | 按 `kid` 登记/轮换/撤销/过期；`KeyRegistry` + `pcs.keys` 持久化；`ConsentFlow` 可选注册表验签；私钥可独立 `key_store`；516 tests | 2026-11-18 |
+| 私钥存储后端（M4 前置） | ✅ 完成 | `KeyStore` 契约；JSON / 内存 / OS 密钥环（macOS `security`、Linux `secret-tool`）三种后端；统一记录校验；563 tests | 2026-11-18 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -35,7 +36,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 22 个模块 + 适配器（6044 行）+ 516 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（6343 行）+ 563 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -86,6 +87,7 @@
 | `73cd639` | 2026-11-18 | **PCS 公钥登记**：`KeyRegistry` 按 `kid` 登记/轮换/撤销/过期；`pcs.keys` 持久化与损坏拒绝；验签失败原因细分；39 条新测试，累计 496 |
 | `c035be5` | 2026-11-18 | **同意流程接入注册表**：`ConsentFlow(registry=...)` 按 `proof.kid` 验签；`publish_pcs_key()` 幂等登记；跨 signer 激活；13 条新测试，累计 509 |
 | `5419b00` | 2026-11-18 | **私钥与回执分库**：`key_store=` 把 `consent.pcs_key` 移出回执 store；`ConsentFlow.verifier()` 用临时 signer 验证；7 条新测试，累计 516 |
+| `b0068ab` | 2026-11-18 | **私钥存储后端**：`keystore.py` 的 `KeyStore` 契约；JSON / 内存 / OS 密钥环后端；`as_key_store` 兼容裸 `JsonStore`；47 条新测试，累计 563 |
 
 ---
 
@@ -959,7 +961,60 @@ python3 demo/run_demo.py
 
 ---
 
-## 13. 待确认的规范问题
+## 13. 私钥存储后端（M4 前置，已完成）
+
+### 13.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/keystore.py` | `KeyStore` 契约（`load` / `save` / 可选 `delete`）；`JsonKeyStore`、`MemoryKeyStore`、`KeyringKeyStore`；`record_of` / `signer_of` 统一记录校验；`as_key_store` 兼容裸 `JsonStore` |
+| `impl/osap/consent_flow.py` | `key_store=` 接受任意 `KeyStore` 或 `JsonStore`；重开从 `load()` 恢复，缺失时生成并 `save()` |
+| `impl/osap/__init__.py` | 导出 `KeyStore`、`JsonKeyStore`、`MemoryKeyStore`、`KeyringKeyStore` 与 `keystore` 子模块 |
+| `impl/tests/test_keystore.py` | 47 条新测试：记录校验、三个后端、类型适配、平台选择、密钥环命令构造与错误路径、流程级密钥复用 |
+
+### 13.2 语义
+
+- **单一契约**：`load()` 返回记录或 `None`，`save()` 写入一条记录；后端不参与回执、预约或审计逻辑，`ConsentFlow` 只调用这两个方法。
+- **统一校验**：`signer_of` 检查对象形状、非空 `kid`、可由 `private_key` 构造 Ed25519，以及 `public_key` 与私钥推导值一致；所有后端对同类损坏输入给出一致的 `ValueError`。
+- **JSON 后端保持旧布局**：传入裸 `JsonStore` 时由 `as_key_store` 包成 `JsonKeyStore`，仍写 `consent.pcs_key` 分节，0600 权限与原子写入不变。
+- **内存后端不落盘**：`MemoryKeyStore` 只在进程内保存深拷贝，重启即丢失；用于不需要签发的验证方与测试。
+- **密钥环后端可注入**：`KeyringKeyStore(platform=..., runner=...)` 按平台选择 `security`（macOS）或 `secret-tool`（Linux）；测试注入假 runner，不触碰真实密钥环。缺少 CLI 时构造即 `RuntimeError`，不会静默退回文件。
+- **不新增路径约定**：密钥只经后端读写；`service` / `account` 只是密钥环内的索引，没有引入新的环境变量或默认路径。
+
+### 13.3 验证证据
+
+2026-11-18，提交 `b0068ab`（分库 `5419b00`）：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 563 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 47 条测试覆盖：`record_of` 字段集合与往返；缺失字段、非字符串字段、空 `kid`、非法私钥、错配公钥的拒绝；`JsonKeyStore` 读写、缺失分节、删除与重复删除、非对象拒绝；`MemoryKeyStore` 深拷贝隔离、构造播种、删除与非对象拒绝；`as_key_store` 的 `None` / 透传 / 包装 / 拒绝；平台到后端映射与不支持平台；密钥环缺失条目、空条目、失败、非法 JSON、非对象条目的处理；macOS 命令行传密与 Linux stdin 传密的差异；保存失败与删除幂等；以及 `ConsentFlow` 复用密钥环 signer、损坏条目拒绝构造、内存 / 显式 JSON / 裸 `JsonStore` 三种 `key_store` 下回执 store 不含私钥、注入 signer 时不写后端。
+
+### 13.4 已知边界
+
+1. **默认仍是明文 JSON**：不传 `key_store` 或传 `JsonStore` 时，私钥与回执同处一个 0600 文件，文件权限是唯一保护。
+2. **macOS 参数泄露**：`security add-generic-password` 没有 stdin 形式，密钥会作为命令行参数出现；生产应改用原生密钥环绑定。
+3. **平台覆盖不全**：没有 Windows Credential Manager 后端，其他平台构造即失败并提示缺少后端。
+4. **无迁移工具**：从既有 `consent.pcs_key` 迁到密钥环需要调用方先 `load()` 再 `save()`，没有一次性命令或迁移报告。
+5. **单条记录**：一个后端只存一个 signer，没有多 PCS 账号、多用户或按 App 的隔离；切换密钥环条目就等于换 PCS。
+6. **密钥环错误不分类**：后端失败统一抛 `RuntimeError`，调用方无法区分“未解锁”“被拒绝”与“CLI 版本不支持”。
+
+---
+
+## 14. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -975,17 +1030,17 @@ python3 demo/run_demo.py
 
 ---
 
-## 14. 下一步（按顺序）
+## 15. 下一步（按顺序）
 
 1. 把上下文接到 `JsonStore`，并为审计账本补保留/归档与按用户分区；
-2. 把私钥从普通 JSON 迁移到 OS 密钥环，并为 `key_store` 提供密钥环后端；
+2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
 
 ---
 
-## 15. 变更记录
+## 16. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1014,3 +1069,4 @@ python3 demo/run_demo.py
 | 2026-11-18 | **PCS 公钥登记**（`73cd639`）：`KeyRegistry` 按 `kid` 登记/轮换/撤销/过期；`pcs.keys` 持久化与损坏拒绝；`AUTH_DENIED` 细分验签失败原因；新增 39 条测试，累计 496 |
 | 2026-11-18 | **同意流程接入注册表**（`c035be5`）：`ConsentFlow(registry=...)` 按 `proof.kid` 验签；`publish_pcs_key()` 幂等登记；跨 signer 激活与无注册表回退；新增 13 条测试，累计 509 |
 | 2026-11-18 | **私钥与回执分库**（`5419b00`）：`key_store=` 移出 `consent.pcs_key`；`ConsentFlow.verifier()` 临时 signer 不落盘；新增 7 条测试，累计 516 |
+| 2026-11-18 | **私钥存储后端**（`b0068ab`）：`KeyStore` 契约与 JSON / 内存 / OS 密钥环后端；统一 `signer_of` 校验；新增 47 条测试，累计 563 |

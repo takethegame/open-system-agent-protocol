@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / OS 密钥环）、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -40,6 +40,7 @@
 | 回执签名 | §10.4 | Ed25519 覆盖去掉 `proof` 的规范化 JSON；`activate` 先验签再查预约，Agent 不能自签 |
 | 离线验签 | §10.4 | `pcs.verify_receipt` / `ConsentSigner.verify` 只依赖声明的 PCS 公钥 |
 | PCS 公钥登记 | §4.5、§10.4 | 按 `kid` 登记、轮换（带退役宽限）、撤销与有效期；`pcs.keys` 跨重启；`ConsentFlow` 可选按 `proof.kid` 验签；`key_store` 分离私钥；验签失败细分 `AUTH_DENIED` 原因 |
+| 私钥存储 | §10.4 | `KeyStore` 契约：`JsonKeyStore` 分节写入、`MemoryKeyStore` 仅内存、`KeyringKeyStore` 走 macOS `security` / Linux `secret-tool`；记录校验统一在 `signer_of` |
 | 任务树 | §8.2、§8.10 | 父/子索引、状态机与非法转换拒绝；可注入 `JsonStore` 持久化整棵树 |
 | 委派 | §8.3、§8.5 | 子任务预算 ≤ 父剩余、深度 = 父 + 1、重复 `task_id` 拒绝 |
 | 预算 | §8.6 | 逐维比较；运行期超支报 `TASK_BUDGET_EXCEEDED` |
@@ -91,6 +92,7 @@ impl/
     framing.py          §7.9 两种分帧绑定
     identity.py         注册、保留命名空间、App/公钥绑定
     idempotency.py      §7.8 幂等索引
+    keystore.py         §10.4 PCS 私钥存储契约与 JSON / 内存 / OS 密钥环后端
     pcs.py              §4.5、§10.4 PCS 回执签名、离线验签、公钥登记/轮换/撤销
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
@@ -367,6 +369,20 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `ConsentFlow.verifier(registry=..., store=...)` 是验证方工厂：它要求一个注册表，并注入与签发方无关的临时 `ConsentSigner`，因此构造验证方不会向回执 store 写入任何密钥。验证方只打开回执 store 与公钥注册表即可 `activate` 或 `verify_receipt`；若签发方没有把公钥发布到注册表，验证仍然以 `receipt_key_unknown` 失败。
 
+### 5.44 私钥存储是可替换的后端，不是一种文件格式
+
+`keystore.py` 把“私钥存在哪里”收敛成一个三方法契约：`load()` 返回记录或 `None`，`save(record)` 写入，`delete()` 可选。`ConsentFlow(key_store=...)` 接受任意 `KeyStore`；直接传 `JsonStore` 时由 `as_key_store` 包成 `JsonKeyStore`，因此旧调用与 0600 分节布局都不变。
+
+三个后端各有明确边界：
+
+- `JsonKeyStore` 复用 `JsonStore` 的原子写入，仍是文件系统权限保护，不是加密存储；
+- `MemoryKeyStore` 只活在进程内，适合不需要签发的验证方与测试，重启后密钥消失；
+- `KeyringKeyStore` 调用 macOS `security` 或 Linux `secret-tool`，`platform` 与 `runner` 可注入，所以测试不碰真实密钥环；缺少对应 CLI 时构造即失败，不会悄悄退回文件。
+
+记录校验集中在 `signer_of`：必须是对象、`kid` 非空、`private_key` 能构造 Ed25519、`public_key` 若存在必须与私钥推导出的公钥一致。三个后端因此对同一种损坏输入给出一致的 `ValueError`，不会出现“JSON 后端拒绝、密钥环后端接受”的差异。
+
+macOS 的 `security add-generic-password` 没有 stdin 形式，密钥只能作为命令行参数传入，同用户的其他进程在参数列表里可能看到；Linux 的 `secret-tool store` 走 stdin。前者只作为开发便利，生产应使用原生密钥环绑定。
+
 ## 6. 已知限制
 
 1. **部分内存态**：幂等索引、能力签发/撤销、同意流程、任务树、审计账本与 PCS 公钥可通过 `JsonStore` 跨重启，但清单/能力注册表、注册表轮换状态与上下文仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
@@ -385,13 +401,14 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 14. **上下文只在内存**：`ContextFabric` 与黑板状态不持久化；任务树与审计账本的状态已可落盘。跨进程恢复与真实回放仍需要专门的上下文存储，C7-01 仍是 manual。
 15. **62 个 pass 覆盖全部 automated 用例**，但不覆盖 6 条 manual 的运行时、跨进程与崩溃恢复语义。
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
-17. **回执签名有本地密钥，注册表验签与分库都是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。传 `key_store` 后私钥移出回执 store；不传时私钥与回执仍同处一个 0600 JSON 文件，且没有 OS 密钥环后端。
+17. **回执签名有本地密钥，注册表验签与分库都是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。传 `key_store` 后私钥移出回执 store；不传时私钥与回执仍同处一个 0600 JSON 文件。默认后端仍是明文 JSON，密钥环只是可选后端。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
 19. **并发上限由线程池决定**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；没有事件循环、异步 I/O 或按 Agent 的加权调度。`max_messages` 在并发模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 22. **审计账本按 trace 单链**：没有跨 trace 的全局顺序、归档/截断/TTL、按用户分区或 leader election；`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。长链仍是整节重写。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
+24. **密钥环只覆盖 macOS/Linux**：`KeyringKeyStore` 没有 Windows Credential Manager 后端；macOS 路径把密钥放在 `security` 的命令行参数里；也没有从既有 `consent.pcs_key` 自动迁移到密钥环的工具，迁移需要调用方先 `load()` 再 `save()`。
 
 ## 7. 与规范的偏差登记
 
