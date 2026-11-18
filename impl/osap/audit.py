@@ -21,6 +21,13 @@ with per-export salted commitments. The hash chain stays untouched, so a
 verifier can still prove that the chain was not altered and that each
 commitment matches the original field, but cannot recover plaintext (§10.6).
 
+`AuditLedger(max_events=...)` adds retention without losing verifiability. Each
+trim moves the oldest events into an `audit.archive.<trace_id>` section, and
+the next live event keeps pointing at the last archived hash. A verifier that
+has both sections can therefore walk one chain from genesis; a live section
+that was re-rooted after a trim fails verification because its first
+`prev_hash` no longer matches the archive tail.
+
 `AUDIT_CHAIN_INVALID` is a domain extension: §10.5 requires verification to
 fail but defines no audit-specific standard code.
 """
@@ -42,6 +49,9 @@ CHAIN_INVALID = "AUDIT_CHAIN_INVALID"
 
 #: Prefix of the per-trace section a persisted ledger writes.
 LEDGER_SECTION_PREFIX = "audit.chain."
+
+#: Prefix of the per-trace section a trimming ledger archives into.
+ARCHIVE_SECTION_PREFIX = "audit.archive."
 
 #: `prev_hash` of the first event in a new chain.
 GENESIS_HASH = "sha256:0000000000000000"
@@ -128,6 +138,12 @@ class AuditLedger:
     ledger reopened over the same store must carry the same `trace_id`; a
     mismatched or corrupt section raises instead of returning a partial chain,
     so a Bus can keep L3/L4 actions closed (§3.7).
+
+    With `max_events=N`, an append that would exceed N moves the oldest events
+    into `audit.archive.<trace_id>` and writes both sections atomically. The
+    live chain keeps its first event's `prev_hash` pointing at the last
+    archived hash, so `verify()` still proves the whole history from genesis;
+    `history()` returns the archive plus the live events as one chain.
     """
 
     def __init__(
@@ -137,24 +153,40 @@ class AuditLedger:
         store: JsonStore | None = None,
         clock=None,
         section: str | None = None,
+        max_events: int | None = None,
+        archive_section: str | None = None,
     ) -> None:
         if not isinstance(trace_id, str) or not trace_id:
             raise ValueError("trace_id must be a non-empty string")
+        if max_events is not None and (
+            not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1
+        ):
+            raise ValueError("max_events must be a positive integer")
         self.trace_id = trace_id
         self.chain_id = f"audit_chain_{trace_id}"
         self.created_at = _stamp((clock or _now)())
         self.events: list[dict] = []
+        self.max_events = max_events
+        self._archived: list[dict] = []
+        self._archive_chain_id: str | None = None
         self._clock = clock or _now
         self._store = store
         self._section = section or f"{LEDGER_SECTION_PREFIX}{trace_id}"
+        self._archive_section = archive_section or f"{ARCHIVE_SECTION_PREFIX}{trace_id}"
         if store is not None:
             self._restore()
 
     # --- persistence -------------------------------------------------------
 
     def _restore(self) -> None:
+        self._restore_archive()
         loaded = self._store.get(self._section)
         if loaded is None:
+            if self._archived:
+                raise ValueError(
+                    f"{self._archive_section!r} has events but "
+                    f"{self._section!r} is empty"
+                )
             return
         if not isinstance(loaded, dict):
             raise ValueError(f"{self._section!r} must be a JSON object")
@@ -172,6 +204,10 @@ class AuditLedger:
             raise ValueError(f"{self._section!r} chain_id must be a string")
         if not isinstance(created_at, str) or not created_at:
             raise ValueError(f"{self._section!r} created_at must be a string")
+        if self._archive_chain_id is not None and self._archive_chain_id != chain_id:
+            raise ValueError(
+                f"{self._archive_section!r} chain_id does not match the live chain"
+            )
         self.chain_id = chain_id
         self.created_at = created_at
         self.events = copy.deepcopy(events)
@@ -186,26 +222,79 @@ class AuditLedger:
                 details={"reason": error.code, "message": error.message},
             ) from error
 
-    def _persist(self) -> None:
+    def _restore_archive(self) -> None:
+        loaded = self._store.get(self._archive_section)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{self._archive_section!r} must be a JSON object")
+        if loaded.get("trace_id") != self.trace_id:
+            raise ValueError(
+                f"{self._archive_section!r} holds trace "
+                f"{loaded.get('trace_id')!r}, not {self.trace_id!r}"
+            )
+        chain_id = loaded.get("chain_id")
+        if not isinstance(chain_id, str) or not chain_id:
+            raise ValueError(f"{self._archive_section!r} chain_id must be a string")
+        events = loaded.get("events")
+        if not isinstance(events, list):
+            raise ValueError(f"{self._archive_section!r} events must be a JSON array")
+        self._archive_chain_id = chain_id
+        self._archived = copy.deepcopy(events)
+        try:
+            self._verify_archive()
+        except OsapError as error:
+            if error.code == CHAIN_INVALID:
+                raise
+            raise OsapError(
+                CHAIN_INVALID,
+                "stored audit archive is invalid",
+                details={"reason": error.code, "message": error.message},
+            ) from error
+
+    def _persist(self, *, archive_changed: bool = False) -> None:
         if self._store is None:
             return
-        self._store.put(
-            self._section,
+        live = {
+            "chain_id": self.chain_id,
+            "trace_id": self.trace_id,
+            "created_at": self.created_at,
+            "events": copy.deepcopy(self.events),
+        }
+        if not archive_changed:
+            self._store.put(self._section, live)
+            return
+        self._store.put_many(
             {
-                "chain_id": self.chain_id,
-                "trace_id": self.trace_id,
-                "created_at": self.created_at,
-                "events": copy.deepcopy(self.events),
-            },
+                self._section: live,
+                self._archive_section: {
+                    "chain_id": self.chain_id,
+                    "trace_id": self.trace_id,
+                    "events": copy.deepcopy(self._archived),
+                },
+            }
         )
 
     # --- writing -----------------------------------------------------------
 
     @property
     def head(self) -> str:
-        """The last hash, or the genesis marker for an empty chain."""
+        """The last hash, or the anchor for an empty live chain."""
 
-        return self.events[-1]["hash"] if self.events else GENESIS_HASH
+        return self.events[-1]["hash"] if self.events else self._anchor()
+
+    @property
+    def archive_section(self) -> str:
+        return self._archive_section
+
+    @property
+    def archived_events(self) -> list[dict]:
+        """Detached copy of the events moved out of the live chain."""
+
+        return copy.deepcopy(self._archived)
+
+    def _anchor(self) -> str:
+        return self._archived[-1]["hash"] if self._archived else GENESIS_HASH
 
     def __len__(self) -> int:
         return len(self.events)
@@ -229,23 +318,63 @@ class AuditLedger:
         record.pop("hash", None)
         record["hash"] = _event_hash(record)
         schema.validate(EVENT_SCHEMA, record)
-        if any(existing["audit_id"] == record["audit_id"] for existing in self.events):
+        duplicate = any(
+            existing["audit_id"] == record["audit_id"] for existing in self.events
+        ) or any(
+            existing["audit_id"] == record["audit_id"] for existing in self._archived
+        )
+        if duplicate:
             raise OsapError(
                 CHAIN_INVALID,
                 "duplicate audit_id in the chain",
                 details={"audit_id": record["audit_id"]},
             )
         self.events.append(record)
-        self._persist()
+        self._persist(archive_changed=self._trim())
         return copy.deepcopy(record)
+
+    def _trim(self) -> bool:
+        """Move the oldest events to the archive until `max_events` holds."""
+
+        if self.max_events is None or len(self.events) <= self.max_events:
+            return False
+        overflow = len(self.events) - self.max_events
+        self._archived.extend(self.events[:overflow])
+        del self.events[:overflow]
+        return True
 
     # --- verification and export ------------------------------------------
 
     def verify(self) -> bool:
-        """Require valid schemas and links, then recheck every body hash."""
+        """Require schemas, the archive anchor, links, and body hashes."""
 
         verify_chain(self.chain())
-        for index, event in enumerate(self.events):
+        anchor = self._anchor()
+        if self.events and self.events[0]["prev_hash"] != anchor:
+            raise OsapError(
+                CHAIN_INVALID,
+                "audit chain does not link to the archived anchor",
+                details={
+                    "expected": anchor,
+                    "actual": self.events[0]["prev_hash"],
+                    "audit_id": self.events[0]["audit_id"],
+                },
+            )
+        self._verify_body_hashes(self.events)
+        if self._archived:
+            self._verify_archive()
+            archived_ids = {event["audit_id"] for event in self._archived}
+            for index, event in enumerate(self.events):
+                if event["audit_id"] in archived_ids:
+                    raise OsapError(
+                        CHAIN_INVALID,
+                        "duplicate audit_id across the archive",
+                        details={"index": index, "audit_id": event["audit_id"]},
+                    )
+        return True
+
+    def _verify_body_hashes(self, events: list[dict]) -> None:
+        for index, event in enumerate(events):
             expected = _event_hash(event)
             if event["hash"] != expected:
                 raise OsapError(
@@ -258,16 +387,43 @@ class AuditLedger:
                         "actual": event["hash"],
                     },
                 )
-        return True
+
+    def _verify_archive(self) -> None:
+        """Require archive schemas, genesis start, links, and body hashes."""
+
+        if not self._archived:
+            return
+        verify_chain({"trace_id": self.trace_id, "events": self._archived})
+        if self._archived[0]["prev_hash"] != GENESIS_HASH:
+            raise OsapError(
+                CHAIN_INVALID,
+                "audit archive does not start at genesis",
+                details={
+                    "expected": GENESIS_HASH,
+                    "actual": self._archived[0]["prev_hash"],
+                    "audit_id": self._archived[0]["audit_id"],
+                },
+            )
+        self._verify_body_hashes(self._archived)
 
     def chain(self) -> dict:
-        """Return a detached chain object suitable for redaction or export."""
+        """Return a detached live-chain object for redaction or export."""
 
         return {
             "chain_id": self.chain_id,
             "trace_id": self.trace_id,
             "created_at": self.created_at,
             "events": copy.deepcopy(self.events),
+        }
+
+    def history(self) -> dict:
+        """Return the archive plus live events as one chronological chain."""
+
+        return {
+            "chain_id": self.chain_id,
+            "trace_id": self.trace_id,
+            "created_at": self.created_at,
+            "events": copy.deepcopy(self._archived) + copy.deepcopy(self.events),
         }
 
 
@@ -309,7 +465,9 @@ def redact_chain(chain: dict, *, salt: str | None = None) -> dict:
 def recover_effects(events: list) -> dict:
     """Mark an intent without an outcome as unknown and require reconciliation."""
 
-    executed = {event.get("intent_ref") for event in events if event["action"] == "effect.executed"}
+    executed = {
+        event.get("intent_ref") for event in events if event["action"] == "effect.executed"
+    }
     pending = [
         event["audit_id"]
         for event in events

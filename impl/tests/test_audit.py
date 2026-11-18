@@ -309,6 +309,213 @@ class PersistedLedgerTests(unittest.TestCase):
         self.assertIsNone(JsonStore(self.path).get(self.section()))
 
 
+
+class RetentionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "audit.json"
+
+    def ledger(self, *, max_events=None, trace_id=TRACE):
+        return audit.AuditLedger(
+            trace_id=trace_id,
+            store=JsonStore(self.path),
+            clock=clock,
+            max_events=max_events,
+        )
+
+    def archive(self, trace_id=TRACE) -> str:
+        return f"{audit.ARCHIVE_SECTION_PREFIX}{trace_id}"
+
+    def append_many(self, ledger, count: int) -> list:
+        return [
+            ledger.append(event(audit_id=f"audit_{index}", target=f"task_{index}"))
+            for index in range(count)
+        ]
+
+    def test_events_beyond_the_limit_move_to_the_archive(self):
+        ledger = self.ledger(max_events=2)
+        records = self.append_many(ledger, 5)
+        self.assertEqual(len(ledger), 2)
+        self.assertEqual(len(ledger.archived_events), 3)
+        self.assertEqual(
+            [item["audit_id"] for item in ledger.archived_events],
+            ["audit_0", "audit_1", "audit_2"],
+        )
+        self.assertEqual(ledger.head, records[-1]["hash"])
+        stored = JsonStore(self.path).get(self.archive())
+        self.assertEqual(len(stored["events"]), 3)
+
+    def test_no_archive_is_written_at_the_limit(self):
+        ledger = self.ledger(max_events=3)
+        self.append_many(ledger, 3)
+        self.assertEqual(len(ledger.archived_events), 0)
+        self.assertIsNone(JsonStore(self.path).get(self.archive()))
+
+    def test_the_live_chain_still_links_to_the_archive(self):
+        ledger = self.ledger(max_events=2)
+        self.append_many(ledger, 5)
+        archived = ledger.archived_events
+        self.assertEqual(ledger.events[0]["prev_hash"], archived[-1]["hash"])
+        self.assertTrue(ledger.verify())
+        self.assertTrue(audit.verify_chain(ledger.history()))
+
+    def test_history_is_chronological_and_detached(self):
+        ledger = self.ledger(max_events=2)
+        self.append_many(ledger, 4)
+        history = ledger.history()
+        self.assertEqual(
+            [item["audit_id"] for item in history["events"]],
+            ["audit_0", "audit_1", "audit_2", "audit_3"],
+        )
+        history["events"][0]["target"] = "tampered"
+        self.assertNotEqual(ledger.archived_events[0]["target"], "tampered")
+        self.assertTrue(ledger.verify())
+
+    def test_a_reopen_restores_both_sections(self):
+        first = self.ledger(max_events=2)
+        self.append_many(first, 5)
+        second = self.ledger(max_events=2)
+        self.assertEqual(len(second), 2)
+        self.assertEqual(
+            [item["audit_id"] for item in second.archived_events],
+            ["audit_0", "audit_1", "audit_2"],
+        )
+        self.assertEqual(second.history(), first.history())
+        self.assertEqual(second.head, first.head)
+        self.assertTrue(second.verify())
+
+    def test_a_reopen_without_a_limit_keeps_the_archive(self):
+        first = self.ledger(max_events=2)
+        self.append_many(first, 5)
+        second = self.ledger()
+        self.assertEqual(len(second), 2)
+        self.assertEqual(len(second.archived_events), 3)
+        self.assertTrue(second.verify())
+
+    def test_a_limit_of_one_keeps_only_the_newest_event(self):
+        ledger = self.ledger(max_events=1)
+        self.append_many(ledger, 3)
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger.events[0]["audit_id"], "audit_2")
+        self.assertEqual(len(ledger.archived_events), 2)
+        self.assertTrue(ledger.verify())
+
+    def test_an_in_memory_ledger_trims_without_persisting(self):
+        ledger = audit.AuditLedger(trace_id=TRACE, clock=clock, max_events=2)
+        self.append_many(ledger, 4)
+        self.assertEqual(len(ledger), 2)
+        self.assertEqual(len(ledger.archived_events), 2)
+        self.assertTrue(ledger.verify())
+        self.assertFalse(self.path.exists())
+
+    def test_the_returned_event_is_detached(self):
+        ledger = self.ledger(max_events=1)
+        record = ledger.append(event(audit_id="audit_x", target="task_x"))
+        record["target"] = "tampered"
+        self.assertEqual(ledger.events[0]["target"], "task_x")
+        self.assertTrue(ledger.verify())
+
+    def test_a_duplicate_audit_id_in_the_archive_is_rejected(self):
+        ledger = self.ledger(max_events=1)
+        ledger.append(event(audit_id="audit_first"))
+        ledger.append(event(audit_id="audit_second"))
+        self.assertEqual(len(ledger.archived_events), 1)
+        with self.assertRaises(OsapError) as caught:
+            ledger.append(event(audit_id="audit_first"))
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+        self.assertEqual(len(ledger), 1)
+
+    def test_a_tampered_archived_body_is_rejected_on_reopen(self):
+        ledger = self.ledger(max_events=1)
+        self.append_many(ledger, 3)
+        store = JsonStore(self.path)
+        stored = store.get(self.archive())
+        stored["events"][0]["target"] = "task_other"
+        store.put(self.archive(), stored)
+        with self.assertRaises(OsapError) as caught:
+            self.ledger(max_events=1)
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_an_archive_not_starting_at_genesis_is_rejected(self):
+        ledger = self.ledger(max_events=1)
+        self.append_many(ledger, 3)
+        store = JsonStore(self.path)
+        stored = store.get(self.archive())
+        stored["events"][0]["prev_hash"] = "sha256:00000000deadbeef"
+        store.put(self.archive(), stored)
+        with self.assertRaises(OsapError) as caught:
+            self.ledger(max_events=1)
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_a_missing_archive_is_rejected_on_reopen(self):
+        ledger = self.ledger(max_events=1)
+        self.append_many(ledger, 3)
+        JsonStore(self.path).delete(self.archive())
+        with self.assertRaises(OsapError) as caught:
+            self.ledger(max_events=1)
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_an_archive_without_a_live_chain_is_rejected(self):
+        ledger = self.ledger(max_events=1)
+        self.append_many(ledger, 3)
+        JsonStore(self.path).delete(self.live_section())
+        with self.assertRaises(ValueError):
+            self.ledger(max_events=1)
+
+    def live_section(self) -> str:
+        return f"{audit.LEDGER_SECTION_PREFIX}{TRACE}"
+
+    def test_a_non_object_archive_is_rejected(self):
+        JsonStore(self.path).put(self.archive(), [])
+        with self.assertRaises(ValueError):
+            self.ledger(max_events=1)
+
+    def test_a_wrong_trace_archive_is_rejected(self):
+        JsonStore(self.path).put(
+            self.archive(),
+            {"chain_id": "audit_chain_other", "trace_id": "trace_other", "events": []},
+        )
+        with self.assertRaises(ValueError):
+            self.ledger(max_events=1)
+
+    def test_a_non_array_archive_events_is_rejected(self):
+        JsonStore(self.path).put(
+            self.archive(),
+            {"chain_id": "audit_chain_x", "trace_id": TRACE, "events": {}},
+        )
+        with self.assertRaises(ValueError):
+            self.ledger(max_events=1)
+
+    def test_a_mismatched_archive_chain_id_is_rejected(self):
+        ledger = self.ledger(max_events=1)
+        self.append_many(ledger, 2)
+        store = JsonStore(self.path)
+        stored = store.get(self.archive())
+        stored["chain_id"] = "audit_chain_other"
+        store.put(self.archive(), stored)
+        with self.assertRaises(ValueError):
+            self.ledger(max_events=1)
+
+    def test_a_custom_archive_section_is_used(self):
+        ledger = audit.AuditLedger(
+            trace_id=TRACE,
+            store=JsonStore(self.path),
+            clock=clock,
+            max_events=1,
+            archive_section="audit.archive.custom",
+        )
+        self.append_many(ledger, 2)
+        self.assertEqual(ledger.archive_section, "audit.archive.custom")
+        self.assertIsNotNone(JsonStore(self.path).get("audit.archive.custom"))
+        self.assertIsNone(JsonStore(self.path).get(self.archive()))
+
+    def test_an_invalid_max_events_is_rejected(self):
+        for value in (0, -1, True, "3", 1.5):
+            with self.assertRaises(ValueError):
+                audit.AuditLedger(trace_id=TRACE, max_events=value)
+
+
 class RedactionTests(unittest.TestCase):
     def setUp(self):
         self.document = chain()
