@@ -14,7 +14,8 @@ Covered so far:
 - M2.4: consent receipts and capability linkage (§5.8); consent request,
   reservation, grant/deny, activation, and revocation flow (§10.2, §10.3);
 - PCS: Ed25519 consent-receipt signing and offline proof verification
-  (§10.4), so an Agent cannot self-sign its own consent;
+  (§10.4), so an Agent cannot self-sign its own consent; a `KeyStore` holds
+  the private consent key in a JSON section, in memory, or in the OS keyring;
 - M2.5: task tree, budgets, cancellation, results, handoff (§8); context
   fabric handles, labels, blackboard, objects (§9); federation adapters
   projecting native descriptors into capability records (§6.7, §6.8);
@@ -38,6 +39,7 @@ from . import (
     federation,
     flowcontrol,
     identity,
+    keystore,
     pcs,
     registry,
     schema,
@@ -53,6 +55,7 @@ from .errors import STANDARD_CODES, OsapError
 from .flowcontrol import Admission, AdmissionController, DEFAULT_QUOTA, Quota
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
+from .keystore import JsonKeyStore, KeyringKeyStore, KeyStore, MemoryKeyStore
 from .pcs import ConsentSigner, KeyRegistry
 from .store import JsonStore
 
@@ -66,8 +69,12 @@ __all__ = [
     "DEFAULT_QUOTA",
     "Deadline",
     "IdempotencyIndex",
+    "JsonKeyStore",
     "JsonStore",
     "KeyRegistry",
+    "KeyStore",
+    "KeyringKeyStore",
+    "MemoryKeyStore",
     "KNOWN_TYPES",
     "MAX_FRAME_BYTES",
     "OsapError",
@@ -83,6 +90,7 @@ __all__ = [
     "federation",
     "flowcontrol",
     "identity",
+    "keystore",
     "pcs",
     "registry",
     "schema",

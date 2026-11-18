@@ -24,7 +24,9 @@ signing key survive a restart; the audit list stays in memory. Pass
 `key_store=...` to keep `consent.pcs_key` out of the receipt store, so a
 verifier can share only receipts and reservations; `ConsentFlow.verifier()`
 builds a registry-backed verifier whose ephemeral signer is never persisted.
-The clock is injectable, matching the rest of the reference implementation.
+A `KeyStore` may be any backend from `keystore.py`, including the OS keyring,
+while a bare `JsonStore` keeps the older file-based layout. The clock is
+injectable, matching the rest of the reference implementation.
 """
 
 from __future__ import annotations
@@ -37,6 +39,14 @@ from . import consent, schema
 from .capability import CapabilityAuthority
 from .clock import parse_timestamp
 from .errors import OsapError
+# `SIGNING_KEY_SECTION` is re-exported for callers that predate keystore.py.
+from .keystore import (
+    SIGNING_KEY_SECTION,
+    KeyStore,
+    as_key_store,
+    record_of,
+    signer_of,
+)
 from .pcs import REVOKED, ConsentSigner, KeyRegistry
 from .store import JsonStore
 
@@ -47,7 +57,6 @@ DENY_OPTION = "deny"
 REQUESTS_SECTION = "consent.requests"
 RECEIPTS_SECTION = "consent.receipts"
 RESERVATIONS_SECTION = "consent.reservations"
-SIGNING_KEY_SECTION = "consent.pcs_key"
 
 #: Default request lifetime when `intent_preview.ttl` is absent.
 DEFAULT_TTL = timedelta(minutes=10)
@@ -94,7 +103,7 @@ class ConsentFlow:
         clock=None,
         signer: ConsentSigner | None = None,
         store: JsonStore | None = None,
-        key_store: JsonStore | None = None,
+        key_store: KeyStore | JsonStore | None = None,
         registry: KeyRegistry | None = None,
     ) -> None:
         self.user = user
@@ -102,7 +111,7 @@ class ConsentFlow:
         self.policy_agent = policy_agent
         self._clock = clock or _now
         self._store = store
-        self._key_store = key_store
+        self._key_store = as_key_store(key_store)
         self.registry = registry
         self.requests: dict[str, dict] = {}
         self.receipts: dict[str, dict] = {}
@@ -188,31 +197,17 @@ class ConsentFlow:
     def _restore_signer(self, injected: ConsentSigner | None) -> ConsentSigner:
         if injected is not None:
             return injected
-        key_store = self._key_store or self._store
+        key_store = self._key_store
+        if key_store is None and self._store is not None:
+            key_store = as_key_store(self._store)
         if key_store is None:
             return ConsentSigner.generate()
-        stored = key_store.get(SIGNING_KEY_SECTION)
+        stored = key_store.load()
         if stored is None:
             generated = ConsentSigner.generate()
-            key_store.put(
-                SIGNING_KEY_SECTION,
-                {
-                    "kid": generated.kid,
-                    "private_key": generated.export_private(),
-                    "public_key": generated.public_key,
-                },
-            )
+            key_store.save(record_of(generated))
             return generated
-        if not isinstance(stored, dict):
-            raise ValueError(f"{SIGNING_KEY_SECTION!r} must be a JSON object")
-        private = stored.get("private_key")
-        kid = stored.get("kid")
-        if not isinstance(private, str) or not isinstance(kid, str):
-            raise ValueError(f"{SIGNING_KEY_SECTION!r} needs a private_key and a kid")
-        restored = ConsentSigner(private, kid=kid)
-        if stored.get("public_key") not in (None, restored.public_key):
-            raise ValueError(f"{SIGNING_KEY_SECTION!r} public_key does not match")
-        return restored
+        return signer_of(stored)
 
     def _restore(self) -> None:
         requests = self._read_section(REQUESTS_SECTION)
