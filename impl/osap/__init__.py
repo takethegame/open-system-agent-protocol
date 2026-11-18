@@ -53,7 +53,7 @@ from .errors import STANDARD_CODES, OsapError
 from .flowcontrol import Admission, AdmissionController, DEFAULT_QUOTA, Quota
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
-from .pcs import ConsentSigner
+from .pcs import ConsentSigner, KeyRegistry
 from .store import JsonStore
 
 __all__ = [
@@ -67,6 +67,7 @@ __all__ = [
     "Deadline",
     "IdempotencyIndex",
     "JsonStore",
+    "KeyRegistry",
     "KNOWN_TYPES",
     "MAX_FRAME_BYTES",
     "OsapError",

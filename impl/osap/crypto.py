@@ -78,6 +78,16 @@ def verify_bytes(payload: bytes, signature_b64: str, public_b64: str) -> bool:
     return True
 
 
+def valid_public_key(public_b64: str) -> bool:
+    """True when `public_b64` decodes to a 32-byte Ed25519 public key."""
+
+    try:
+        Ed25519PublicKey.from_public_bytes(b64decode(public_b64))
+    except (ValueError, TypeError, binascii.Error):
+        return False
+    return True
+
+
 def sign_document(document: dict, private_b64: str) -> dict:
     """Return a copy of `document` with a fresh `signature`."""
 
