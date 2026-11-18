@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -39,7 +39,7 @@
 | 同意撤销 | §5.5、§10.3 | 回执撤销级联到已签发能力；未激活的预约直接作废 |
 | 回执签名 | §10.4 | Ed25519 覆盖去掉 `proof` 的规范化 JSON；`activate` 先验签再查预约，Agent 不能自签 |
 | 离线验签 | §10.4 | `pcs.verify_receipt` / `ConsentSigner.verify` 只依赖声明的 PCS 公钥 |
-| PCS 公钥登记 | §4.5、§10.4 | 按 `kid` 登记、轮换（带退役宽限）、撤销与有效期；`pcs.keys` 跨重启；验签失败细分 `AUTH_DENIED` 原因 |
+| PCS 公钥登记 | §4.5、§10.4 | 按 `kid` 登记、轮换（带退役宽限）、撤销与有效期；`pcs.keys` 跨重启；`ConsentFlow` 可选按 `proof.kid` 验签；验签失败细分 `AUTH_DENIED` 原因 |
 | 任务树 | §8.2、§8.10 | 父/子索引、状态机与非法转换拒绝；可注入 `JsonStore` 持久化整棵树 |
 | 委派 | §8.3、§8.5 | 子任务预算 ≤ 父剩余、深度 = 父 + 1、重复 `task_id` 拒绝 |
 | 预算 | §8.6 | 逐维比较；运行期超支报 `TASK_BUDGET_EXCEEDED` |
@@ -81,7 +81,7 @@ impl/
     capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销
     clock.py            单调时钟 deadline
     consent.py          §5.8 同意回执与能力范围校验
-    consent_flow.py     §10.2、§10.3 同意请求、预约、授权/拒绝、激活、撤销
+    consent_flow.py     §10.2、§10.3 同意请求、预约、授权/拒绝、激活、撤销、可选注册表验签
     context.py          §9 句柄、标签、黑板、对象、缓存、存储声明
     crypto.py           Ed25519 签名与规范化 JSON
     envelope.py         §7.1 校验（版本 → 类型 → schema）
@@ -353,7 +353,13 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `register` 拒绝重复 `kid`，换键必须走 `rotate`；`rotate(kid, new_public_key, new_kid=..., grace_seconds=...)` 把旧键标为 `retired`、写入 `retired_at` 与 `grace_until`，新键从 `active` 开始。`revoke` 首次返回 `True`、重复返回 `False`，不会重复写盘。`verify_receipt` 从 `proof.kid` 查表，先判可用性再验 Ed25519；`require_receipt` 把失败原因写进 `AUTH_DENIED.details.reason`（`receipt_key_unknown`、`receipt_key_revoked`、`receipt_key_not_yet_valid`、`receipt_key_expired`、`receipt_signature_invalid`）。
 
-接入 `JsonStore` 时每次变更原子重写 `pcs.keys`；重开逐条校验 `kid` 一致、公钥是有效 32 字节 Ed25519、状态合法、时间戳可解析、窗口不倒置，损坏就抛 `ValueError`。`ConsentFlow.activate` 仍使用自己的 PCS 公钥，尚未把回执路由到注册表。
+接入 `JsonStore` 时每次变更原子重写 `pcs.keys`；重开逐条校验 `kid` 一致、公钥是有效 32 字节 Ed25519、状态合法、时间戳可解析、窗口不倒置，损坏就抛 `ValueError`。
+
+### 5.42 同意流程按需用注册表验签
+
+`ConsentFlow(registry=...)` 是可选路径。配置后，`activate` 调用的 `verify_receipt` 会按回执的 `proof.kid` 查表，先检查撤销、`not_before`/`not_after` 与退役宽限，再用登记的公钥验 Ed25519；因此验证方可以持有自己的 `ConsentSigner`，只共享签发方的公钥，不需要 PCS 私钥。未配置注册表时仍回退到本地 signer，单进程行为与之前一致。
+
+`publish_pcs_key()` 把本流程的公钥幂等登记进注册表：同 `kid` 同公钥返回已有记录，同 `kid` 不同公钥或已撤销键抛 `ValueError`。注册表不会自动登记，避免验证方进程把自己生成的无关密钥写进共享 store；漏登记会让 `activate` 以 `receipt_key_unknown` 拒绝。
 
 ## 6. 已知限制
 
@@ -373,13 +379,13 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 14. **上下文只在内存**：`ContextFabric` 与黑板状态不持久化；任务树与审计账本的状态已可落盘。跨进程恢复与真实回放仍需要专门的上下文存储，C7-01 仍是 manual。
 15. **62 个 pass 覆盖全部 automated 用例**，但不覆盖 6 条 manual 的运行时、跨进程与崩溃恢复语义。
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
-17. **回执签名有本地密钥，注册表未接入验签**：`ConsentFlow` 用 Ed25519 签回执并在 `activate` 验签；接入 `JsonStore` 时密钥写入 `consent.pcs_key` 并复用，不接 store 时仍是一次性生成。`KeyRegistry` 已支持公钥登记、轮换、过期与撤销，但 `activate` 仍信任本地 signer 的公钥，尚未按 `proof.kid` 路由到注册表；私钥与回执同处一个 0600 JSON 文件。
+17. **回执签名有本地密钥，注册表验签是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。共享 `JsonStore` 仍会把 `consent.pcs_key` 暴露给同 store 的读者，私钥与回执同处一个 0600 JSON 文件。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
 19. **并发上限由线程池决定**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；没有事件循环、异步 I/O 或按 Agent 的加权调度。`max_messages` 在并发模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 22. **审计账本按 trace 单链**：没有跨 trace 的全局顺序、归档/截断/TTL、按用户分区或 leader election；`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。长链仍是整节重写。
-23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
+23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 
 ## 7. 与规范的偏差登记
 

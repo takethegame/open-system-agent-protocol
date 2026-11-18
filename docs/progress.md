@@ -21,7 +21,7 @@
 | 流控与背压（M4 前置） | ✅ 完成 | 每身份连接/在途/队列上限与令牌桶速率；FIFO 等待；显式 `RATE_LIMIT`；UDS 可并发服务；422 tests | 2026-11-17 |
 | 任务树持久化（M4 前置） | ✅ 完成 | 整棵树跨重启：状态、预算、`consumed`、`detached`、父子链与 handoff；每次变更一次原子写入；440 tests | 2026-11-17 |
 | 审计账本持久化（M4 前置） | ✅ 完成 | 单 trace 追加链：自动生成 `audit_id`/`ts`/`prev_hash`/`hash`；重启重算正文哈希；损坏 fail closed；457 tests | 2026-11-17 |
-| PCS 公钥登记（M4 前置） | ✅ 完成 | 按 `kid` 登记/轮换/撤销/过期；`KeyRegistry` + `pcs.keys` 持久化；`AUTH_DENIED` 区分验签失败原因；496 tests | 2026-11-18 |
+| PCS 公钥登记（M4 前置） | ✅ 完成 | 按 `kid` 登记/轮换/撤销/过期；`KeyRegistry` + `pcs.keys` 持久化；`ConsentFlow` 可选注册表验签；509 tests | 2026-11-18 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -35,7 +35,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 22 个模块 + 适配器（5965 行）+ 496 个单元测试 |
+| 参考实现 | 22 个模块 + 适配器（6006 行）+ 509 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -84,6 +84,7 @@
 | `f47abd7` | 2026-11-17 | **任务树持久化**：`TaskBoard(store=...)` 与无损 `Task.to_state`/`from_state`；整树跨重启；每次变更一次原子写入；18 条新测试，累计 440 |
 | `ca808b9` | 2026-11-17 | **审计账本持久化**：`AuditLedger` 单 trace 追加链；规范哈希与重启重算；损坏 fail closed；按 trace 分区；17 条新测试，累计 457 |
 | `73cd639` | 2026-11-18 | **PCS 公钥登记**：`KeyRegistry` 按 `kid` 登记/轮换/撤销/过期；`pcs.keys` 持久化与损坏拒绝；验签失败原因细分；39 条新测试，累计 496 |
+| `c035be5` | 2026-11-18 | **同意流程接入注册表**：`ConsentFlow(registry=...)` 按 `proof.kid` 验签；`publish_pcs_key()` 幂等登记；跨 signer 激活；13 条新测试，累计 509 |
 
 ---
 
@@ -899,8 +900,10 @@ python3 demo/run_demo.py
 | 文件 | 作用 |
 |---|---|
 | `impl/osap/pcs.py` | `KeyRegistry`：按 `kid` 保存公钥；`register` / `rotate` / `revoke` / `state_of` / `usable` / `verify_receipt` / `require_receipt`；生命周期 `active` / `retired` / `revoked`；`pcs.keys` 分节持久化 |
+| `impl/osap/consent_flow.py` | `ConsentFlow(registry=...)` 可选注册表验签；`publish_pcs_key()` 幂等登记本流程公钥；`verify_receipt()` 优先查表，未配置时回退到本地 signer |
 | `impl/osap/crypto.py` | `valid_public_key`：确认 base64url 能解出 32 字节 Ed25519 公钥 |
 | `impl/tests/test_pcs.py` | 39 条新测试：登记、重复/畸形键、有效期窗口、轮换与宽限、撤销幂等、验签失败原因、返回副本、重开与损坏分节 |
+| `impl/tests/test_consent_flow.py` | 13 条新测试：发布与幂等、不同键/已撤销键拒绝、跨 signer 激活、无注册表回退、撤销与宽限、篡改拒绝、重开 |
 
 ### 12.2 语义
 
@@ -911,15 +914,17 @@ python3 demo/run_demo.py
 - **撤销幂等**：`revoke` 首次返回 `True`，重复调用返回 `False` 且不重复写入；撤销未知 `kid` 抛 `ValueError`。
 - **按 `kid` 验签**：`verify_receipt` 从 `proof.kid` 查表，先检查可用性再验 Ed25519，缺失或畸形的 proof 一律返回 `False`。`require_receipt` 在失败时返回 `AUTH_DENIED`，`details.reason` 区分 `receipt_key_unknown`、`receipt_key_revoked`、`receipt_key_not_yet_valid`、`receipt_key_expired` 与 `receipt_signature_invalid`。
 - **重启一致**：接入 `JsonStore` 时每次变更原子重写 `pcs.keys`；重开逐条校验 `kid` 一致、公钥可解析为 32 字节、状态合法、时间戳可解析、窗口不倒置，任何损坏抛 `ValueError`，不会得到半个注册表。
-- **不改变现有验签路径**：`ConsentFlow.activate` 仍用自己的 PCS 公钥验签；`KeyRegistry` 是为验证方与多进程部署准备的登记层，尚未自动接入 `ConsentFlow`。
+- **同意流程按需接入**：`ConsentFlow(registry=...)` 后，`activate` 与 `verify_receipt` 会按 `proof.kid` 查表，先检查撤销、过期与退役宽限再验签；未配置注册表时仍只用本地 signer 的公钥，单进程行为不变。
+- **登记是显式动作**：`publish_pcs_key()` 幂等登记本流程公钥；注册表不自动登记，避免验证方进程把自己生成的无关密钥写进共享注册表。同 `kid` 不同公钥或已撤销键会被拒绝。
+- **跨 signer 验证**：验证方可以用自己的 `ConsentSigner` 启动，只要注册表里有签发方的 `kid` 与公钥，`activate` 就能通过；因此验证方不需要持有 PCS 私钥。
 
 ### 12.3 验证证据
 
-2026-11-18，提交 `73cd639`：
+2026-11-18，提交 `c035be5`（登记层 `73cd639`）：
 
 ```
 python3 -m unittest discover -s impl/tests -t impl
-→ Ran 496 tests ... OK
+→ Ran 509 tests ... OK
 
 python3 tools/check_schemas.py
 → OK: 45 checks passed across 15 schemas
@@ -935,16 +940,19 @@ python3 demo/run_demo.py
 → registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
 ```
 
-新增的 39 条测试覆盖：登记后的初始状态与公开字段；未知键；重复 `kid`、空/畸形/非字符串公钥、倒置窗口与非 `datetime` 窗口；`not_before` 延迟可用与 `not_after` 结束可用；撤销的终态与幂等；带/不带宽限的轮换；轮换的未知键、同 `kid`、已存在 `kid`、非法公钥与负宽限拒绝；已撤销/已退役键不能再次轮换；返回记录与内部状态隔离；按 `kid` 排序；按 `kid` 验签成功、正文篡改、未知 `kid`、畸形 proof、已撤销、已过期与尚未生效；宽限期内旧键仍可验签；重开后键、轮换、撤销与窗口一致；单节写入不影响其他 section；空注册表不写盘；非对象分节、非对象记录、`kid` 不一致、非法公钥、未知状态、缺失/畸形时间戳与倒置存储窗口的拒绝。
+新增的 39 条注册表测试覆盖：登记后的初始状态与公开字段；未知键；重复 `kid`、空/畸形/非字符串公钥、倒置窗口与非 `datetime` 窗口；`not_before` 延迟可用与 `not_after` 结束可用；撤销的终态与幂等；带/不带宽限的轮换；轮换的未知键、同 `kid`、已存在 `kid`、非法公钥与负宽限拒绝；已撤销/已退役键不能再次轮换；返回记录与内部状态隔离；按 `kid` 排序；按 `kid` 验签成功、正文篡改、未知 `kid`、畸形 proof、已撤销、已过期与尚未生效；宽限期内旧键仍可验签；重开后键、轮换、撤销与窗口一致；单节写入不影响其他 section；空注册表不写盘；非对象分节、非对象记录、`kid` 不一致、非法公钥、未知状态、缺失/畸形时间戳与倒置存储窗口的拒绝。
+
+新增的 13 条同意流程测试覆盖：`publish_pcs_key` 登记与幂等、无注册表时拒绝发布、同 `kid` 不同公钥与已撤销键拒绝、发布后仍由本流程私钥签名；另一 signer 通过共享注册表激活、无注册表时因签名不匹配拒绝、注册表撤销键阻断激活、退役键仅在宽限内通过、篡改回执拒绝、未配置注册表时回退到本地 signer，以及注册表重开后仍能解析 `kid`。
 
 ### 12.4 已知边界
 
 1. **不是协议消息**：规范 §4.5 只要求“通过 hello 或注册表分发”，没有定义 `pcs.key.register` 之类的信封；注册表是参考实现的本地 API，跨 Bus 分发仍靠共享 `JsonStore` 或带外。
-2. **未接入 `ConsentFlow`**：`activate` 仍信任本地 signer 的公钥；要让多进程验证生效，还需把回执的 `kid` 路由到注册表。
+2. **注册表是可选路径**：不传 `registry` 时 `activate` 仍信任本地 signer 的公钥；共享 `JsonStore` 还会让验证方读到 `consent.pcs_key` 私钥，真正隔离私钥需要独立的回执/公钥存储或服务。
 3. **无撤销传播**：撤销只改本地 `pcs.keys`，不会通知已经持有旧公钥的验证方；跨进程/跨设备失效仍是 0.2 的撤销分发问题。
 4. **整节重写**：每次登记/轮换/撤销都序列化全部键；没有增量写、归档或 TTL。
 5. **单写者**：同一 `JsonStore` 仍要求一个进程写入；并发注册表需要外部协调。
 6. **宽限依赖本地时钟**：`grace_until` 用调用方时钟比较，没有时钟偏差容忍或单调时钟保护。
+7. **发布是显式动作**：`publish_pcs_key()` 不会自动调用；漏登记时 `activate` 以 `receipt_key_unknown` 拒绝，调用方需要把发布纳入启动流程。
 
 ---
 
@@ -967,7 +975,7 @@ python3 demo/run_demo.py
 ## 14. 下一步（按顺序）
 
 1. 把上下文接到 `JsonStore`，并为审计账本补保留/归档与按用户分区；
-2. 把 `KeyRegistry` 接入多进程验签路径，并把私钥从普通 JSON 迁移到 OS 密钥环；
+2. 把私钥从普通 JSON 迁移到 OS 密钥环，并拆分验证方的回执/公钥存储，避免共享 store 泄露 `consent.pcs_key`；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
@@ -1001,3 +1009,4 @@ python3 demo/run_demo.py
 | 2026-11-17 | **任务树持久化**（`f47abd7`）：`TaskBoard(store=...)` 无损整树跨重启；每次变更一次原子写入；新增 18 条测试，累计 440 |
 | 2026-11-17 | **审计账本持久化**（`ca808b9`）：`AuditLedger` 单 trace 追加链；规范哈希与重启重算；损坏 fail closed；按 trace 分区；新增 17 条测试，累计 457 |
 | 2026-11-18 | **PCS 公钥登记**（`73cd639`）：`KeyRegistry` 按 `kid` 登记/轮换/撤销/过期；`pcs.keys` 持久化与损坏拒绝；`AUTH_DENIED` 细分验签失败原因；新增 39 条测试，累计 496 |
+| 2026-11-18 | **同意流程接入注册表**（`c035be5`）：`ConsentFlow(registry=...)` 按 `proof.kid` 验签；`publish_pcs_key()` 幂等登记；跨 signer 激活与无注册表回退；新增 13 条测试，累计 509 |
