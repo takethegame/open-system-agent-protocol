@@ -31,6 +31,7 @@
 | Windows 密钥环与迁移工具（M4 前置） | ✅ 完成 | `KeyringKeyStore` 增加 Windows `PasswordVault`（PowerShell，密钥走 stdin）；后端失败细分 `KeyringError.reason`；`migrate_key_store` + `tools/migrate_pcs_key.py` 验证后迁移并在确认目标后删源；720 tests | 2026-11-19 |
 | 并发服务事件循环（M4 前置） | ✅ 完成 | `serve_forever(mode="selector")` 单线程多路复用监听与全部会话；断开/出错 peer 摘除不影响循环；配额共享 `AdmissionController`；726 tests | 2026-11-19 |
 | 跨进程撤销分发（M4 前置） | ✅ 完成 | `revoke` 写 `capability.revocations` 日志并与撤销集原子落盘；副本 `apply_revocations(entries, source=...)` 按来源游标幂等应用、缺口报 `REVOCATION_GAP`、写失败回滚；743 tests | 2026-11-19 |
+| 恢复事务与 effect 归档（M4 前置） | ✅ 完成 | `TaskBoard(ledger=...)` 共享 store，`recover()` 把任务树、effect 日志与审计链一次 `put_many`；`AuditLedger.append_many` 批量同事务；`max_effects` 归档已决 effect 且 pending/unknown 永不归档；760 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -44,7 +45,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（8371 行）+ 743 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（8560 行）+ 760 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -106,6 +107,7 @@
 | `adba047` | 2026-11-19 | **Windows 密钥环与迁移工具**：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分 `backend_missing`/`lookup_failed`/`store_failed`；`migrate_key_store` 与 `tools/migrate_pcs_key.py`；14 条新测试，累计 720 |
 | `6656195` | 2026-11-19 | **并发服务事件循环**：`serve_forever(mode="selector")` 单线程多路复用；断开/出错 peer 摘除；配额仍走共享控制器；6 条新测试，累计 726 |
 | `893b357` | 2026-11-19 | **跨进程撤销分发**：`capability.revocations` 日志 + `apply_revocations(entries, source=...)` 来源游标；`REVOCATION_GAP` 领域扩展码；17 条新测试，累计 743 |
+| `2609ef1` | 2026-11-19 | **恢复事务与 effect 归档**：`TaskBoard(ledger=...)` + `AuditLedger.append_many` 一次落盘树/日志/审计链；`max_effects` 归档已决 effect；写失败全量回滚；17 条新测试，累计 760 |
 
 ---
 
@@ -1232,7 +1234,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §25 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §26 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1528,7 +1530,60 @@ python3 demo/run_demo.py
 
 ---
 
-## 23. 待确认的规范问题
+## 23. 恢复事务与 effect 归档（M4 前置，已完成）
+
+### 23.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/audit.py` | `AuditLedger.append_many(events, companion=None)`：整批校验、哈希并暂存，最后一次原子落盘（含归档裁剪与 companion 附加分节）；批内末尾出现重复 `audit_id` 或写失败时全量回滚；新增 `store` 属性 |
+| `impl/osap/task.py` | `TaskBoard(store, ledger=..., max_effects=...)`；`recover()` 在挂共享 store 的 ledger 时把任务树、effect 日志与审计链放进同一 `put_many`，写失败回滚状态/日志/暂存事件；`task.effects.archive` 归档最旧已决 effect；pending/unknown 永不归档；effect 变更写失败回滚内存 |
+| `impl/tests/test_task.py` | 12 条新测试：同事务落盘与重开验证、无事可做不写审计、恢复写失败回滚、ledger 共享校验、reschedule 审计、归档移动/永不归档 pending、归档重开与重放闸门、写失败回滚、损坏归档、limit 校验 |
+| `impl/tests/test_audit.py` | 6 条新测试：`append_many` 单次落盘、companion 分节、批内重复全量回滚、写失败回滚、空批次、类型校验 |
+
+### 23.2 语义
+
+- **同事务恢复**：`TaskBoard(ledger=...)` 要求 `AuditLedger` 与 board 共享同一个 `JsonStore` 实例（构造时校验，独立文件直接 `ValueError`）。`recover()` 先把任务/effect 变更应用到内存，再用 `append_many` 暂存恢复事件，最后由 ledger 的一次 `put_many` 同时写入 `task.tasks`、`task.effects` 与 `audit.chain.<trace>`。
+- **失败回滚**：任务状态快照（仅 status 会被恢复变更）、effect 日志深拷贝与审计长度在变更前捕获；ledger 内部自带整批回滚。任何一层失败，内存全部还原，重启恢复可以原样重试。
+- **`append_many` 契约**：整批共享一次落盘；`companion` 用最后一条事件调用并返回附加分节（`AuditJournal` 与本事务都靠它）；空批次不落盘；批内重复 `audit_id` 与写失败一样全量回滚。
+- **effect 归档**：`max_effects=N` 在 journal 超限时把最旧的**已决** effect（executed/reconciled）移入 `task.effects.archive`，与 live 日志同一次原子写入；pending/unknown 即使超限也留在 live，保证 `require_replay_allowed()` 的重放闸门不被裁剪抬起。归档条目与 live 用同一套校验恢复；已归档 intent 再请求重放得到 `ROUTING_NOT_FOUND`（历史结果，重放需重新记录 intent）。
+- **effect 变更回滚**：`record_effect_intent` / `record_effect_outcome` / `reconcile_effect` 现在在变更前快照，写失败时还原 journal 与归档（此前失败会留下内存与磁盘分叉）。
+- **默认不变**：不传 `ledger` 时恢复仍是两节 `put_many`；不传 `max_effects` 时 journal 无上限；`recover()` 返回新增 `ledger_trace_id`（无 ledger 为 `null`），其余字段不变，适配器与演示无需改动。
+
+### 23.3 验证证据
+
+2026-11-19，提交 `2609ef1`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 760 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 18 条测试覆盖：恢复后 store 只含任务树/effect 日志/审计链三节且 ledger 可验证、重开一致；无事可做时不写审计也不产生分节；恢复写失败回滚状态/pending/审计长度且 ledger 为空、去掉故障后重试成功；ledger 必须为 `AuditLedger`、必须共享 store、board 必须有 store、类型错误拒绝；reschedule 恢复写入 `task.created` 事件；`append_many` 的单次落盘、prev_hash 链接、companion 分节、批内重复 `audit_id` 全量回滚且不落盘、写失败回滚、空批次、非列表与空列表；`max_effects` 移动最旧已决 effect 且 pending 永不归档、归档跨重开、已归档 intent 重放报 `ROUTING_NOT_FOUND`、写失败回滚、损坏归档（非对象/键不符/非法状态/未知任务）拒绝、limit 参数校验。
+
+### 23.4 已知边界
+
+1. **同事务要求同库**：ledger 与 board 各持一个 store 文件时无法原子，构造即拒绝；跨文件一致性留给调用方。
+2. **没有 TTL 清理**：`task.effects` 与归档都只增不减，与其他持久化子系统一致；TTL/过期清理仍在全局边界里。
+3. **归档后 intent 不可重放**：已归档 effect 的重放闸门是“找不到”而不是“允许”，重放需要重新 `record_effect_intent`；这是保守方向，但意味着归档改变语义（intent 必须重新登记）。
+4. **审计只覆盖恢复事件**：挂 ledger 后只有 `recover()` 的产物进链；日常 `record_effect_intent`/`reconcile_effect` 的 `TaskBoard.audit` 仍是内存列表，需调用方自行写入 ledger。
+5. **快照粒度**：任务回滚只还原 `status` 字段——恢复路径也只改 status，其他字段不在事务内。
+6. **`append_many` 无优先级**：整批按给定顺序落盘，没有按风险或用户排序；顺序由调用方决定。
+
+---
+
+## 24. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1544,18 +1599,17 @@ python3 demo/run_demo.py
 
 ---
 
-## 24. 下一步（按顺序）
+## 25. 下一步（按顺序）
 
-1. 加入 XPC/Binder/named pipe 等平台原生传输与异步绑定；事件循环与撤销分发已完成（§21、§22）；
-2. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
-3. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
-4. 为撤销分发补自动广播/订阅与端到端传播测量（当前是拉模式，§22）；
-5. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
-6. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
+1. 加入 XPC/Binder/named pipe 等平台原生传输与异步绑定；事件循环、撤销分发与恢复事务已完成（§21–§23）；
+2. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
+3. 为撤销分发补自动广播/订阅与端到端传播测量（当前是拉模式，§22）；
+4. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
+5. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 25. 变更记录
+## 26. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1594,3 +1648,4 @@ python3 demo/run_demo.py
 | 2026-11-19 | **Windows 密钥环与迁移工具**（`adba047`）：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分失败原因；`migrate_key_store` + `tools/migrate_pcs_key.py`；新增 14 条测试，累计 720 |
 | 2026-11-19 | **并发服务事件循环**（`6656195`）：`serve_forever(mode="selector")` 单线程 `DefaultSelector` 多路复用监听与会话；断开/出错 peer 摘除后循环继续；配额仍走共享 `AdmissionController`；新增 6 条测试，累计 726 |
 | 2026-11-19 | **跨进程撤销分发**（`893b357`）：`capability.revocations` 日志与撤销集原子落盘；副本 `apply_revocations(entries, source=...)` 按来源游标幂等应用；`REVOCATION_GAP` 领域扩展码；新增 17 条测试，累计 743 |
+| 2026-11-19 | **恢复事务与 effect 归档**（`2609ef1`）：`TaskBoard(ledger=...)` 共享 store，`recover()` 把树/日志/审计链一次 `put_many`；`AuditLedger.append_many` 批量同事务；`max_effects` 归档已决 effect；新增 18 条测试，累计 760 |
