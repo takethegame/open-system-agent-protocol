@@ -421,5 +421,312 @@ class PersistenceTests(unittest.TestCase):
         self.assertEqual(self.authority().audit, [])
 
 
+class RevocationJournalTests(unittest.TestCase):
+    """The durable journal that lets another process apply revocations."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "state.json"
+
+    def authority(self) -> capability.CapabilityAuthority:
+        return capability.CapabilityAuthority(store=JsonStore(self.path))
+
+    def chain(self) -> tuple[dict, dict, dict]:
+        root = parent()
+        middle = token()
+        middle["cap_id"] = "cap_middle"
+        middle["parent_cap_id"] = PARENT_ID
+        leaf = token()
+        leaf["cap_id"] = "cap_leaf"
+        leaf["parent_cap_id"] = "cap_middle"
+        return root, middle, leaf
+
+    def test_each_revoke_appends_contiguous_entries(self):
+        authority = self.authority()
+        for item in self.chain():
+            authority.issue(item)
+        self.assertEqual(authority.revoke(PARENT_ID), 3)
+        entries = authority.revocations
+        self.assertEqual([entry["seq"] for entry in entries], [1, 2, 3])
+        self.assertEqual(
+            [entry["cap_id"] for entry in entries],
+            [PARENT_ID, "cap_middle", "cap_leaf"],
+        )
+        self.assertEqual(len({entry["ts"] for entry in entries}), 1)
+        self.assertEqual(authority.last_seq, 3)
+        self.assertEqual(authority.applied_sources(), {})
+
+    def test_the_journal_and_the_revoked_set_persist_together(self):
+        authority = self.authority()
+        for item in self.chain():
+            authority.issue(item)
+        authority.revoke(PARENT_ID)
+        reopened = self.authority()
+        self.assertEqual(reopened.revocations, authority.revocations)
+        self.assertEqual(reopened.last_seq, 3)
+        self.assertEqual(
+            reopened.revocations[0]["cap_id"], PARENT_ID
+        )
+
+    def test_repeated_revocation_writes_no_entries(self):
+        authority = self.authority()
+        authority.issue(parent())
+        self.assertEqual(authority.revoke(PARENT_ID), 1)
+        self.assertEqual(authority.revoke(PARENT_ID), 0)
+        self.assertEqual(len(authority.revocations), 1)
+
+    def test_an_in_memory_authority_journals_without_persisting(self):
+        authority = capability.CapabilityAuthority()
+        authority.issue(parent())
+        authority.revoke(PARENT_ID)
+        self.assertEqual(len(authority.revocations), 1)
+        self.assertFalse(self.path.exists())
+
+    def test_a_failed_write_rolls_back_the_journal(self):
+        store = JsonStore(self.path)
+        authority = capability.CapabilityAuthority(store=store)
+        authority.issue(parent())
+        store.put_many = lambda sections: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaises(OSError):
+            authority.revoke(PARENT_ID)
+        self.assertEqual(authority.revocations, [])
+        self.assertEqual(authority.revoked, set())
+        self.assertEqual(authority.audit, [])
+        del store.put_many
+        self.assertEqual(authority.revoke(PARENT_ID), 1)
+        self.assertEqual(authority.last_seq, 1)
+
+    def test_corrupt_journal_sections_are_rejected(self):
+        authority = self.authority()
+        authority.issue(parent())
+        authority.revoke(PARENT_ID)
+        good = JsonStore(self.path).get(capability.REVOCATIONS_SECTION)
+        for mutate in (
+            lambda value: value[0].pop("seq"),
+            lambda value: [{**value[0], "seq": 0}],
+            lambda value: [{**value[0], "seq": True}],
+            lambda value: [{**value[0], "cap_id": ""}],
+            lambda value: [{**value[0], "ts": "not-a-time"}],
+            lambda value: [{**value[0], "origin": "agent://ops"}],
+            lambda value: [{**value[0], "origin": "", "source_seq": 1}],
+            lambda value: [{**value[0], "origin": "agent://ops", "source_seq": 0}],
+            lambda value: value + [dict(value[0], seq=2)],
+        ):
+            JsonStore(self.path).put(capability.REVOCATIONS_SECTION, mutate(good))
+            with self.assertRaises(ValueError):
+                self.authority()
+
+    def test_a_journal_entry_outside_the_revoked_set_is_rejected(self):
+        authority = self.authority()
+        authority.issue(parent())
+        authority.revoke(PARENT_ID)
+        JsonStore(self.path).put(
+            capability.REVOCATIONS_SECTION,
+            [{"seq": 1, "cap_id": "cap_ghost", "ts": "2026-11-10T10:14:45Z"}],
+        )
+        with self.assertRaises(ValueError):
+            self.authority()
+
+    def test_a_journal_sequence_gap_is_rejected_on_reopen(self):
+        authority = self.authority()
+        authority.issue(parent())
+        authority.revoke(PARENT_ID)
+        second = capability.CapabilityAuthority(store=JsonStore(self.path))
+        self.assertEqual(second.revoke("cap_unissued"), 1)
+        entries = JsonStore(self.path).get(capability.REVOCATIONS_SECTION)
+        self.assertEqual([entry["seq"] for entry in entries], [1, 2])
+        entries[1]["seq"] = 5
+        JsonStore(self.path).put(capability.REVOCATIONS_SECTION, entries)
+        with self.assertRaises(OsapError) as caught:
+            self.authority()
+        self.assertEqual(caught.exception.code, capability.REVOCATION_GAP)
+
+
+class RevocationApplyTests(unittest.TestCase):
+    """A replica in another process applies a source's journal batch."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.source_path = Path(self.directory.name) / "source.json"
+        self.replica_path = Path(self.directory.name) / "replica.json"
+        self.source = capability.CapabilityAuthority(store=JsonStore(self.source_path))
+        self.replica = capability.CapabilityAuthority(store=JsonStore(self.replica_path))
+
+    def chain(self) -> tuple[dict, dict, dict]:
+        root = parent()
+        middle = token()
+        middle["cap_id"] = "cap_middle"
+        middle["parent_cap_id"] = PARENT_ID
+        leaf = token()
+        leaf["cap_id"] = "cap_leaf"
+        leaf["parent_cap_id"] = "cap_middle"
+        return root, middle, leaf
+
+    def journal_from_source(self) -> list[dict]:
+        return JsonStore(self.source_path).get(capability.REVOCATIONS_SECTION)
+
+    def test_a_batch_cascades_on_the_replica(self):
+        for item in self.chain():
+            self.source.issue(item)
+        self.assertEqual(self.source.revoke(PARENT_ID), 3)
+        report = self.replica.apply_revocations(
+            self.journal_from_source(), source="issuer"
+        )
+        self.assertEqual(report["applied"], 3)
+        self.assertEqual(report["revoked_now"], 3)
+        self.assertEqual(report["skipped"], 0)
+        self.assertEqual(report["last_seq"], 3)
+        self.assertEqual(report["cursor"], 3)
+        self.assertEqual(self.replica.revoked, self.source.revoked)
+        self.assertTrue(self.replica.is_revoked(token()))
+        self.assertTrue(self.replica.is_revoked({"cap_id": PARENT_ID}))
+        self.assertEqual(self.replica.applied_sources(), {"issuer": 3})
+
+    def test_applying_is_idempotent_and_tracks_the_sequence(self):
+        for item in self.chain():
+            self.source.issue(item)
+        self.source.revoke(PARENT_ID)
+        batch = self.journal_from_source()
+        first = self.replica.apply_revocations(batch, source="issuer")
+        second = self.replica.apply_revocations(batch, source="issuer")
+        self.assertEqual(first["applied"], 3)
+        self.assertEqual(second["applied"], 0)
+        self.assertEqual(second["skipped"], 3)
+        self.assertEqual(second["last_seq"], 3)
+        self.assertEqual(self.replica.revocations, self.source_journal_shape())
+
+    def source_journal_shape(self) -> list[dict]:
+        return [
+            {
+                "seq": index + 1,
+                "cap_id": entry["cap_id"],
+                "ts": entry["ts"],
+                "origin": "issuer",
+                "source_seq": entry["seq"],
+            }
+            for index, entry in enumerate(self.journal_from_source())
+        ]
+
+    def test_a_partial_batch_applies_in_order_and_a_gap_fails_closed(self):
+        for item in self.chain():
+            self.source.issue(item)
+        self.source.revoke(PARENT_ID)
+        batch = self.journal_from_source()
+        first = self.replica.apply_revocations(batch[:1], source="issuer")
+        self.assertEqual(first["applied"], 1)
+        with self.assertRaises(OsapError) as caught:
+            self.replica.apply_revocations(batch[2:], source="issuer")
+        self.assertEqual(caught.exception.code, capability.REVOCATION_GAP)
+        self.assertEqual(caught.exception.details["expected"], 2)
+        # Fetching the missing entry makes the retry succeed unchanged.
+        report = self.replica.apply_revocations(batch, source="issuer")
+        self.assertEqual(report["applied"], 2)
+        self.assertEqual(self.replica.last_seq, 3)
+
+    def test_a_first_batch_must_start_at_one(self):
+        # A fresh replica pulls from the source journal's genesis; a batch
+        # that starts later hides earlier revocations and is refused without
+        # any side effect.
+        self.source.issue(parent())
+        self.source.revoke(PARENT_ID)
+        batch = self.journal_from_source()
+        with self.assertRaises(OsapError) as caught:
+            self.replica.apply_revocations([{**batch[0], "seq": 2}], source="issuer")
+        self.assertEqual(caught.exception.code, capability.REVOCATION_GAP)
+        self.assertEqual(self.replica.revoked, set())
+        self.assertEqual(self.replica.audit, [])
+        self.assertEqual(self.replica.revocations, [])
+        self.assertEqual(self.replica.applied_sources(), {})
+        report = self.replica.apply_revocations(batch, source="issuer")
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["cursor"], 1)
+
+    def test_two_sources_keep_independent_cursors(self):
+        self.source.issue(parent())
+        self.source.revoke(PARENT_ID)
+        other = capability.CapabilityAuthority()
+        other.revoke("cap_unrelated")
+        first = self.replica.apply_revocations(
+            self.journal_from_source(), source="issuer"
+        )
+        second = self.replica.apply_revocations(
+            [{"seq": 1, "cap_id": "cap_unrelated", "ts": "2026-11-10T10:14:45Z"}],
+            source="relay",
+        )
+        self.assertEqual(first["cursor"], 1)
+        self.assertEqual(second["cursor"], 1)
+        self.assertEqual(
+            self.replica.applied_sources(), {"issuer": 1, "relay": 1}
+        )
+        self.assertEqual(self.replica.last_seq, 2)
+
+    def test_a_mixed_origin_batch_is_rejected(self):
+        self.source.issue(parent())
+        self.source.revoke(PARENT_ID)
+        batch = self.journal_from_source()
+        tainted = [dict(batch[0], origin="other")]
+        with self.assertRaises(ValueError):
+            self.replica.apply_revocations(tainted, source="issuer")
+        self.assertEqual(self.replica.revocations, [])
+
+    def test_a_corrupt_batch_is_rejected_without_side_effects(self):
+        self.source.issue(parent())
+        self.source.revoke(PARENT_ID)
+        batch = self.journal_from_source()
+        for mutate in (
+            lambda value: "not a list",
+            lambda value: value + [{"seq": 2}],
+            lambda value: value + [dict(value[0], seq=2, ts="not-a-time")],
+        ):
+            with self.assertRaises(ValueError):
+                self.replica.apply_revocations(mutate(list(batch)), source="issuer")
+        self.assertEqual(self.replica.revoked, set())
+        self.assertEqual(self.replica.last_seq, 0)
+        self.assertEqual(self.replica.applied_sources(), {})
+
+    def test_an_already_revoked_entry_does_not_recascade(self):
+        self.source.issue(parent())
+        self.replica.issue(parent())
+        self.assertEqual(self.replica.revoke(PARENT_ID), 1)
+        self.assertEqual(self.source.revoke(PARENT_ID), 1)
+        report = self.replica.apply_revocations(
+            self.journal_from_source(), source="issuer"
+        )
+        self.assertEqual(report["applied"], 1)
+        self.assertEqual(report["revoked_now"], 0)
+        self.assertEqual(len(self.replica.revocations), 2)
+        self.assertEqual(
+            self.replica.revocations[0],
+            {
+                "seq": 1,
+                "cap_id": PARENT_ID,
+                "ts": self.replica.revocations[0]["ts"],
+            },
+        )
+        self.assertEqual(
+            self.replica.revocations[1]["origin"], "issuer"
+        )
+
+    def test_a_failed_write_rolls_back_the_replica(self):
+        for item in self.chain():
+            self.source.issue(item)
+        self.source.revoke(PARENT_ID)
+        store = JsonStore(self.replica_path)
+        replica = capability.CapabilityAuthority(store=store)
+        store.put_many = lambda sections: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaises(OSError):
+            replica.apply_revocations(self.journal_from_source(), source="issuer")
+        self.assertEqual(replica.revoked, set())
+        self.assertEqual(replica.revocations, [])
+        self.assertEqual(replica.applied_sources(), {})
+        del store.put_many
+        report = replica.apply_revocations(self.journal_from_source(), source="issuer")
+        self.assertEqual(report["applied"], 3)
+        self.assertEqual(replica.last_seq, 3)
+        self.assertEqual(replica.applied_sources(), {"issuer": 3})
+
+
 if __name__ == "__main__":
     unittest.main()
