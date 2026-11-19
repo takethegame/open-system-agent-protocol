@@ -27,6 +27,7 @@
 | 审计保留与归档（M4 前置） | ✅ 完成 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 与归档原子双写；锚点校验与 `history()`；602 tests | 2026-11-18 |
 | 任务与副作用恢复（M4 前置） | ✅ 完成 | `TaskBoard.effects` 持久化 intent/outcome；`recover()` 原子失败/重调度非终态任务并把 intent-only effect 标为 unknown；重放闸门与对账；639 tests | 2026-11-19 |
 | 上下文对象持久化（M4 前置） | ✅ 完成 | `ContextFabric` 增加 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；685 tests | 2026-11-19 |
+| 审计按用户分区与跨 trace 顺序（M4 前置） | ✅ 完成 | `AuditJournal` 写 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开拒绝缺口/重复/时间戳不符/孤儿条目；706 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -40,7 +41,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（7510 行）+ 685 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（7828 行）+ 706 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -98,6 +99,7 @@
 | `f98a6b3` | 2026-11-19 | **M4 本地打包**：两个 xml2rfc v3 individual draft、来源映射、`check_drafts.py`、Linux binding、14 条 ADR；CI 新增 `drafts` job |
 | `fca8fe4` | 2026-11-19 | M4 输出接入 README / roadmap / progress，记录 CI run 44462099197 |
 | `3d251a6` | 2026-11-19 | **上下文对象持久化**：`context.handles` / `context.blackboards` / `context.objects` 分节落盘；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；46 条新测试，累计 685 |
+| `a2c6853` | 2026-11-19 | **审计按用户分区与跨 trace 顺序**：`AuditJournal` 写入 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与序号一次 `put_many`；重开交叉校验；21 条新测试，累计 706 |
 
 ---
 
@@ -1224,7 +1226,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §21 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §22 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1301,7 +1303,62 @@ python3 demo/run_demo.py
 
 ---
 
-## 19. 待确认的规范问题
+## 19. 审计按用户分区与跨 trace 顺序（M4 前置，已完成）
+
+### 19.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/audit.py` | `AuditJournal(user_id=..., store=..., clock=..., max_events=...)`；每 trace 链写入 `audit.user.<user>.chain.<trace>`、归档写入 `audit.user.<user>.archive.<trace>`；跨 trace 序号写入 `audit.order.<user>`；链、归档与序号一次 `put_many`；重开交叉校验；`AuditLedger.append(..., companion=...)` 内部钩子与写失败回滚 |
+| `impl/tests/test_audit.py` | 21 条新测试：跨 trace 序号、分区隔离、重开、保留归档、重复/外部 trace/非法事件、写入失败回滚、缺口/重复/时间戳/孤儿/无序链、构造参数、纯内存 |
+
+### 19.2 语义
+
+- **按用户分区**：每个 `user://` 一个 `AuditJournal`，链与归档落在 `audit.user.<user>.chain.<trace>` / `.archive.<trace>`，不会和另一个用户的分区混读。分区只是存储边界，不替代授权：跨用户读取仍由 `authorize_cross_user` 决定，journal 也不检查事件 `actor` 是否等于 `user_id`。
+- **跨 trace 顺序**：`audit.order.<user>` 保存 `{seq, trace_id, audit_id, ts}` 列表；序号从 1 开始连续递增，每次 `append` 追加一条。顺序反映写入顺序，不声称因果顺序或墙钟排序。
+- **一次原子写入**：`append` 把 trace 链、可能发生的归档迁移与下一条 order 条目合并进一次 `put_many`。`companion` 在持久化前构造；失败时 `AuditLedger` 恢复追加前的 `events`/`_archived`，`AuditJournal` 不推进 `_order` 与 `_next_seq`，因此不会出现“链写了、序号没写”或反之。
+- **重开交叉校验**：先校验 order 的形状、`user_id`、连续序号、`audit_id` 唯一与 RFC 3339 时间戳，再加载该用户的全部 trace 链，最后要求 order 条目与各链 `history()`（含归档）逐条对应且 `ts` 一致。缺口、重复、时间戳不符、孤儿条目、链事件无对应条目都以 `AUDIT_CHAIN_INVALID` 拒绝。
+- **trace 内规则不变**：每条链仍独立校验 schema、trace 一致与 `prev_hash`；trace 内重复 `audit_id` 仍拒绝。journal 额外拒绝跨 trace 的重复 `audit_id`。
+- **默认不变**：不传 `store` 时 journal 只在内存中维护链与序号；`Bus`、`TaskBoard`、`ContextFabric` 不会自动追加事件。
+- **单写者**：不同用户的 journal 必须共享同一个 `JsonStore` 实例；同一路径打开两个 store 会重新引入文档化的多写者覆盖问题。
+
+### 19.3 验证证据
+
+2026-11-19，提交 `a2c6853`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl -p 'test_audit.py'
+→ Ran 88 tests ... OK
+
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 706 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 21 条测试覆盖：跨 trace 连续序号与内容、每 trace 独立链、重开恢复链与顺序、按用户分区互不干扰、保留归档后顺序仍完整、跨 trace 重复 `audit_id` 拒绝、外部 trace 拒绝、非法事件不推进序号、写入失败同时回滚链与序号、order 无链/链无 order/序号缺口/重复条目/时间戳不符/孤儿条目、order 的 `user_id` 不符与条目字段损坏、构造参数、显式 `audit_id`/`ts`、返回值深拷贝、纯内存 journal。
+
+### 19.4 已知边界
+
+1. **顺序是写入顺序**：`seq` 只表示同一用户分区内的追加次序，不携带因果信息；不同用户或不同设备之间没有总序。
+2. **按用户分区的代价**：同一用户的 order 每次追加都重写整节，长历史下成本线性增长；归档虽可保留全部事件，仍只增不减，没有压缩。
+3. **不是授权**：`AuditJournal` 只按 `user_id` 分节，不验证调用者身份，也不检查事件 `actor`；越权读取仍须经 `authorize_cross_user`。
+4. **单写者**：一个 `JsonStore` 仍要求一个进程写入；多进程并发追加需要在外部串行化，或按用户/实例拆分 store。
+5. **不自动接线**：`Bus`、`TaskBoard` 与 `ContextFabric` 仍只返回事件，是否写入 journal 由调用方决定。
+6. **崩溃原子性范围**：`put_many` 只保证链、归档与 order 三节同一次落盘；调用方在 `append` 之外另行执行的业务副作用不在该事务内。
+
+---
+
+## 20. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1317,19 +1374,19 @@ python3 demo/run_demo.py
 
 ---
 
-## 20. 下一步（按顺序）
+## 21. 下一步（按顺序）
 
-1. 为审计账本补按用户分区与跨 trace 的全局顺序；上下文句柄、黑板与对象元数据存储已完成（§18）；
-2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
-3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
-4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
-5. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
+1. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
+2. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
+3. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
+4. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
+5. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
 6. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
 7. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 21. 变更记录
+## 22. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1364,3 +1421,4 @@ python3 demo/run_demo.py
 | 2026-11-19 | **任务与副作用恢复**（`c7e990c`）：`TaskBoard` 持久化 `task.effects`；`recover()` 失败/重调度非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；新增 37 条测试，累计 639 |
 | 2026-11-19 | **M4 本地打包**（`f98a6b3`）：两个 xml2rfc v3 individual draft（能力 token、同意回执）、逐节来源映射、`tools/check_drafts.py` + `requirements-drafts.txt`、Linux binding（D-Bus/portal/systemd/3 序列图）、14 条 ADR、`GOVERNANCE.md` §9.1 联络状态；CI 新增 `drafts` job 并通过（run 44461943418）；未提交 IETF |
 | 2026-11-19 | **上下文对象持久化**（`3d251a6`）：`ContextFabric` 新增 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析且未知即 `CONTEXT_NOT_FOUND`、黑板关闭清空且不晋升记忆、对象引用计数与墓碑跨重启；新增 46 条测试，累计 685 |
+| 2026-11-19 | **审计按用户分区与跨 trace 顺序**（`a2c6853`）：`AuditJournal` 写 `audit.user.<user>.chain/archive.<trace>` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开交叉校验并拒绝缺口/重复/时间戳不符/孤儿条目；新增 21 条测试，累计 706 |
