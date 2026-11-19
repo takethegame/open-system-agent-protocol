@@ -19,6 +19,7 @@ denial, not a pass.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import json
 import os
@@ -367,7 +368,12 @@ class UnixSession:
     def close(self) -> None:
         if not self.closed:
             self.closed = True
-            self.sock.close()
+            try:
+                self.sock.close()
+            except AttributeError:
+                # An asyncio transport owns this socket; its close() already
+                # closed the underlying fd.
+                pass
             if self.admission_lease is not None:
                 self.admission_lease.release()
                 self.admission_lease = None
@@ -377,6 +383,116 @@ class UnixSession:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         self.close()
+
+
+class _AsyncioStreamProtocol(asyncio.Protocol):
+    """Buffered stream framing for the asyncio serving mode (§7.9).
+
+    `data_received` appends bytes and peels complete frames from the buffer,
+    so a peer that stalls mid-frame holds only its own connection. Dispatch
+    reuses the per-connection `Bus`; errors answer with the standard error
+    envelope, and a connection quota rejection is sent before closing, the
+    same way the blocking `accept()` path does it.
+    """
+
+    def __init__(self, outer: "UnixStreamServer", state: dict) -> None:
+        self._outer = outer
+        self._state = state
+        self.transport = None
+        self.session = None
+        self.buffer = bytearray()
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
+        outer = self._outer
+        sock = transport.get_extra_info("socket")
+        bus = outer._bus_factory()
+        try:
+            session = UnixSession(
+                sock,
+                binding=framing.Binding.STREAM,
+                bus=bus,
+                peer_policy=outer.peer_policy,
+            )
+            session.admission_lease = outer.admission.open_connection(
+                connection_identity(session.peer)
+            )
+        except OsapError as error:
+            # Tell the peer why it was dropped; a silent close looks like a
+            # network fault and invites an immediate retry storm.
+            try:
+                transport.write(framing.encode_stream(bus.error_envelope({}, error)))
+            except (OSError, OsapError):
+                pass
+            transport.close()
+            return
+        except Exception:
+            transport.close()
+            return
+        self.session = session
+        self._state["sessions"].add(self)
+
+    def data_received(self, data: bytes) -> None:
+        self.buffer.extend(data)
+        while True:
+            if len(self.buffer) < framing.HEADER_BYTES:
+                return
+            (length,) = struct.unpack(
+                ">I", bytes(self.buffer[: framing.HEADER_BYTES])
+            )
+            try:
+                framing.check_size(length)
+            except OsapError as error:
+                self._reject(error)
+                return
+            end = framing.HEADER_BYTES + length
+            if len(self.buffer) < end:
+                return
+            payload = bytes(self.buffer[framing.HEADER_BYTES : end])
+            del self.buffer[:end]
+            if not self._dispatch(payload):
+                return
+
+    def _dispatch(self, payload: bytes) -> bool:
+        """Handle one framed payload; False when the connection must close."""
+
+        message = None
+        try:
+            try:
+                message = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise OsapError(
+                    "SCHEMA_INVALID",
+                    f"transport payload is not UTF-8 JSON: {exc}",
+                ) from exc
+            if not isinstance(message, dict):
+                raise OsapError("SCHEMA_INVALID", "transport payload must be an object")
+            reply = self.session.bus.receive(message)
+        except OsapError as error:
+            self._send(self.session.bus.error_envelope(message or {}, error))
+            return True
+        except (ConnectionError, OSError, NotImplementedError, ValueError):
+            self.transport.close()
+            return False
+        self._send(reply)
+        return True
+
+    def _send(self, reply: dict) -> None:
+        self.transport.write(framing.encode_stream(reply))
+        self._state["served"] += 1
+        limit = self._state["max_messages"]
+        if limit is not None and self._state["served"] >= limit:
+            self._state["finish"]()
+
+    def _reject(self, error: OsapError) -> None:
+        self._send(self.session.bus.error_envelope({}, error))
+        self.transport.close()
+
+    def connection_lost(self, exc) -> None:
+        self._state["sessions"].discard(self)
+        if self.session is not None:
+            self.session.close()
+        self.transport = None
 
 
 class UnixStreamServer:
@@ -413,6 +529,7 @@ class UnixStreamServer:
         os.chmod(self.path, 0o600)
         self.sock.listen(backlog)
         self.closed = False
+        self._asyncio_stop = None
 
     def _remove_stale_socket(self) -> None:
         """Drop a leftover socket, but never clobber an unrelated file."""
@@ -480,21 +597,30 @@ class UnixStreamServer:
         frame can still block the loop until the frame times out at the
         client; full duplex buffering would need a native async binding.
 
-        With concurrency above 1 or in selector mode, `max_messages` is a
-        best-effort stop condition: no new reply is started once the count is
-        reached, but replies already in flight may finish.
+        `mode="asyncio"` runs the listener and every session on an asyncio
+        event loop with a buffered framing protocol. Because bytes are
+        buffered per connection, a peer that stalls mid-frame no longer
+        blocks anyone else; a slow dispatch still serializes the loop, which
+        is what a native OS binding would parallelize.
+
+        With concurrency above 1, in selector mode, or in asyncio mode,
+        `max_messages` is a best-effort stop condition: no new reply is
+        started once the count is reached, but replies already in flight may
+        finish.
         """
 
-        if mode not in ("threads", "selector"):
-            raise ValueError("mode must be 'threads' or 'selector'")
+        if mode not in ("threads", "selector", "asyncio"):
+            raise ValueError("mode must be 'threads', 'selector', or 'asyncio'")
         if isinstance(concurrency, bool) or not isinstance(concurrency, int):
             raise ValueError("concurrency must be a positive int")
         if concurrency < 1:
             raise ValueError("concurrency must be a positive int")
-        if mode == "selector" and concurrency != 1:
-            raise ValueError("selector mode does not take a concurrency")
+        if mode != "threads" and concurrency != 1:
+            raise ValueError(f"{mode} mode does not take a concurrency")
         if mode == "selector":
             return self._serve_selector(max_messages)
+        if mode == "asyncio":
+            return self._serve_asyncio(max_messages)
         if concurrency == 1:
             return self._serve_serial(max_messages)
         return self._serve_concurrent(max_messages, concurrency)
@@ -578,6 +704,70 @@ class UnixStreamServer:
                         pass
                     session.close()
         return served
+
+    def _serve_asyncio(self, max_messages: int | None) -> int:
+        """Run the listener and every session on one asyncio event loop.
+
+        Bytes are buffered per connection (`_AsyncioStreamProtocol`), so a
+        peer that sends half a frame and stalls does not block anyone else —
+        the guarantee the selector loop cannot give. Dispatch itself is
+        synchronous, so a slow handler still serializes the loop.
+        """
+
+        try:
+            return asyncio.run(self._asyncio_main(max_messages))
+        except (OSError, ValueError):
+            # The listener was closed underneath us; deliver what we counted.
+            return 0
+
+    async def _asyncio_main(self, max_messages: int | None) -> int:
+        loop = asyncio.get_running_loop()
+        state: dict = {
+            "served": 0,
+            "max_messages": max_messages,
+            "sessions": set(),
+            "server": None,
+        }
+
+        def finish() -> None:
+            if state["done"].done():
+                return
+            if state["server"] is not None:
+                state["server"].close()
+            for session in list(state["sessions"]):
+                if session.transport is not None:
+                    session.transport.close()
+            state["done"].set_result(True)
+
+        state["finish"] = finish
+        state["done"] = loop.create_future()
+        self._asyncio_stop = (loop, finish)
+
+        async def monitor() -> None:
+            while not state["done"].done():
+                await asyncio.sleep(0.05)
+                if self.closed or (
+                    max_messages is not None and state["served"] >= max_messages
+                ):
+                    finish()
+
+        monitor_task = loop.create_task(monitor())
+        try:
+            state["server"] = await loop.create_server(
+                lambda: _AsyncioStreamProtocol(self, state),
+                sock=self.sock,
+            )
+            await state["done"]
+        finally:
+            monitor_task.cancel()
+            self._asyncio_stop = None
+            # The loop thread owns the socket in this mode; close it here so
+            # an external close() never has to touch the kqueue-selected fd.
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        return state["served"]
 
     def _drop_session(self, selector, session_of: dict, session) -> None:
         session_of.pop(session.sock, None)
@@ -665,7 +855,16 @@ class UnixStreamServer:
     def close(self) -> None:
         if not self.closed:
             self.closed = True
-            self.sock.close()
+            stopper = self._asyncio_stop
+            if stopper is not None:
+                # An asyncio loop owns the socket right now. Never close a
+                # kqueue-selected fd from another thread — on macOS that can
+                # hang the loop's kevent() forever — signal it instead; the
+                # serving thread closes the socket in its own finally.
+                loop, finish = stopper
+                loop.call_soon_threadsafe(finish)
+            else:
+                self.sock.close()
             try:
                 self.path.unlink()
             except FileNotFoundError:

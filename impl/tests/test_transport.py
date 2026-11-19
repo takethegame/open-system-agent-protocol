@@ -462,6 +462,136 @@ class SelectorStreamTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
 
 
+class AsyncioStreamTests(unittest.TestCase):
+    """The asyncio loop buffers frames, so a stalled peer holds only itself."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "bus.sock")
+        self.server = transport.UnixStreamServer(self.path)
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp.cleanup()
+
+    def connect(self):
+        return transport.UnixStreamClient.connect(self.path, timeout=2)
+
+    def test_asyncio_mode_rejects_a_concurrency(self):
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(mode="asyncio", concurrency=2)
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(mode="fiber")
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(mode=True)
+
+    def test_hello_then_request_round_trip(self):
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="asyncio"
+        )
+        client = self.connect()
+        try:
+            self.assertEqual(client.call(hello())["type"], "welcome")
+            self.assertEqual(client.call(request())["type"], "result")
+        finally:
+            client.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_an_idle_connection_does_not_block_another(self):
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="asyncio"
+        )
+        idle = self.connect()
+        active = self.connect()
+        try:
+            self.assertEqual(active.call(hello())["type"], "welcome")
+            self.assertEqual(active.call(request())["type"], "result")
+        finally:
+            idle.close()
+            active.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_stalled_half_frame_does_not_block_another_peer(self):
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="asyncio"
+        )
+        stalled = self.connect()
+        active = self.connect()
+        try:
+            # Exactly half of a length header, then silence: the selector and
+            # thread-pool loops would wait on the stalled socket here.
+            stalled.sock.send(b"\x00\x00")
+            self.assertEqual(active.call(hello())["type"], "welcome")
+            self.assertEqual(active.call(request())["type"], "result")
+        finally:
+            stalled.close()
+            active.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_broken_peer_is_dropped_and_the_loop_continues(self):
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="asyncio"
+        )
+        client = self.connect()
+        abrupt = self.connect()
+        try:
+            abrupt.sock.close()
+            self.assertEqual(client.call(hello())["type"], "welcome")
+            self.assertEqual(client.call(request())["type"], "result")
+        finally:
+            client.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_connection_quota_is_enforced_in_asyncio_mode(self):
+        self.server.close()
+        controller = AdmissionController(Quota(max_connections=1))
+        self.server = transport.UnixStreamServer(self.path, admission=controller)
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="asyncio"
+        )
+        first = self.connect()
+        second = self.connect()
+        try:
+            self.assertEqual(first.call(hello())["type"], "welcome")
+            wait_until(lambda: _readable(second.sock))
+            rejected = second.receive()
+            self.assertEqual(rejected["type"], "error")
+            self.assertEqual(rejected["body"]["data"]["code"], "RATE_LIMIT")
+            self.assertEqual(first.call(request())["type"], "result")
+        finally:
+            first.close()
+            second.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_max_messages_stops_the_loop(self):
+        thread = start(
+            self.server.serve_forever, max_messages=1, mode="asyncio"
+        )
+        first = self.connect()
+        try:
+            self.assertEqual(first.call(hello())["type"], "welcome")
+        finally:
+            first.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_closed_listener_stops_the_loop(self):
+        thread = start(self.server.serve_forever, mode="asyncio")
+        client = self.connect()
+        try:
+            self.assertEqual(client.call(hello())["type"], "welcome")
+        finally:
+            client.close()
+        self.server.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+
 class AdmissionTransportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
