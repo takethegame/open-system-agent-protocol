@@ -295,6 +295,12 @@ class AuditLedger:
     # --- writing -----------------------------------------------------------
 
     @property
+    def store(self):
+        """The backing `JsonStore`, or None for an in-memory ledger."""
+
+        return self._store
+
+    @property
     def head(self) -> str:
         """The last hash, or the anchor for an empty live chain."""
 
@@ -321,11 +327,62 @@ class AuditLedger:
 
         `companion`, when given, is called with the finalized record and must
         return extra `{section: value}` entries. They are flushed in the same
-        atomic write as the chain, which is how `AuditJournal` keeps the
-        cross-trace order index consistent with the event. The callback must
-        not mutate caller-visible state until `append` returns, because a
-        failed write rolls the ledger back.
+        atomic write as the chain, which is how `AuditJournal` and
+        `TaskBoard.recover()` keep their sections consistent with the event.
+        The callback must not mutate caller-visible state until `append`
+        returns, because a failed write rolls the ledger back.
         """
+
+        before_events = list(self.events)
+        before_archived = list(self._archived)
+        record = self._stage(event)
+        try:
+            trimmed = self._trim()
+            extra = companion(record) if companion is not None else None
+            self._persist(archive_changed=trimmed, extra=extra)
+        except BaseException:
+            self.events = before_events
+            self._archived = before_archived
+            raise
+        return copy.deepcopy(record)
+
+    def append_many(self, events, *, companion=None) -> list[dict]:
+        """Validate, hash, and append several events, then flush once.
+
+        The whole batch shares one atomic write, so `TaskBoard.recover()` can
+        put the recovered task tree, the effect journal, and the audit chain
+        into the same store flush. `companion` is called with the last
+        finalized record and returns extra `{section: value}` entries merged
+        into that write. A failure — including a duplicate `audit_id` late in
+        the batch — rolls every staged event back, so the caller can retry
+        the whole batch unchanged.
+        """
+
+        if not isinstance(events, list):
+            raise ValueError("events must be a list")
+        if not events:
+            return []
+        before_events = list(self.events)
+        before_archived = list(self._archived)
+        records = []
+        try:
+            for event in events:
+                records.append(self._stage(event))
+            trimmed = self._trim()
+            extra = (
+                companion(records[-1])
+                if companion is not None and records
+                else None
+            )
+            self._persist(archive_changed=trimmed, extra=extra)
+        except BaseException:
+            self.events = before_events
+            self._archived = before_archived
+            raise
+        return [copy.deepcopy(record) for record in records]
+
+    def _stage(self, event) -> dict:
+        """Validate, hash, and append one event to memory without persisting."""
 
         if not isinstance(event, dict):
             raise ValueError("an audit event must be a JSON object")
@@ -354,18 +411,8 @@ class AuditLedger:
                 "duplicate audit_id in the chain",
                 details={"audit_id": record["audit_id"]},
             )
-        before_events = list(self.events)
-        before_archived = list(self._archived)
         self.events.append(record)
-        try:
-            trimmed = self._trim()
-            extra = companion(record) if companion is not None else None
-            self._persist(archive_changed=trimmed, extra=extra)
-        except BaseException:
-            self.events = before_events
-            self._archived = before_archived
-            raise
-        return copy.deepcopy(record)
+        return record
 
     def _trim(self) -> bool:
         """Move the oldest events to the archive until `max_events` holds."""

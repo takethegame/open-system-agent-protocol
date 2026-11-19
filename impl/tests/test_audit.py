@@ -1031,5 +1031,69 @@ class AuditJournalTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
 
+class AppendManyTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "audit.json"
+
+    def ledger(self) -> audit.AuditLedger:
+        return audit.AuditLedger(trace_id=TRACE, store=JsonStore(self.path), clock=clock)
+
+    def test_a_batch_shares_one_flush(self):
+        ledger = self.ledger()
+        records = ledger.append_many([event(audit_id="audit_1"), event(audit_id="audit_2")])
+        self.assertEqual([record["audit_id"] for record in records], ["audit_1", "audit_2"])
+        self.assertEqual(records[1]["prev_hash"], records[0]["hash"])
+        self.assertEqual(len(ledger), 2)
+        self.assertTrue(ledger.verify())
+        self.assertEqual(
+            len(JsonStore(self.path).get(f"{audit.LEDGER_SECTION_PREFIX}{TRACE}")["events"]),
+            2,
+        )
+
+    def test_a_companion_section_is_written_with_the_batch(self):
+        ledger = self.ledger()
+        ledger.append_many(
+            [event()],
+            companion=lambda record: {"companion.section": {"ok": True}},
+        )
+        self.assertEqual(
+            JsonStore(self.path).get("companion.section"), {"ok": True}
+        )
+
+    def test_a_late_duplicate_rolls_the_whole_batch_back(self):
+        ledger = self.ledger()
+        with self.assertRaises(OsapError) as caught:
+            ledger.append_many(
+                [event(audit_id="audit_same"), event(audit_id="audit_same")]
+            )
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+        self.assertEqual(ledger.events, [])
+        self.assertIsNone(JsonStore(self.path).get(f"{audit.LEDGER_SECTION_PREFIX}{TRACE}"))
+        ledger.append(event(audit_id="audit_same"))
+        self.assertEqual(len(ledger), 1)
+
+    def test_a_failed_write_rolls_every_staged_event_back(self):
+        store = JsonStore(self.path)
+        ledger = audit.AuditLedger(trace_id=TRACE, store=store, clock=clock)
+        store.put = lambda section, value: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaises(OSError):
+            ledger.append_many([event(), event()])
+        self.assertEqual(ledger.events, [])
+        del store.put
+        self.assertEqual(len(ledger.append_many([event()])), 1)
+
+    def test_events_must_be_a_list(self):
+        for value in ("events", {}, 7):
+            with self.assertRaises(ValueError):
+                self.ledger().append_many(value)
+
+    def test_an_empty_batch_writes_nothing(self):
+        ledger = self.ledger()
+        self.assertEqual(ledger.append_many([]), [])
+        self.assertIsNone(JsonStore(self.path).get(f"{audit.LEDGER_SECTION_PREFIX}{TRACE}"))
+
+
 if __name__ == "__main__":
     unittest.main()

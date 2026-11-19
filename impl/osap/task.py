@@ -25,9 +25,14 @@ the previous tree or the new one, never a half-applied transition.
 The board also keeps an effect journal (`task.effects`) for §8.11. An
 irreversible side effect records an intent before it runs and an outcome
 afterwards; `recover()` fails every non-terminal task and marks every
-intent-only effect `unknown` in one atomic write. A subsequent replay is
-refused until an explicit `reconcile_effect()` supplies the outcome, so a
-restart cannot silently repeat a side effect.
+intent-only effect `unknown`. With a `max_effects` limit the oldest resolved
+effects move into `task.effects.archive`, still in one atomic write;
+intent-only effects are never archived, so the replay gate keeps its teeth.
+
+`recover(ledger=...)` closes the last gap: with an `AuditLedger` that shares
+the board's `JsonStore`, the recovered tree, the effect journal, and the
+audit chain land in one atomic `put_many`. A failure rolls the statuses, the
+journal, and the staged audit events back, so the restart can be retried.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import copy
 from dataclasses import dataclass, field
 
 from . import schema
+from .audit import AuditLedger
 from .capability import HIGH_RISK
 from .errors import OsapError
 from .store import JsonStore
@@ -45,6 +51,7 @@ DELEGATE_SCHEMA = "delegate.schema.json"
 HANDOFF_SCHEMA = "handoff.schema.json"
 TASKS_SECTION = "task.tasks"
 EFFECTS_SECTION = "task.effects"
+EFFECT_ARCHIVE_SECTION = "task.effects.archive"
 
 STATUSES = (
     "created",
@@ -281,10 +288,32 @@ class TaskBoard:
     sections through one `put_many`.
     """
 
-    def __init__(self, *, store: JsonStore | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        store: JsonStore | None = None,
+        ledger: AuditLedger | None = None,
+        max_effects: int | None = None,
+    ) -> None:
+        if max_effects is not None and (
+            not isinstance(max_effects, int)
+            or isinstance(max_effects, bool)
+            or max_effects < 1
+        ):
+            raise ValueError("max_effects must be a positive integer")
+        if ledger is not None:
+            if not isinstance(ledger, AuditLedger):
+                raise ValueError("ledger must be an AuditLedger")
+            if store is None:
+                raise ValueError("a ledger requires a store to share")
+            if ledger.store is not store:
+                raise ValueError("the ledger must share the task board's store")
         self.tasks: dict[str, Task] = {}
         self.effects: dict[str, dict] = {}
+        self._archived_effects: dict[str, dict] = {}
         self.audit: list[dict] = []
+        self.max_effects = max_effects
+        self._ledger = ledger
         self._store = store
         if store is not None:
             self._restore()
@@ -294,6 +323,7 @@ class TaskBoard:
     def _restore(self) -> None:
         self._restore_tasks()
         self._restore_effects()
+        self._restore_effect_archive()
 
     def _restore_tasks(self) -> None:
         loaded = self._store.get(TASKS_SECTION)
@@ -321,40 +351,56 @@ class TaskBoard:
             raise ValueError(f"{EFFECTS_SECTION!r} must be a JSON object")
         effects: dict[str, dict] = {}
         for intent_ref, state in loaded.items():
-            if not isinstance(intent_ref, str) or not intent_ref:
-                raise ValueError("stored effect refs must be non-empty strings")
-            if not isinstance(state, dict):
-                raise ValueError("a stored effect must be a JSON object")
-            stored_ref = state.get("intent_ref")
-            if stored_ref != intent_ref:
-                raise ValueError(
-                    f"stored effect {intent_ref!r} carries intent_ref {stored_ref!r}"
-                )
-            for key in ("task_id", "target"):
-                if not isinstance(state.get(key), str) or not state[key]:
-                    raise ValueError(f"stored effect needs a non-empty {key}")
-            if state["task_id"] not in self.tasks:
-                raise ValueError(
-                    f"stored effect {intent_ref!r} references an unknown task"
-                )
-            status = state.get("status")
-            if status not in EFFECT_STATUSES:
-                raise ValueError(f"stored effect has an unknown status: {status!r}")
-            outcome = state.get("reconciled_outcome")
-            if status == "reconciled":
-                if outcome not in RECONCILED_OUTCOMES:
-                    raise ValueError(
-                        f"stored effect has an invalid reconciled outcome: {outcome!r}"
-                    )
-            elif outcome is not None:
-                raise ValueError(
-                    "stored effect has a reconciled outcome but is not reconciled"
-                )
-            key = state.get("idempotency_key")
-            if key is not None and (not isinstance(key, str) or not key):
-                raise ValueError("stored effect idempotency_key must be a non-empty string")
-            effects[intent_ref] = copy.deepcopy(state)
+            effects[intent_ref] = self._effect_state(intent_ref, state)
         self.effects = effects
+
+    def _restore_effect_archive(self) -> None:
+        loaded = self._store.get(EFFECT_ARCHIVE_SECTION)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{EFFECT_ARCHIVE_SECTION!r} must be a JSON object")
+        archived: dict[str, dict] = {}
+        for intent_ref, state in loaded.items():
+            archived[intent_ref] = self._effect_state(intent_ref, state)
+        self._archived_effects = archived
+
+    def _effect_state(self, intent_ref: str, state) -> dict:
+        """Validate one stored effect record shared by live and archived."""
+
+        if not isinstance(intent_ref, str) or not intent_ref:
+            raise ValueError("stored effect refs must be non-empty strings")
+        if not isinstance(state, dict):
+            raise ValueError("a stored effect must be a JSON object")
+        stored_ref = state.get("intent_ref")
+        if stored_ref != intent_ref:
+            raise ValueError(
+                f"stored effect {intent_ref!r} carries intent_ref {stored_ref!r}"
+            )
+        for key in ("task_id", "target"):
+            if not isinstance(state.get(key), str) or not state[key]:
+                raise ValueError(f"stored effect needs a non-empty {key}")
+        if state["task_id"] not in self.tasks:
+            raise ValueError(
+                f"stored effect {intent_ref!r} references an unknown task"
+            )
+        status = state.get("status")
+        if status not in EFFECT_STATUSES:
+            raise ValueError(f"stored effect has an unknown status: {status!r}")
+        outcome = state.get("reconciled_outcome")
+        if status == "reconciled":
+            if outcome not in RECONCILED_OUTCOMES:
+                raise ValueError(
+                    f"stored effect has an invalid reconciled outcome: {outcome!r}"
+                )
+        elif outcome is not None:
+            raise ValueError(
+                "stored effect has a reconciled outcome but is not reconciled"
+            )
+        key = state.get("idempotency_key")
+        if key is not None and (not isinstance(key, str) or not key):
+            raise ValueError("stored effect idempotency_key must be a non-empty string")
+        return copy.deepcopy(state)
 
     def _persist(self) -> None:
         if self._store is None:
@@ -364,10 +410,54 @@ class TaskBoard:
             {task_id: record.to_state() for task_id, record in self.tasks.items()},
         )
 
-    def _persist_effects(self) -> None:
+    def _persist_effects(self, *, archive_changed: bool = False) -> None:
         if self._store is None:
             return
-        self._store.put(EFFECTS_SECTION, copy.deepcopy(self.effects))
+        live = copy.deepcopy(self.effects)
+        if archive_changed:
+            self._store.put_many(
+                {
+                    EFFECTS_SECTION: live,
+                    EFFECT_ARCHIVE_SECTION: copy.deepcopy(self._archived_effects),
+                }
+            )
+        else:
+            self._store.put(EFFECTS_SECTION, live)
+
+    def _commit_effects(self) -> None:
+        """Trim the journal if needed, then flush one atomic write."""
+
+        archive_changed = self._trim_effects()
+        self._persist_effects(archive_changed=archive_changed)
+
+    def _trim_effects(self) -> bool:
+        """Move the oldest resolved effects to the archive (§8.11 retention).
+
+        Pending and unknown effects stay live no matter how far over the
+        limit the journal is: archiving them would lift the replay gate and
+        let a restart repeat a side effect.
+        """
+
+        if self.max_effects is None:
+            return False
+        overflow = len(self.effects) - self.max_effects
+        if overflow <= 0:
+            return False
+        movable = [
+            intent_ref
+            for intent_ref, effect in self.effects.items()
+            if effect["status"] in ("executed", "reconciled")
+        ]
+        if not movable:
+            return False
+        for intent_ref in movable[:overflow]:
+            self._archived_effects[intent_ref] = self.effects.pop(intent_ref)
+        return True
+
+    def archived_effects(self) -> dict[str, dict]:
+        """Detached copy of the effect journal's archive."""
+
+        return copy.deepcopy(self._archived_effects)
 
     def _persist_recovery(self) -> None:
         """Flush the recovered tree and journal in one atomic store write."""
@@ -655,6 +745,8 @@ class TaskBoard:
                 f"effect intent already exists: {intent_ref}",
                 details={"intent_ref": intent_ref},
             )
+        before_effects = copy.deepcopy(self.effects)
+        before_archived = copy.deepcopy(self._archived_effects)
         effect = {
             "intent_ref": intent_ref,
             "task_id": task_id,
@@ -663,16 +755,21 @@ class TaskBoard:
         }
         if idempotency_key is not None:
             effect["idempotency_key"] = idempotency_key
-        self.effects[intent_ref] = effect
-        self.audit.append(
-            {
-                "action": "effect.intent",
-                "task_id": task_id,
-                "intent_ref": intent_ref,
-                "target": target,
-            }
-        )
-        self._persist_effects()
+        try:
+            self.effects[intent_ref] = effect
+            self.audit.append(
+                {
+                    "action": "effect.intent",
+                    "task_id": task_id,
+                    "intent_ref": intent_ref,
+                    "target": target,
+                }
+            )
+            self._commit_effects()
+        except BaseException:
+            self.effects = before_effects
+            self._archived_effects = before_archived
+            raise
         return copy.deepcopy(effect)
 
     def record_effect_outcome(self, intent_ref: str) -> dict:
@@ -687,16 +784,23 @@ class TaskBoard:
                 "an effect with an unknown outcome must be reconciled first",
                 details={"intent_ref": intent_ref, "reason": "reconciliation_required"},
             )
-        effect["status"] = "executed"
-        self.audit.append(
-            {
-                "action": "effect.executed",
-                "task_id": effect["task_id"],
-                "intent_ref": intent_ref,
-                "target": effect["target"],
-            }
-        )
-        self._persist_effects()
+        before_effects = copy.deepcopy(self.effects)
+        before_archived = copy.deepcopy(self._archived_effects)
+        try:
+            effect["status"] = "executed"
+            self.audit.append(
+                {
+                    "action": "effect.executed",
+                    "task_id": effect["task_id"],
+                    "intent_ref": intent_ref,
+                    "target": effect["target"],
+                }
+            )
+            self._commit_effects()
+        except BaseException:
+            self.effects = before_effects
+            self._archived_effects = before_archived
+            raise
         return copy.deepcopy(effect)
 
     def reconcile_effect(self, intent_ref: str, *, outcome: str) -> dict:
@@ -711,18 +815,25 @@ class TaskBoard:
                 "only an unknown effect can be reconciled",
                 details={"intent_ref": intent_ref, "status": effect["status"]},
             )
-        effect["status"] = "reconciled"
-        effect["reconciled_outcome"] = outcome
-        self.audit.append(
-            {
-                "action": "effect.reconciled",
-                "task_id": effect["task_id"],
-                "intent_ref": intent_ref,
-                "target": effect["target"],
-                "outcome": outcome,
-            }
-        )
-        self._persist_effects()
+        before_effects = copy.deepcopy(self.effects)
+        before_archived = copy.deepcopy(self._archived_effects)
+        try:
+            effect["status"] = "reconciled"
+            effect["reconciled_outcome"] = outcome
+            self.audit.append(
+                {
+                    "action": "effect.reconciled",
+                    "task_id": effect["task_id"],
+                    "intent_ref": intent_ref,
+                    "target": effect["target"],
+                    "outcome": outcome,
+                }
+            )
+            self._commit_effects()
+        except BaseException:
+            self.effects = before_effects
+            self._archived_effects = before_archived
+            raise
         return copy.deepcopy(effect)
 
     def require_replay_allowed(self, intent_ref: str) -> dict:
@@ -749,16 +860,44 @@ class TaskBoard:
 
         Every non-terminal task becomes `failed`, or returns to `created` when
         `policy="reschedule"`. Every intent-only effect becomes `unknown` and
-        is reported for reconciliation. Both sections are written atomically,
-        and the returned `audit` events are ready for an `AuditLedger`.
+        is reported for reconciliation. Both sections are written atomically;
+        with a shared `AuditLedger` the recovered tree, the effect journal,
+        and the audit chain land in one store flush. A failure rolls the
+        statuses, the journal, and the staged audit events back, so the
+        restart can be retried unchanged.
         """
 
         if policy not in ("fail", "reschedule"):
             raise ValueError("policy must be 'fail' or 'reschedule'")
+        before_statuses = {
+            task_id: record.status for task_id, record in self.tasks.items()
+        }
+        before_effects = copy.deepcopy(self.effects)
+        before_audit = len(self.audit)
         recovered, task_events = self._recover_tasks(policy)
         effects_changed, effect_events = self._recover_effects()
-        if recovered or effects_changed:
-            self._persist_recovery()
+        events = task_events + effect_events
+        try:
+            if self._ledger is not None:
+                if events:
+                    self._ledger.append_many(
+                        copy.deepcopy(events),
+                        companion=lambda record: {
+                            TASKS_SECTION: {
+                                task_id: record_state.to_state()
+                                for task_id, record_state in self.tasks.items()
+                            },
+                            EFFECTS_SECTION: copy.deepcopy(self.effects),
+                        },
+                    )
+            elif recovered or effects_changed:
+                self._persist_recovery()
+        except BaseException:
+            for task_id, status in before_statuses.items():
+                self.tasks[task_id].status = status
+            self.effects = before_effects
+            del self.audit[before_audit:]
+            raise
         unknown = [
             intent_ref
             for intent_ref, effect in self.effects.items()
@@ -767,6 +906,9 @@ class TaskBoard:
         return {
             "policy": policy,
             "recovered_tasks": recovered,
+            "ledger_trace_id": (
+                self._ledger.trace_id if self._ledger is not None else None
+            ),
             "task_statuses": {
                 task_id: record.status for task_id, record in self.tasks.items()
             },

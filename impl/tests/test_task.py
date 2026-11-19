@@ -6,6 +6,7 @@ import copy
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from osap import JsonStore, OsapError, audit, task
@@ -14,6 +15,11 @@ EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
 ORCHESTRATOR = "agent://com.example.orchestrator/main#1a2b"
 CALENDAR = "agent://com.example.calendar/agent#9c"
+TRACE = "trace_recovery_01J9Z6Q3V8N2K4M7P1R5T0WX"
+
+
+def clock():
+    return datetime(2026, 11, 10, 10, 14, 45, tzinfo=timezone.utc)
 
 
 def load(name: str) -> dict:
@@ -970,6 +976,223 @@ class OwnershipTests(unittest.TestCase):
         with self.assertRaises(OsapError) as caught:
             self.board.require_owner("task_missing", ORCHESTRATOR)
         self.assertEqual(caught.exception.code, "ROUTING_NOT_FOUND")
+
+
+class RecoveryLedgerTests(unittest.TestCase):
+    """recover() puts the tree, the journal, and the audit chain together."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.json"
+
+    def board(self, **kwargs) -> task.TaskBoard:
+        store = JsonStore(self.path)
+        ledger = audit.AuditLedger(trace_id=TRACE, store=store, clock=clock)
+        return task.TaskBoard(store=store, ledger=ledger, **kwargs)
+
+    def test_recover_writes_one_transaction(self):
+        board = self.board()
+        record = running_record(board)
+        board.record_effect_intent(record.task_id, intent_ref="intent_x", target="x")
+
+        report = board.recover()
+
+        self.assertEqual(report["ledger_trace_id"], TRACE)
+        self.assertEqual(len(report["audit"]), 2)
+        stored = JsonStore(self.path)
+        self.assertEqual(
+            sorted(stored.sections()),
+            sorted(
+                [
+                    task.TASKS_SECTION,
+                    task.EFFECTS_SECTION,
+                    f"audit.chain.{TRACE}",
+                ]
+            ),
+        )
+        ledger = audit.AuditLedger(trace_id=TRACE, store=stored, clock=clock)
+        self.assertEqual(len(ledger), 2)
+        self.assertTrue(ledger.verify())
+        actions = {event["action"] for event in ledger.events}
+        self.assertEqual(
+            actions, {"task.failed", "error"}
+        )
+        reopened = self.board()
+        self.assertEqual(reopened.require(record.task_id).status, "failed")
+        self.assertEqual(
+            reopened.effects["intent_x"]["status"], "unknown"
+        )
+        self.assertTrue(reopened._ledger.verify())
+
+    def test_recover_with_nothing_to_do_writes_no_audit(self):
+        board = self.board()
+        record = running_record(board)
+        board.transition(record, "succeeded")
+        sections_before = JsonStore(self.path).sections()
+
+        report = board.recover()
+
+        self.assertEqual(report["audit"], [])
+        self.assertEqual(report["ledger_trace_id"], TRACE)
+        self.assertEqual(JsonStore(self.path).sections(), sections_before)
+        self.assertEqual(len(board._ledger), 0)
+
+    def test_a_failed_write_rolls_back_the_recovery(self):
+        store = JsonStore(self.path)
+        ledger = audit.AuditLedger(trace_id=TRACE, store=store, clock=clock)
+        board = task.TaskBoard(store=store, ledger=ledger)
+        record = running_record(board)
+        board.record_effect_intent(record.task_id, intent_ref="intent_x", target="x")
+
+        audit_before = len(board.audit)
+        store.put_many = lambda sections: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaises(OSError):
+            board.recover()
+        self.assertEqual(record.status, "running")
+        self.assertEqual(board.effects["intent_x"]["status"], "pending")
+        self.assertEqual(len(board.audit), audit_before)
+        self.assertEqual(len(ledger), 0)
+
+        del store.put_many
+        board.recover()
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(board.effects["intent_x"]["status"], "unknown")
+        self.assertTrue(audit.AuditLedger(trace_id=TRACE, store=JsonStore(self.path)).verify())
+
+    def test_the_ledger_must_share_the_board_store(self):
+        store = JsonStore(self.path)
+        ledger = audit.AuditLedger(trace_id=TRACE, store=store, clock=clock)
+        self.assertIs(task.TaskBoard(store=store, ledger=ledger)._ledger, ledger)
+        with self.assertRaises(ValueError):
+            task.TaskBoard(
+                store=JsonStore(self.path),
+                ledger=audit.AuditLedger(trace_id=TRACE, store=JsonStore(self.path)),
+            )
+        with self.assertRaises(ValueError):
+            task.TaskBoard(
+                store=JsonStore(self.path),
+                ledger=audit.AuditLedger(trace_id=TRACE, clock=clock),
+            )
+        with self.assertRaises(ValueError):
+            task.TaskBoard(ledger=ledger)
+        with self.assertRaises(ValueError):
+            task.TaskBoard(store=store, ledger=object())
+
+    def test_a_reschedule_recovery_is_also_audited(self):
+        board = self.board()
+        record = running_record(board)
+
+        report = board.recover(policy="reschedule")
+
+        self.assertEqual(report["task_statuses"][record.task_id], "created")
+        ledger = audit.AuditLedger(trace_id=TRACE, store=JsonStore(self.path))
+        self.assertEqual(len(ledger), 1)
+        self.assertEqual(ledger.events[0]["action"], "task.created")
+        self.assertTrue(ledger.verify())
+
+
+class EffectArchiveTests(unittest.TestCase):
+    """max_effects moves resolved effects aside; pending ones never leave."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.json"
+
+    def board(self, **kwargs) -> task.TaskBoard:
+        return task.TaskBoard(store=JsonStore(self.path), **kwargs)
+
+    def intent(self, board, intent_ref, resolve=None):
+        record = board.add(parent_task())
+        board.transition(record, "accepted")
+        board.transition(record, "running")
+        board.record_effect_intent(
+            record.task_id, intent_ref=intent_ref, target="calendar:primary"
+        )
+        if resolve is not None:
+            board.record_effect_outcome(intent_ref)
+        return record
+
+    def test_resolved_effects_move_to_the_archive(self):
+        board = self.board(max_effects=2)
+        self.intent(board, "intent_a", resolve="outcome")
+        self.intent(board, "intent_b")
+        self.intent(board, "intent_c")
+        # Resolving `intent_a` made it the oldest movable effect, so the
+        # third journal entry trims it out immediately.
+        self.assertEqual(sorted(board.effects), ["intent_b", "intent_c"])
+        self.assertEqual(sorted(board.archived_effects()), ["intent_a"])
+
+        board.record_effect_outcome("intent_b")
+        self.assertEqual(sorted(board.effects), ["intent_b", "intent_c"])
+        self.assertEqual(sorted(board.archived_effects()), ["intent_a"])
+        stored = JsonStore(self.path).get(task.EFFECT_ARCHIVE_SECTION)
+        self.assertEqual(sorted(stored), ["intent_a"])
+        self.assertEqual(stored["intent_a"]["status"], "executed")
+
+    def test_pending_effects_are_never_archived(self):
+        board = self.board(max_effects=1)
+        self.intent(board, "intent_a")
+        self.intent(board, "intent_b")
+        self.intent(board, "intent_c")
+        self.assertEqual(len(board.effects), 3)
+        self.assertEqual(board.archived_effects(), {})
+
+    def test_the_archive_survives_a_reopen(self):
+        board = self.board(max_effects=1)
+        self.intent(board, "intent_a", resolve="outcome")
+        self.intent(board, "intent_b", resolve="outcome")
+        self.assertEqual(sorted(board.effects), ["intent_b"])
+        self.assertEqual(sorted(board.archived_effects()), ["intent_a"])
+
+        reopened = self.board(max_effects=1)
+        self.assertEqual(sorted(reopened.effects), ["intent_b"])
+        self.assertEqual(sorted(reopened.archived_effects()), ["intent_a"])
+        with self.assertRaises(OsapError) as caught:
+            reopened.require_replay_allowed("intent_a")
+        self.assertEqual(caught.exception.code, "ROUTING_NOT_FOUND")
+        reopened.require_replay_allowed("intent_b")
+
+    def test_a_failed_archive_write_rolls_back(self):
+        store = JsonStore(self.path)
+        board = task.TaskBoard(store=store, max_effects=1)
+        self.intent(board, "intent_a", resolve="outcome")
+        self.intent(board, "intent_b")
+        # Recording `intent_b` already archived the resolved `intent_a`.
+        self.assertEqual(sorted(board.effects), ["intent_b"])
+        self.assertEqual(sorted(board.archived_effects()), ["intent_a"])
+
+        store.put = lambda section, value: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaises(OSError):
+            board.record_effect_outcome("intent_b")
+        self.assertEqual(sorted(board.effects), ["intent_b"])
+        self.assertEqual(board.effects["intent_b"]["status"], "pending")
+        self.assertEqual(sorted(board.archived_effects()), ["intent_a"])
+        del store.put
+        board.record_effect_outcome("intent_b")
+        self.assertEqual(board.effects["intent_b"]["status"], "executed")
+        self.assertEqual(sorted(board.archived_effects()), ["intent_a"])
+
+    def test_corrupt_archive_sections_are_rejected(self):
+        board = self.board(max_effects=1)
+        self.intent(board, "intent_a", resolve="outcome")
+        self.intent(board, "intent_b")
+        good = JsonStore(self.path).get(task.EFFECT_ARCHIVE_SECTION)
+        for mutate in (
+            lambda value: [],
+            lambda value: {"intent_other": good["intent_a"]},
+            lambda value: {"intent_a": {**good["intent_a"], "status": "weird"}},
+            lambda value: {"intent_a": {**good["intent_a"], "task_id": "task_ghost"}},
+        ):
+            JsonStore(self.path).put(task.EFFECT_ARCHIVE_SECTION, mutate(good))
+            with self.assertRaises(ValueError):
+                self.board(max_effects=1)
+
+    def test_invalid_limits_are_rejected(self):
+        for value in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                task.TaskBoard(max_effects=value)
 
 
 if __name__ == "__main__":
