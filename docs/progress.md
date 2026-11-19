@@ -26,6 +26,7 @@
 | 上下文事件持久化（M4 前置） | ✅ 完成 | `ContextFabric(store=...)` 把 `context.resolve` 写入 `context.events`；重开逐条校验；`limit` 保留最新 N 条；582 tests | 2026-11-18 |
 | 审计保留与归档（M4 前置） | ✅ 完成 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 与归档原子双写；锚点校验与 `history()`；602 tests | 2026-11-18 |
 | 任务与副作用恢复（M4 前置） | ✅ 完成 | `TaskBoard.effects` 持久化 intent/outcome；`recover()` 原子失败/重调度非终态任务并把 intent-only effect 标为 unknown；重放闸门与对账；639 tests | 2026-11-19 |
+| 上下文对象持久化（M4 前置） | ✅ 完成 | `ContextFabric` 增加 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；685 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -39,7 +40,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（7004 行）+ 639 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（7510 行）+ 685 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -94,6 +95,9 @@
 | `7274a27` | 2026-11-18 | **上下文事件持久化**：`ContextFabric(store=...)` 写 `context.events`；重开逐条校验；`limit` 保留最新 N 条；19 条新测试，累计 582 |
 | `1a8394d` | 2026-11-18 | **审计保留与归档**：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；live 首条锚定归档尾；`history()` 导出完整链；20 条新测试，累计 602 |
 | `c7e990c` | 2026-11-19 | **任务与副作用恢复**：`TaskBoard` 持久化 `task.effects`；`recover()` 失败非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；37 条新测试，累计 639 |
+| `f98a6b3` | 2026-11-19 | **M4 本地打包**：两个 xml2rfc v3 individual draft、来源映射、`check_drafts.py`、Linux binding、14 条 ADR；CI 新增 `drafts` job |
+| `fca8fe4` | 2026-11-19 | M4 输出接入 README / roadmap / progress，记录 CI run 44462099197 |
+| `3d251a6` | 2026-11-19 | **上下文对象持久化**：`context.handles` / `context.blackboards` / `context.objects` 分节落盘；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；46 条新测试，累计 685 |
 
 ---
 
@@ -1220,7 +1224,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §20 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §21 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1244,7 +1248,60 @@ drafts           success   # xml2rfc 安装 + check_drafts.py --compile
 
 ---
 
-## 18. 待确认的规范问题
+## 18. 上下文句柄、黑板与对象持久化（M4 前置，已完成）
+
+### 18.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/context.py` | `ContextFabric` 新增 `context.handles` / `context.blackboards` / `context.objects`；`resolve` 接受句柄对象或已登记标识；句柄登记/删除、黑板打开/写入/关闭、对象登记/引用/释放/删除；每个变更一次原子分节写入；重开逐字段校验 |
+| `impl/tests/test_context.py` | 46 条新测试：句柄往返/幂等/冲突/过期/未知标识、黑板往返/关闭清空/幂等/损坏、对象引用计数/墓碑/硬删拒绝/损坏、纯内存默认 |
+
+### 18.2 语义
+
+- **句柄注册表**：`register_handle` 校验 `handle`、`scheme`/`scope`/`audience`、时间戳、`label`、`ttl`、`derived_from` 与 `constraints`；同体重复登记幂等，异体登记拒绝，避免静默改变可解析范围。`resolve` 传字符串时先查注册表，未知标识写一条 `deny/not_found` 审计并抛 `CONTEXT_NOT_FOUND`；传字典保持原有行为。登记后的句柄仍经过 audience、`allowed_agents`、OS 权限、必需授权、过期与出口检查。
+- **任务黑板**：`open_blackboard(task_id, board=...)` 保留夹具中的 `version`、`ttl`、`created_at`、`updated_at`、`expires_at`；`write_blackboard` 只改条目；`close_blackboard` 清空条目、记录 `entries_archived` 并固定 `promoted_to_memory=false`，重复关闭幂等。已关闭黑板不能再打开或写入；重开时“已关闭但仍有条目”或“已关闭却晋升记忆”都直接拒绝。
+- **对象元数据**：`register_object` 记录 `uri`、可选 `label`/`metadata` 与引用计数；`retain_object`/`release_object` 维护计数且不会自动删除；`delete_object` 在计数为零时硬删除，否则墓碑化；`hard_delete=True` 遇到仍被引用的对象返回 `conforming=false` 且不改状态。`deleted` 与 `tombstoned` 互斥，`deleted` 要求计数为零。
+- **写入边界**：每次公开变更只重写自己那一节；四节共享同一个 `JsonStore`，不引入跨节事务。恢复按 `context.events` → `context.handles` → `context.blackboards` → `context.objects` 顺序逐条校验，任何损坏抛 `ValueError`，不会恢复半个注册表。
+- **默认不变**：不传 `store` 时所有新方法仍是纯内存行为，适配器与演示无需改动。
+
+### 18.3 验证证据
+
+2026-11-19，提交 `3d251a6`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl -p 'test_context.py'
+→ Ran 107 tests ... OK
+
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 685 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 46 条测试覆盖：句柄登记往返与分节写入、同体幂等与异体冲突、返回值深拷贝、按标识解析、过期与 audience 仍生效、未知标识审计并以 `CONTEXT_NOT_FOUND` 失败、空标识、删除持久化、非法字段、非对象分节、键与记录不匹配、损坏记录、跨节共存、纯内存；黑板夹具字段往返、打开幂等与冲突、`task_id` 不匹配、`board` 与 `entries` 互斥、写入持久化、未知/已关闭黑板、关闭清空与不晋升、重复关闭幂等、非法字段与损坏记录、纯内存；对象元数据往返、登记幂等与冲突、引用计数增减、计数下限、零引用硬删、有引用墓碑化、硬删拒绝、已删除对象不可再操作、未知对象、非法字段、深拷贝、非法与损坏记录、纯内存。
+
+### 18.4 已知边界
+
+1. **不是对象存储**：`context.objects` 只保存元数据、引用计数与墓碑，不保存对象字节；`delete_object` 不触碰文件系统。
+2. **黑板不保留条目内容**：关闭后只留下 `entries_archived` 计数与 `promoted_to_memory=false`，条目本身不归档到磁盘；需要取证时应在关闭前导出。
+3. **缓存窗口仍是纯函数**：`cache_window` 不持久化具体缓存条目，重启后只能按句柄 TTL 重新判断。
+4. **没有句柄撤销**：注册表支持登记与删除，但没有 §9.3 的撤销广播；删除只影响后续按标识解析，已交给调用方的句柄副本不受影响。
+5. **单写者与整节重写**：每次变更序列化整节；同一 `JsonStore` 仍要求一个进程写入，多用户需要不同 `section` 或不同 store。
+6. **跨节写入不原子**：一次 `resolve` 只写事件节，一次登记只写句柄节；如果调用方在同一逻辑操作里先登记再解析，两次写入之间崩溃会留下“已登记但未解析”的状态。
+
+---
+
+## 19. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1260,9 +1317,9 @@ drafts           success   # xml2rfc 安装 + check_drafts.py --compile
 
 ---
 
-## 19. 下一步（按顺序）
+## 20. 下一步（按顺序）
 
-1. 为上下文句柄、黑板与对象元数据补存储层，并为审计账本补按用户分区与跨 trace 的全局顺序；
+1. 为审计账本补按用户分区与跨 trace 的全局顺序；上下文句柄、黑板与对象元数据存储已完成（§18）；
 2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
@@ -1272,7 +1329,7 @@ drafts           success   # xml2rfc 安装 + check_drafts.py --compile
 
 ---
 
-## 20. 变更记录
+## 21. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1306,3 +1363,4 @@ drafts           success   # xml2rfc 安装 + check_drafts.py --compile
 | 2026-11-18 | **审计保留与归档**（`1a8394d`）：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；锚点校验与 `history()`；新增 20 条测试，累计 602 |
 | 2026-11-19 | **任务与副作用恢复**（`c7e990c`）：`TaskBoard` 持久化 `task.effects`；`recover()` 失败/重调度非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；新增 37 条测试，累计 639 |
 | 2026-11-19 | **M4 本地打包**（`f98a6b3`）：两个 xml2rfc v3 individual draft（能力 token、同意回执）、逐节来源映射、`tools/check_drafts.py` + `requirements-drafts.txt`、Linux binding（D-Bus/portal/systemd/3 序列图）、14 条 ADR、`GOVERNANCE.md` §9.1 联络状态；CI 新增 `drafts` job 并通过（run 44461943418）；未提交 IETF |
+| 2026-11-19 | **上下文对象持久化**（`3d251a6`）：`ContextFabric` 新增 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析且未知即 `CONTEXT_NOT_FOUND`、黑板关闭清空且不晋升记忆、对象引用计数与墓碑跨重启；新增 46 条测试，累计 685 |
