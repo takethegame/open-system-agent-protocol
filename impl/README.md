@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控 / 恢复）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、撤销日志与跨进程副本应用、恢复同事务审计与 effect 归档、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、撤销日志与跨进程副本应用、轮询订阅与跨进程撤销测量、恢复同事务审计与 effect 归档、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -12,7 +12,7 @@
 | 错误模型 | §7.7 | 27 个标准错误码、`retryable` 默认值、`osap.error/v1` body |
 | 流式分帧 | §7.9 | 4 字节大端长度前缀 + UTF-8 JSON，增量解码 |
 | 消息型分帧 | §7.9、§7.10 | 保留原生消息边界，不强制长度前缀 |
-| UDS stream 绑定 | §7.9、§7.10 | `AF_UNIX` 监听/连接、长度前缀、每连接独立 `Bus`、`chmod 0600`、可选并发服务 |
+| UDS stream 绑定 | §7.9、§7.10 | `AF_UNIX` 监听/连接、长度前缀、每连接独立 `Bus`、`chmod 0600`、串行/线程池/selector/asyncio 四种服务模式 |
 | 消息型本地绑定 | §7.9、§7.10 | `AF_UNIX` 数据报 socketpair，一报一消息，无长度前缀 |
 | 对端认证 | §7.10 | Linux `SO_PEERCRED`、macOS `getpeereid`+`LOCAL_PEERPID`；可校验 uid/gid/pid/可执行文件，缺字段即拒绝 |
 | 8 MiB 上限 | §7.9 | 两种绑定都按 UTF-8 JSON 字节数校验 |
@@ -30,7 +30,7 @@
 | 衰减 | §5.3 | 10 条规则逐项检查，返回全部违例维度 |
 | 绑定 | §5.4 | `audience` / `task_id` / `subject` 三项无状态校验 |
 | 撤销 | §5.5 | 父能力撤销级联到全部后代，撤销可跨“仅持有子凭证”的场景生效；每个新撤销 token 写入 `capability.revocations` 日志（`{seq, cap_id, ts}`）并与撤销集一次 `put_many` 落盘 |
-| 撤销分发 | §5.5 | 副本用 `apply_revocations(entries, source=...)` 按来源游标应用批次：重复投递幂等、缺口报领域扩展码 `REVOCATION_GAP`、批内必须连续、写失败回滚后可原样重试；本实现只提供日志与校验，不自带网络传输 |
+| 撤销分发 | §5.5 | 副本用 `apply_revocations(entries, source=...)` 按来源游标应用批次：重复投递幂等、缺口报领域扩展码 `REVOCATION_GAP`、批内必须连续、写失败回滚后可原样重试；`RevocationWatcher` 按间隔轮询源 store 并自动应用（拉模式，无推送通道、无协议消息） |
 | 风险分级 | §5.7 | L3/L4 必须有 `consent_receipt_id`，否则 `POLICY_CONSENT_REQUIRED` |
 | 同意回执 | §5.8 | 决策 → 过期 → `cap_id`/`task_id`/`audience` → `actions`/`resources` 的顺序校验 |
 | 同意请求 | §10.2 | `consent.request` payload 校验、TTL（`intent_preview.ttl`，缺省 10 分钟）、重复 `request_id` 拒绝 |
@@ -66,8 +66,8 @@
 | 命名空间映射 | §6.8 | 由 `registry + native_id` 生成确定性的 `cap://federation/...` 名称 |
 | 外部信任 | §6.4 | 外部协议内容标 `origin=external`；未验签时不得保持 `system`，归一为 `unverified` |
 | 审计链验证 | §10.5、§10.6 | 事件 schema、phase 规则、trace 一致、`audit_id` 唯一、`prev_hash` 链接；`AuditLedger` 追加时生成哈希并在重启时重算 |
-| 审计保留与归档 | §10.5 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 首条 `prev_hash` 指向归档尾；`history()` 导出完整链 |
-| 按用户分区与全局顺序 | §10.5 | `AuditJournal` 把每个用户的链写入 `audit.user.<user>.*`，并在 `audit.order.<user>` 记录跨 trace 的连续序号；链、归档与序号一次 `put_many` 原子写入；重开拒绝缺口、重复、时间戳不符与无对应事件 |
+| 审计保留与归档 | §10.5 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 首条 `prev_hash` 指向归档尾；`history()` 导出完整链；`max_archive=...` 压缩归档并记录 `base` 锚点，kept 前缀仍可端到端验证 |
+| 按用户分区与全局顺序 | §10.5 | `AuditJournal` 把每个用户的链写入 `audit.user.<user>.*`，并在 `audit.order.<user>` 记录跨 trace 的连续序号；链、归档与序号一次 `put_many` 原子写入；重开拒绝缺口、重复、时间戳不符与无对应事件；`export()` 输出整用户分区快照（order + 各 trace 全历史） |
 | 脱敏导出 | §10.6 | 目标、策略、回执、上下文引用替换为每次导出唯一的盐值承诺；链仍可验证 |
 | 回放 | §10.6 | 同一幂等键重复请求只执行一次副作用 |
 | 重启任务恢复 | §3.7、§8.10 | `TaskBoard.recover()` 把非终态任务转为 `failed`，或按策略改回 `created`；任务树与 effect 日志一次 `put_many` 原子写入 |
@@ -78,7 +78,7 @@
 | 跨用户 | §11.2 | 默认拒绝；显式开启且双方同意才放行 |
 | 被攻破的 Bus | §3.6、§11.1 | 0.1 不声称 P0 防护；声明了即判不合约 |
 
-**不在本阶段**：跨进程撤销的自动广播/通知（拉模式日志已实现）、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
+**不在本阶段**：跨进程撤销的推送通道（拉模式日志与轮询订阅已实现）、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
 
 ## 2. 目录
 
@@ -88,8 +88,8 @@ impl/
   osap/
     __init__.py         公共导出
     bus.py              握手、校验、路由、幂等、错误回执
-    audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留与归档、按用户分区与跨 trace 顺序、脱敏导出、回放、恢复
-    capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销与撤销日志/副本应用
+    audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留归档与压缩、按用户分区与导出、脱敏导出、回放、恢复
+    capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销、撤销日志/副本应用与轮询订阅
     clock.py            单调时钟 deadline
     consent.py          §5.8 同意回执与能力范围校验
     consent_flow.py     §10.2、§10.3 同意请求、预约、授权/拒绝、激活、撤销、可选注册表验签
@@ -108,7 +108,7 @@ impl/
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
     task.py             §8 任务树、预算、取消、结果、handoff、整树持久化、恢复同事务审计与 effect 归档
-    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、线程池与 selector 事件循环
+    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、线程池/selector/asyncio 三种并发模式
   tests/                单元测试（unittest）
 ```
 
@@ -349,6 +349,8 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `serve_forever(mode="selector")` 改用单线程事件循环：监听 socket 与所有已接受的 session 注册到同一个 `selectors.DefaultSelector`，可读即服务一条消息。断开、发垃圾或被错误信封终止的 peer 会被摘除并关闭，不影响循环继续服务其他连接。连接与消息配额仍由同一个 `AdmissionController` 执行，`max_messages` 同样只统计已送出的回复。半帧停滞的 peer 仍可能让循环阻塞到该帧处理完（没有双工读缓冲），这是与线程池的关键差距。
 
+`serve_forever(mode="asyncio")` 用 asyncio 事件循环加缓冲分帧协议（`_AsyncioStreamProtocol`）：字节按连接缓冲，半帧停滞的 peer 只占住自己的连接，不再阻塞他人——这是 selector 模式给不了的保证。消息分发复用每连接 `Bus`，`OsapError` 以标准错误信封应答，连接配额拒绝仍先发 `RATE_LIMIT` 信封再关闭。**关闭规则**：macOS 上从其他线程关闭 kqueue 正在监听的 fd 会让 `kevent()` 永久阻塞（已用最小复现验证），因此 asyncio 模式下 `close()` 只通过 `call_soon_threadsafe` 通知 loop，由服务线程在自己的收尾里关闭 socket；`UnixSession.close` 对 asyncio 持有的 socket 容忍关闭失败。三种模式共享同一配额与 `max_messages` 语义；分发仍是同步的，慢处理会串行化 loop——并行化要靠平台原生绑定（XPC/Binder/named pipe，仍不在本阶段）。
+
 ### 5.39 任务树用无损快照持久化
 
 `Task.snapshot()` 是给调用方的摘要，只有 `task_id`、`owner`、`assignee`、`status`、`budget` 与 `authority`，不足以恢复状态机。持久化改用 `Task.to_state()`：它额外保存 `root_task_id`、`parent_task_id`、`session_id`、`result_schema`、`consumed` 与 `detached`，因此重启后预算消耗、父子链和 detached 子树判定都不会丢失。
@@ -432,7 +434,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 5. **恢复审计事务要求同库**：`TaskBoard(ledger=...)` 可以把任务树、effect 日志与审计链放进同一次 `put_many`，但前提是 `AuditLedger` 与 board 共享同一个 `JsonStore` 实例（构造时校验）；ledger 用独立文件时事务无从谈起。`require_replay_allowed()` 仍只是闸门，绕过该 API 的直接副作用不受保护。
 6. **能力凭证只做结构校验**：能力 `proof.sig` 仍未验签，`cap_id` 也未由 CA 密钥覆盖；PCS 回执的签名、登记、轮换与撤销已由 `pcs.py` 覆盖，能力凭证本身仍待补。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
-8. **撤销分发是拉模式，不自动通知**：`revoke` 会把新撤销写入 `capability.revocations` 日志并原子落盘，另一个进程可以用 `apply_revocations(entries, source=...)` 拉取并级联应用；但没有任何自动广播、订阅或重试调度，§5.5 的“通知受影响 Agent”仍需调用方自建传输（Bus 消息、文件轮询或 IPC）。撤销 P95 仍是进程内口径。
+8. **撤销分发是拉模式**：`revoke` 把新撤销写入 `capability.revocations` 日志并原子落盘；另一进程可用 `apply_revocations(entries, source=...)` 拉取，或用 `RevocationWatcher` 按间隔轮询源 store 自动应用（失败下一轮重试，源文件永不写入）。没有推送通道、订阅协议或平台通知，§5.5 的“通知受影响 Agent”延迟受轮询间隔支配；`tools/benchmark_revocation.py --cross-process` 给出 revoke → 副本 `is_revoked()` 的端到端数字（含一个轮询间隔），与进程内 P95 不可比。
 9. **委派未校验能力链**：`delegate` 只检查任务预算与深度，没有把 `delegated_capability` 与父能力凭证做完整衰减比对（夹具里没有父凭证）。
 10. **上下文持久化仍不是完整存储层**：`ContextFabric(store=...)` 可跨重启保留解析事件、句柄注册表、任务黑板与对象元数据/墓碑，但缓存窗口仍是纯计算，没有句柄撤销，也没有按用户分区；黑板关闭后只保留条目数与 `promoted_to_memory=false`，不保留条目内容。
 11. **没有真实对象存储**：`delete_object` 只返回判定结果，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
@@ -443,10 +445,10 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，注册表验签与分库都是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。传 `key_store` 后私钥移出回执 store；不传时私钥与回执仍同处一个 0600 JSON 文件。默认后端仍是明文 JSON，密钥环只是可选后端。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
-19. **并发两种模式，异步仍是缺的**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；`mode="selector"` 用单线程事件循环消掉了每连接线程，但没有双工读缓冲，半帧停滞的 peer 仍可阻塞循环，也没有按 Agent 的加权调度或平台原生异步绑定。`max_messages` 在并发/事件循环模式下是 best-effort 停止条件，不是严格的协议配额。
+19. **三种服务模式，平台异步绑定仍缺**：`concurrency=N` 线程池高连接数时成本线性增长；`mode="selector"` 消掉了每连接线程但半帧停滞可阻塞循环；`mode="asyncio"` 有双工读缓冲但分发仍是同步的，慢处理串行化 loop，也没有按 Agent 的加权调度。XPC/Binder/named pipe 平台传输不在本阶段。`max_messages` 在后两种模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
-22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_events` 只裁剪 live 链，归档仍只增不减，没有压缩。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随归档增长。
+22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_archive` 压缩归档后，被丢弃的最旧事件不再参与重复 `audit_id` 检查，也不再能从创世验证。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随保留的归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 24. **密钥环绑定仍是 CLI 包装**：Windows 路径经 PowerShell 的 `PasswordVault`（需 Windows PowerShell 5.1 的 WinRT 投影），未在真实 Windows 上端到端验证；macOS 路径仍把密钥放在 `security` 的命令行参数里。`migrate_key_store` 与 `tools/migrate_pcs_key.py` 覆盖单条记录迁移，但没有跨密钥环条目/多账号迁移，也不会自动在迁移后重建 `ConsentFlow`。
 
