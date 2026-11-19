@@ -5,6 +5,7 @@
 import copy
 import json
 import os
+import select
 import socket
 import struct
 import sys
@@ -49,6 +50,11 @@ def wait_until(predicate, timeout=2.0):
             return
         time.sleep(0.001)
     raise AssertionError("condition was not reached before the timeout")
+
+
+def _readable(sock) -> bool:
+    readable, _, _ = select.select([sock], [], [], 0)
+    return bool(readable)
 
 
 class Gate:
@@ -336,6 +342,120 @@ class ConcurrentStreamTests(unittest.TestCase):
         finally:
             gate.release.set()
             self.server.close()
+            first.close()
+            second.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+
+class SelectorStreamTests(unittest.TestCase):
+    """The single-threaded event loop shares the concurrent-mode guarantees."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "bus.sock")
+        self.server = transport.UnixStreamServer(self.path)
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp.cleanup()
+
+    def connect(self):
+        return transport.UnixStreamClient.connect(self.path, timeout=2)
+
+    def test_selector_mode_rejects_a_concurrency(self):
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(mode="selector", concurrency=2)
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(mode="event-loop")
+        with self.assertRaises(ValueError):
+            self.server.serve_forever(mode=True)
+
+    def test_an_idle_connection_does_not_block_another(self):
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="selector"
+        )
+        idle = self.connect()
+        active = self.connect()
+        try:
+            self.assertEqual(active.call(hello())["type"], "welcome")
+            self.assertEqual(active.call(request())["type"], "result")
+        finally:
+            idle.close()
+            active.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_broken_peer_is_dropped_and_the_loop_continues(self):
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="selector"
+        )
+        client = self.connect()
+        abrupt = self.connect()
+        try:
+            abrupt.sock.close()  # the peer vanishes without a hello
+            self.assertEqual(client.call(hello())["type"], "welcome")
+            self.assertEqual(client.call(request())["type"], "result")
+        finally:
+            client.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_max_messages_stops_the_loop(self):
+        thread = start(
+            self.server.serve_forever, max_messages=1, mode="selector"
+        )
+        first = self.connect()
+        try:
+            self.assertEqual(first.call(hello())["type"], "welcome")
+        finally:
+            first.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        late = self.connect()
+        try:
+            with self.assertRaises((OSError, OsapError)):
+                late.call(hello())
+        finally:
+            late.close()
+
+    def test_a_closed_listener_stops_the_loop(self):
+        thread = start(self.server.serve_forever, mode="selector")
+        client = self.connect()
+        try:
+            self.assertEqual(client.call(hello())["type"], "welcome")
+        finally:
+            client.close()
+        self.server.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_a_connection_quota_is_enforced_in_selector_mode(self):
+        self.server.close()
+        controller = AdmissionController(Quota(max_connections=1))
+        self.server = transport.UnixStreamServer(self.path, admission=controller)
+        thread = start(
+            self.server.serve_forever, max_messages=2, mode="selector"
+        )
+        first = self.connect()
+        second = self.connect()
+        try:
+            self.assertEqual(first.call(hello())["type"], "welcome")
+            # The rejection is sent and the connection is closed before any
+            # hello from the second peer, so wait for the envelope instead of
+            # writing into a socket that is already gone.
+            wait_until(lambda: _readable(second.sock))
+            rejected = second.receive()
+            self.assertEqual(rejected["type"], "error")
+            self.assertEqual(
+                rejected["body"]["data"]["code"], "RATE_LIMIT"
+            )
+            self.assertEqual(
+                rejected["body"]["data"]["details"]["reason"],
+                "connection_limit",
+            )
+            self.assertEqual(first.call(request())["type"], "result")
+        finally:
             first.close()
             second.close()
         thread.join(2)

@@ -19,7 +19,7 @@
 | 握手 | §7.1、§7.9 | `hello` → `welcome`，未握手时拒绝其他消息 |
 | 幂等索引 | §7.8 | 同一 `id` 只执行一次副作用；可注入 `JsonStore` 跨重启回放 |
 | 持久化状态 | §7.8、§5.5、§10.3、§8、§10.5 | 分节 JSON、原子替换、`fsync`、0600；幂等、能力签发/撤销、同意流程、任务树、effect 日志与审计账本跨重启 |
-| 流控与背压 | §7.11、§11.7 | 每身份连接/在途/队列上限与令牌桶；FIFO 等待；`RATE_LIMIT` 带 `reason`、`retry_after_ms` 与队列深度；线程池并发服务 |
+| 流控与背压 | §7.11、§11.7 | 每身份连接/在途/队列上限与令牌桶；FIFO 等待；`RATE_LIMIT` 带 `reason`、`retry_after_ms` 与队列深度；线程池并发服务；`mode="selector"` 单线程事件循环 |
 | 单调时钟 deadline | §7.8 | 墙钟回拨或挂起恢复不得延长超时 |
 | Ed25519 签名 | §4.5 | 清单签名、验证、基钥轮换宽限期 |
 | Agent 注册 | §4.1–§4.3 | `hello` 校验、App 绑定、公钥绑定、`welcome` 签发 |
@@ -105,7 +105,7 @@ impl/
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
     task.py             §8 任务树、预算、取消、结果、handoff、整树持久化
-    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、并发服务
+    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、线程池与 selector 事件循环
   tests/                单元测试（unittest）
 ```
 
@@ -344,6 +344,8 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 `close()` 与并发循环的收尾会对所有会话 socket 执行 `shutdown(SHUT_RDWR)`，让阻塞在 `receive` 的 worker 退出。`max_messages` 在并发模式下是 best-effort 停止条件：已受理但尚未完成的回复也占用上限，失败时会归还；它用于有界测试与优雅停止，不是协议级配额。
 
+`serve_forever(mode="selector")` 改用单线程事件循环：监听 socket 与所有已接受的 session 注册到同一个 `selectors.DefaultSelector`，可读即服务一条消息。断开、发垃圾或被错误信封终止的 peer 会被摘除并关闭，不影响循环继续服务其他连接。连接与消息配额仍由同一个 `AdmissionController` 执行，`max_messages` 同样只统计已送出的回复。半帧停滞的 peer 仍可能让循环阻塞到该帧处理完（没有双工读缓冲），这是与线程池的关键差距。
+
 ### 5.39 任务树用无损快照持久化
 
 `Task.snapshot()` 是给调用方的摘要，只有 `task_id`、`owner`、`assignee`、`status`、`budget` 与 `authority`，不足以恢复状态机。持久化改用 `Task.to_state()`：它额外保存 `root_task_id`、`parent_task_id`、`session_id`、`result_schema`、`consumed` 与 `detached`，因此重启后预算消耗、父子链和 detached 子树判定都不会丢失。
@@ -438,7 +440,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，注册表验签与分库都是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。传 `key_store` 后私钥移出回执 store；不传时私钥与回执仍同处一个 0600 JSON 文件。默认后端仍是明文 JSON，密钥环只是可选后端。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
-19. **并发上限由线程池决定**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；没有事件循环、异步 I/O 或按 Agent 的加权调度。`max_messages` 在并发模式下是 best-effort 停止条件，不是严格的协议配额。
+19. **并发两种模式，异步仍是缺的**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；`mode="selector"` 用单线程事件循环消掉了每连接线程，但没有双工读缓冲，半帧停滞的 peer 仍可阻塞循环，也没有按 Agent 的加权调度或平台原生异步绑定。`max_messages` 在并发/事件循环模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_events` 只裁剪 live 链，归档仍只增不减，没有压缩。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随归档增长。

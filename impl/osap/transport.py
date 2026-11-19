@@ -23,6 +23,7 @@ import ctypes
 import json
 import os
 import select
+import selectors
 import socket
 import stat
 import struct
@@ -462,6 +463,7 @@ class UnixStreamServer:
         *,
         max_messages: int | None = None,
         concurrency: int = 1,
+        mode: str = "threads",
     ) -> int:
         """Serve connections until closed or `max_messages` replies were sent.
 
@@ -471,15 +473,28 @@ class UnixStreamServer:
         owns its own `Bus`; per-Agent quotas and wait queues are shared through
         the server's `AdmissionController`.
 
-        With concurrency above 1, `max_messages` is a best-effort stop
-        condition: no new reply is started once the count is reached, but
-        replies already in flight may finish.
+        `mode="selector"` runs a single-threaded event loop over
+        `selectors.DefaultSelector` instead of a thread pool: the loop serves
+        every ready connection in turn, so many idle peers cost one thread,
+        not one thread per connection. A peer that stalls halfway through a
+        frame can still block the loop until the frame times out at the
+        client; full duplex buffering would need a native async binding.
+
+        With concurrency above 1 or in selector mode, `max_messages` is a
+        best-effort stop condition: no new reply is started once the count is
+        reached, but replies already in flight may finish.
         """
 
+        if mode not in ("threads", "selector"):
+            raise ValueError("mode must be 'threads' or 'selector'")
         if isinstance(concurrency, bool) or not isinstance(concurrency, int):
             raise ValueError("concurrency must be a positive int")
         if concurrency < 1:
             raise ValueError("concurrency must be a positive int")
+        if mode == "selector" and concurrency != 1:
+            raise ValueError("selector mode does not take a concurrency")
+        if mode == "selector":
+            return self._serve_selector(max_messages)
         if concurrency == 1:
             return self._serve_serial(max_messages)
         return self._serve_concurrent(max_messages, concurrency)
@@ -502,6 +517,75 @@ class UnixStreamServer:
             finally:
                 session.close()
         return served
+
+    def _serve_selector(self, max_messages: int | None) -> int:
+        """Serve every ready connection in one thread (§7.11 no starvation).
+
+        The listener and all live sessions share one `DefaultSelector`. A
+        readable listener is accepted; a readable session serves one message.
+        A peer that disconnects, sends garbage, or hits an error envelope is
+        dropped without stopping the loop, so one broken client cannot take
+        the Bus down.
+        """
+
+        served = 0
+        session_of: dict = {}
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.sock, selectors.EVENT_READ, None)
+            try:
+                while not self.closed and (
+                    max_messages is None or served < max_messages
+                ):
+                    for key, _ in selector.select(timeout=0.05):
+                        if key.data is None:
+                            try:
+                                session = self.accept()
+                            except OsapError:
+                                continue
+                            except OSError:
+                                return served
+                            try:
+                                selector.register(
+                                    session.sock, selectors.EVENT_READ, session
+                                )
+                            except (OSError, ValueError):
+                                session.close()
+                                continue
+                            session_of[session.sock] = session
+                            continue
+                        if max_messages is not None and served >= max_messages:
+                            return served
+                        session = key.data
+                        try:
+                            session.serve()
+                        except (
+                            ConnectionError,
+                            OSError,
+                            OsapError,
+                            NotImplementedError,
+                            ValueError,
+                        ):
+                            # Nothing was delivered, so `max_messages` still
+                            # counts only replies that actually went out.
+                            self._drop_session(selector, session_of, session)
+                            continue
+                        served += 1
+            finally:
+                for session in list(session_of.values()):
+                    try:
+                        selector.unregister(session.sock)
+                    except (KeyError, OSError, ValueError):
+                        pass
+                    session.close()
+        return served
+
+    def _drop_session(self, selector, session_of: dict, session) -> None:
+        session_of.pop(session.sock, None)
+        try:
+            selector.unregister(session.sock)
+        except (KeyError, OSError, ValueError):
+            pass
+        session.close()
 
     def _serve_concurrent(self, max_messages: int | None, concurrency: int) -> int:
         served = 0
