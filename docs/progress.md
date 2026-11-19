@@ -29,6 +29,7 @@
 | 上下文对象持久化（M4 前置） | ✅ 完成 | `ContextFabric` 增加 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；685 tests | 2026-11-19 |
 | 审计按用户分区与跨 trace 顺序（M4 前置） | ✅ 完成 | `AuditJournal` 写 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开拒绝缺口/重复/时间戳不符/孤儿条目；706 tests | 2026-11-19 |
 | Windows 密钥环与迁移工具（M4 前置） | ✅ 完成 | `KeyringKeyStore` 增加 Windows `PasswordVault`（PowerShell，密钥走 stdin）；后端失败细分 `KeyringError.reason`；`migrate_key_store` + `tools/migrate_pcs_key.py` 验证后迁移并在确认目标后删源；720 tests | 2026-11-19 |
+| 并发服务事件循环（M4 前置） | ✅ 完成 | `serve_forever(mode="selector")` 单线程多路复用监听与全部会话；断开/出错 peer 摘除不影响循环；配额共享 `AdmissionController`；726 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -42,7 +43,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（8047 行）+ 720 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（8131 行）+ 726 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -102,6 +103,7 @@
 | `3d251a6` | 2026-11-19 | **上下文对象持久化**：`context.handles` / `context.blackboards` / `context.objects` 分节落盘；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；46 条新测试，累计 685 |
 | `a2c6853` | 2026-11-19 | **审计按用户分区与跨 trace 顺序**：`AuditJournal` 写入 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与序号一次 `put_many`；重开交叉校验；21 条新测试，累计 706 |
 | `adba047` | 2026-11-19 | **Windows 密钥环与迁移工具**：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分 `backend_missing`/`lookup_failed`/`store_failed`；`migrate_key_store` 与 `tools/migrate_pcs_key.py`；14 条新测试，累计 720 |
+| `6656195` | 2026-11-19 | **并发服务事件循环**：`serve_forever(mode="selector")` 单线程多路复用；断开/出错 peer 摘除；配额仍走共享控制器；6 条新测试，累计 726 |
 
 ---
 
@@ -1228,7 +1230,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §23 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §24 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1417,7 +1419,60 @@ CLI 冒烟（本机，`--to json:` 模式，不触碰真实密钥环）：先有
 
 ---
 
-## 21. 待确认的规范问题
+## 21. 并发服务事件循环（M4 前置，已完成）
+
+### 21.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/transport.py` | `UnixStreamServer.serve_forever(*, max_messages, concurrency=1, mode="threads")`；`mode="selector"` 用 `selectors.DefaultSelector` 在单线程内多路复用监听与全部 session；`_drop_session` 摘除断开/出错 peer |
+| `impl/tests/test_transport.py` | 6 条新测试：参数校验、空闲连接不阻塞、断连 peer 摘除后继续服务、`max_messages` 停止、监听关闭停止、连接配额在 selector 模式下生效 |
+
+### 21.2 语义
+
+- **三种服务模式**：`concurrency=1` 串行（不变）；`concurrency=N` 线程池（不变）；`mode="selector"` 事件循环，要求 `concurrency=1`，两者互斥，`mode` 非法值直接 `ValueError`。默认仍是 `threads`，现有调用不迁移。
+- **单线程多路复用**：监听 socket（`data=None` 标记）与每个已接受 session 注册到同一个 `DefaultSelector`；可读的监听 socket 走 `accept()`（含连接配额），可读的 session 服务一条消息。循环每 0.05 s 醒一次检查 `self.closed` 与 `max_messages`。
+- **peer 摘除**：断开（`ConnectionError`）、写垃圾/协议错（`OsapError`、`ValueError`）、未实现操作（`NotImplementedError`）或 socket 错误的 session 被注销并关闭，循环继续服务其他连接；一条都没送出的回复不计入 `max_messages`（与线程池的归还语义一致）。
+- **配额不变**：连接与消息配额仍由服务器共享的 `AdmissionController` 执行；被拒绝的连接在 `accept()` 内收到 `RATE_LIMIT` 错误信封后被关闭，循环只 `continue`。
+- **关闭语义**：`close()` 置位后循环在下一次 `select` 超时返回时退出并关闭全部 session；线程池的 `shutdown(SHUT_RDWR)` 收尾只属于 threads 模式。
+- **默认不变**：不传 `mode` 时行为与此前完全一致。
+
+### 21.3 验证证据
+
+2026-11-19，提交 `6656195`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl -p 'test_transport.py'
+→ Ran 29 tests ... OK
+
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 726 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 6 条测试覆盖：`selector` + `concurrency>1`、非法 `mode`、非字符串 `mode` 的拒绝；空闲连接不再阻塞另一连接的握手与请求；先连接再裸断开的 peer 被摘除后循环仍服务完剩余回复；`max_messages=1` 在送出 welcome 后停止循环、后续连接无法获得服务；从外部 `close()` 监听后线程退出；`max_connections=1` 下第二个连接收到 `RATE_LIMIT`（`reason=connection_limit`）且第一个连接继续被服务。
+
+### 21.4 已知边界
+
+1. **半帧仍可阻塞**：selector 模式没有双工读缓冲；peer 发出半个长度前缀后停滞会让循环停在该 session 上，直到对端完成或断开。彻底解决需要原生异步绑定（asyncio / 平台事件循环）。
+2. **每条消息一个往返**：循环仍按“可读 → 服务一条 → 回到 select”推进，不做批处理或写聚合；高吞吐场景需要 pipelining 或平台绑定。
+3. **错误信封不算回复失败**：session 内 `bus.receive` 抛出的 `OsapError` 在 `serve()` 内转为错误信封并正常返回，计入 `served`；只有让 session 无法继续的错误才摘除连接。
+4. **没有加权调度**：所有就绪 session 轮流服务，不按 Agent 或消息优先级排序（§7.11 的 `priority` 仍未接线）。
+5. **平台原生异步绑定未实现**：asyncio、XPC、Binder、named pipe 仍在路线图上；selector 是 Python 标准库方案，不是平台传输。
+
+---
+
+## 22. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1433,9 +1488,9 @@ CLI 冒烟（本机，`--to json:` 模式，不触碰真实密钥环）：先有
 
 ---
 
-## 22. 下一步（按顺序）
+## 23. 下一步（按顺序）
 
-1. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
+1. 加入 XPC/Binder/named pipe 等平台原生传输与异步绑定；事件循环已完成（§21）；
 2. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 3. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
 4. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
@@ -1444,7 +1499,7 @@ CLI 冒烟（本机，`--to json:` 模式，不触碰真实密钥环）：先有
 
 ---
 
-## 23. 变更记录
+## 24. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1481,3 +1536,4 @@ CLI 冒烟（本机，`--to json:` 模式，不触碰真实密钥环）：先有
 | 2026-11-19 | **上下文对象持久化**（`3d251a6`）：`ContextFabric` 新增 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析且未知即 `CONTEXT_NOT_FOUND`、黑板关闭清空且不晋升记忆、对象引用计数与墓碑跨重启；新增 46 条测试，累计 685 |
 | 2026-11-19 | **审计按用户分区与跨 trace 顺序**（`a2c6853`）：`AuditJournal` 写 `audit.user.<user>.chain/archive.<trace>` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开交叉校验并拒绝缺口/重复/时间戳不符/孤儿条目；新增 21 条测试，累计 706 |
 | 2026-11-19 | **Windows 密钥环与迁移工具**（`adba047`）：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分失败原因；`migrate_key_store` + `tools/migrate_pcs_key.py`；新增 14 条测试，累计 720 |
+| 2026-11-19 | **并发服务事件循环**（`6656195`）：`serve_forever(mode="selector")` 单线程 `DefaultSelector` 多路复用监听与会话；断开/出错 peer 摘除后循环继续；配额仍走共享 `AdmissionController`；新增 6 条测试，累计 726 |
