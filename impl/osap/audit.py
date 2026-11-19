@@ -159,6 +159,13 @@ class AuditLedger:
     live chain keeps its first event's `prev_hash` pointing at the last
     archived hash, so `verify()` still proves the whole history from genesis;
     `history()` returns the archive plus the live events as one chain.
+
+    `max_archive=N` bounds how big the archive itself grows. When it exceeds
+    N, the oldest archived events are dropped and the archive records the
+    `base` hash they used to chain from, so the kept events still verify —
+    but from that anchor, not from genesis. Dropped `audit_id`s are no longer
+    checked for duplicates; treat `max_archive` as trading oldest-history
+    proof for bounded storage.
     """
 
     def __init__(
@@ -170,6 +177,7 @@ class AuditLedger:
         section: str | None = None,
         max_events: int | None = None,
         archive_section: str | None = None,
+        max_archive: int | None = None,
     ) -> None:
         if not isinstance(trace_id, str) or not trace_id:
             raise ValueError("trace_id must be a non-empty string")
@@ -177,12 +185,20 @@ class AuditLedger:
             not isinstance(max_events, int) or isinstance(max_events, bool) or max_events < 1
         ):
             raise ValueError("max_events must be a positive integer")
+        if max_archive is not None and (
+            not isinstance(max_archive, int)
+            or isinstance(max_archive, bool)
+            or max_archive < 1
+        ):
+            raise ValueError("max_archive must be a positive integer")
         self.trace_id = trace_id
         self.chain_id = f"audit_chain_{trace_id}"
         self.created_at = _stamp((clock or _now)())
         self.events: list[dict] = []
         self.max_events = max_events
+        self.max_archive = max_archive
         self._archived: list[dict] = []
+        self._archive_base = GENESIS_HASH
         self._archive_chain_id: str | None = None
         self._clock = clock or _now
         self._store = store
@@ -254,7 +270,11 @@ class AuditLedger:
         events = loaded.get("events")
         if not isinstance(events, list):
             raise ValueError(f"{self._archive_section!r} events must be a JSON array")
+        base = loaded.get("base", GENESIS_HASH)
+        if not isinstance(base, str) or not base:
+            raise ValueError(f"{self._archive_section!r} base must be a string")
         self._archive_chain_id = chain_id
+        self._archive_base = base
         self._archived = copy.deepcopy(events)
         try:
             self._verify_archive()
@@ -281,6 +301,7 @@ class AuditLedger:
             updates[self._archive_section] = {
                 "chain_id": self.chain_id,
                 "trace_id": self.trace_id,
+                "base": self._archive_base,
                 "events": copy.deepcopy(self._archived),
             }
         if extra:
@@ -422,7 +443,25 @@ class AuditLedger:
         overflow = len(self.events) - self.max_events
         self._archived.extend(self.events[:overflow])
         del self.events[:overflow]
+        self._compact_archive()
         return True
+
+    def _compact_archive(self) -> None:
+        """Drop the oldest archived events once `max_archive` is exceeded.
+
+        The dropped events used to chain from `self._archived[0]['prev_hash']`
+        before they are removed, so the kept prefix still verifies — anchored
+        at `base` instead of genesis. An empty archive anchors at genesis.
+        """
+
+        if self.max_archive is None:
+            return
+        overflow = len(self._archived) - self.max_archive
+        if overflow <= 0:
+            return
+        # The kept prefix chains from the last dropped event's hash.
+        self._archive_base = self._archived[overflow - 1]["hash"]
+        del self._archived[:overflow]
 
     # --- verification and export ------------------------------------------
 
@@ -470,17 +509,18 @@ class AuditLedger:
                 )
 
     def _verify_archive(self) -> None:
-        """Require archive schemas, genesis start, links, and body hashes."""
+        """Require archive schemas, anchor start, links, and body hashes."""
 
         if not self._archived:
             return
         verify_chain({"trace_id": self.trace_id, "events": self._archived})
-        if self._archived[0]["prev_hash"] != GENESIS_HASH:
+        anchor = self._archive_base
+        if self._archived[0]["prev_hash"] != anchor:
             raise OsapError(
                 CHAIN_INVALID,
-                "audit archive does not start at genesis",
+                "audit archive does not start at its recorded anchor",
                 details={
-                    "expected": GENESIS_HASH,
+                    "expected": anchor,
                     "actual": self._archived[0]["prev_hash"],
                     "audit_id": self._archived[0]["audit_id"],
                 },
@@ -787,6 +827,33 @@ class AuditJournal:
             ledger.verify()
         self._check_order_matches()
         return True
+
+    def export(self) -> dict:
+        """Export one user's whole partition for transfer or review (§10.5).
+
+        The bundle carries the per-trace chains (archive plus live) and the
+        cross-trace order, so a verifier can re-check every chain with
+        `AuditLedger.verify` semantics and walk the events in global order.
+        It is a snapshot: the consumer should pin `last_seq` and treat later
+        appends as new batches.
+        """
+
+        return {
+            "user_id": self.user_id,
+            "generated_at": _stamp(self._clock()),
+            "last_seq": len(self._order),
+            "order": copy.deepcopy(self._order),
+            "traces": [
+                {
+                    "trace_id": trace_id,
+                    "chain_id": ledger.chain_id,
+                    "created_at": ledger.created_at,
+                    "events": ledger.history()["events"],
+                }
+                for trace_id in self.traces()
+                for ledger in (self._ledgers[trace_id],)
+            ],
+        }
 
 
 def _commitment(salt: str, value: str) -> str:

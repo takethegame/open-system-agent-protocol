@@ -1095,5 +1095,151 @@ class AppendManyTests(unittest.TestCase):
         self.assertIsNone(JsonStore(self.path).get(f"{audit.LEDGER_SECTION_PREFIX}{TRACE}"))
 
 
+class CompactionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "audit.json"
+
+    def ledger(self, **kwargs) -> audit.AuditLedger:
+        return audit.AuditLedger(
+            trace_id=TRACE,
+            store=JsonStore(self.path),
+            clock=clock,
+            **kwargs,
+        )
+
+    def append_many(self, ledger, count: int) -> list:
+        return [
+            ledger.append(event(audit_id=f"audit_{index}", target=f"task_{index}"))
+            for index in range(count)
+        ]
+
+    def test_the_archive_is_bounded_and_stays_verifiable(self):
+        ledger = self.ledger(max_events=2, max_archive=2)
+        self.append_many(ledger, 6)
+        self.assertEqual(len(ledger.events), 2)
+        self.assertEqual(len(ledger.archived_events), 2)
+        self.assertEqual(
+            [item["audit_id"] for item in ledger.archived_events],
+            ["audit_2", "audit_3"],
+        )
+        self.assertTrue(ledger.verify())
+        stored = JsonStore(self.path).get(f"{audit.ARCHIVE_SECTION_PREFIX}{TRACE}")
+        self.assertEqual(stored["base"], ledger.archived_events[0]["prev_hash"])
+        self.assertNotEqual(stored["base"], audit.GENESIS_HASH)
+        # The anchor chain: live first event still points at the archive tail.
+        self.assertEqual(ledger.events[0]["prev_hash"], ledger.archived_events[-1]["hash"])
+
+    def test_a_compacted_archive_anchors_at_its_base(self):
+        ledger = self.ledger(max_events=2, max_archive=2)
+        self.append_many(ledger, 6)
+        reopened = self.ledger(max_events=2, max_archive=2)
+        self.assertTrue(reopened.verify())
+        self.assertEqual(
+            [item["audit_id"] for item in reopened.archived_events],
+            ["audit_2", "audit_3"],
+        )
+        history = reopened.history()["events"]
+        self.assertEqual([item["audit_id"] for item in history], ["audit_2", "audit_3", "audit_4", "audit_5"])
+
+    def test_without_a_limit_the_archive_keeps_genesis(self):
+        ledger = self.ledger(max_events=2)
+        self.append_many(ledger, 5)
+        self.assertTrue(ledger.verify())
+        stored = JsonStore(self.path).get(f"{audit.ARCHIVE_SECTION_PREFIX}{TRACE}")
+        self.assertEqual(stored["base"], audit.GENESIS_HASH)
+        self.assertEqual(len(stored["events"]), 3)
+
+    def test_compaction_keeps_the_kept_prefix_verifiable(self):
+        ledger = self.ledger(max_events=1, max_archive=1)
+        self.append_many(ledger, 3)
+        # Only the previous event stays archived, chained from the dropped
+        # audit_0's hash; the kept prefix still verifies end to end.
+        self.assertEqual(
+            [item["audit_id"] for item in ledger.archived_events], ["audit_1"]
+        )
+        self.assertEqual(
+            ledger._archive_base, ledger.archived_events[0]["prev_hash"]
+        )
+        self.assertTrue(ledger.verify())
+
+    def test_invalid_archive_limits_are_rejected(self):
+        for value in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                self.ledger(max_archive=value)
+
+    def test_a_base_mismatch_is_rejected_on_reopen(self):
+        self.ledger(max_events=2, max_archive=2)
+        ledger = self.ledger(max_events=2, max_archive=2)
+        self.append_many(ledger, 6)
+        section = f"{audit.ARCHIVE_SECTION_PREFIX}{TRACE}"
+        stored = JsonStore(self.path).get(section)
+        stored["base"] = audit.GENESIS_HASH
+        JsonStore(self.path).put(section, stored)
+        with self.assertRaises(OsapError) as caught:
+            self.ledger(max_events=2, max_archive=2)
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+
+class JournalExportTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "audit.json"
+
+    def journal(self, user_id="user://alice", **kwargs) -> audit.AuditJournal:
+        return audit.AuditJournal(
+            user_id=user_id, store=JsonStore(self.path), clock=clock, **kwargs
+        )
+
+    def test_the_export_carries_order_and_chains(self):
+        journal = self.journal()
+        journal.append("trace_alpha", event(audit_id="audit_a1"))
+        journal.append("trace_beta", event(audit_id="audit_b1"))
+        journal.append("trace_alpha", event(audit_id="audit_a2"))
+
+        bundle = journal.export()
+        self.assertEqual(bundle["user_id"], "user://alice")
+        self.assertEqual(bundle["last_seq"], 3)
+        self.assertEqual(
+            [entry["seq"] for entry in bundle["order"]], [1, 2, 3]
+        )
+        self.assertEqual(
+            [trace["trace_id"] for trace in bundle["traces"]],
+            ["trace_alpha", "trace_beta"],
+        )
+        alpha = bundle["traces"][0]
+        self.assertEqual([item["audit_id"] for item in alpha["events"]], ["audit_a1", "audit_a2"])
+        self.assertTrue(alpha["chain_id"].startswith("audit_chain_"))
+
+    def test_the_export_includes_archived_history(self):
+        ledger_journal = self.journal(max_events=1)
+        ledger_journal.append("trace_alpha", event(audit_id="audit_1"))
+        ledger_journal.append("trace_alpha", event(audit_id="audit_2"))
+        bundle = ledger_journal.export()
+        events = bundle["traces"][0]["events"]
+        self.assertEqual(
+            [item["audit_id"] for item in events], ["audit_1", "audit_2"]
+        )
+
+    def test_the_export_is_detached(self):
+        journal = self.journal()
+        journal.append("trace_alpha", event())
+        bundle = journal.export()
+        bundle["order"][0]["audit_id"] = "tampered"
+        bundle["traces"][0]["events"][0]["target"] = "tampered"
+        self.assertNotEqual(journal.order()[0]["audit_id"], "tampered")
+        self.assertNotEqual(
+            journal.trace("trace_alpha").events[0]["target"], "tampered"
+        )
+
+    def test_an_empty_journal_exports_an_empty_bundle(self):
+        bundle = self.journal().export()
+        self.assertEqual(bundle["order"], [])
+        self.assertEqual(bundle["traces"], [])
+        self.assertEqual(bundle["last_seq"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
