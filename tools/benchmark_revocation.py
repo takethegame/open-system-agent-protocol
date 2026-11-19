@@ -42,23 +42,23 @@ def template() -> dict:
     return json.loads((EXAMPLES / "capability.json").read_text(encoding="utf-8"))
 
 
-def build_tree(width: int, depth: int) -> list[dict]:
+def build_tree(width: int, depth: int, prefix: str = "cap_tree") -> list[dict]:
     """Return a parent-before-child list with `width ** depth` leaves."""
 
     tokens = []
     base = template()
     base.pop("parent_cap_id", None)
     base["depth"] = 0
-    base["cap_id"] = "cap_tree_0"
+    base["cap_id"] = f"{prefix}_0"
     base["constraints"]["max_depth"] = depth
     tokens.append(base)
 
-    frontier = ["cap_tree_0"]
+    frontier = [f"{prefix}_0"]
     for level in range(1, depth + 1):
         next_frontier = []
         for parent in frontier:
             for index in range(width):
-                cap_id = f"cap_tree_{len(tokens)}"
+                cap_id = f"{prefix}_{len(tokens)}"
                 child = copy.deepcopy(template())
                 child["cap_id"] = cap_id
                 child["parent_cap_id"] = parent
@@ -113,6 +113,11 @@ def main() -> int:
         type=int,
         default=10,
         help="tokens per independent chain in cross-process mode",
+    )
+    parser.add_argument(
+        "--tree",
+        action="store_true",
+        help="revoke a full width/depth tree per sample in cross-process mode",
     )
     parser.add_argument(
         "--interval",
@@ -204,7 +209,17 @@ def run_cross_process(args) -> int:
         replica_path = str(Path(directory) / "replica.json")
         source = capability.CapabilityAuthority(store=JsonStore(source_path))
         roots = []
+        tokens_per_chain = args.chain_length + 1
+        if args.tree:
+            tokens_per_chain = sum(args.width**level for level in range(args.depth + 1))
         for index in range(args.samples):
+            if args.tree:
+                prefix = f"cap_x_{index}"
+                tokens = build_tree(args.width, args.depth, prefix=prefix)
+                for token in tokens:
+                    source.issue(token)
+                roots.append(f"{prefix}_0")
+                continue
             root_cap = f"cap_x_{index}_0"
             token = template()
             token.pop("parent_cap_id", None)
@@ -254,7 +269,7 @@ def run_cross_process(args) -> int:
         stats = percentiles(durations, 50, 95, 99)
         print(
             f"cross-process: chains={args.samples} "
-            f"tokens_per_chain={args.chain_length + 1} "
+            f"tokens_per_chain={tokens_per_chain} "
             f"interval={args.interval * 1000:.1f} ms"
         )
         print(

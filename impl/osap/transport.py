@@ -495,6 +495,20 @@ class _AsyncioStreamProtocol(asyncio.Protocol):
         self.transport = None
 
 
+def _remove_stale_socket(path: Path) -> None:
+    """Drop a leftover socket, but never clobber an unrelated file."""
+
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(mode):
+        raise FileExistsError(
+            f"{path} exists and is not a socket; refusing to replace it"
+        )
+    path.unlink()
+
+
 class UnixStreamServer:
     """`AF_UNIX` stream listener whose accepted connections use length framing."""
 
@@ -534,15 +548,7 @@ class UnixStreamServer:
     def _remove_stale_socket(self) -> None:
         """Drop a leftover socket, but never clobber an unrelated file."""
 
-        try:
-            mode = self.path.lstat().st_mode
-        except FileNotFoundError:
-            return
-        if not stat.S_ISSOCK(mode):
-            raise FileExistsError(
-                f"{self.path} exists and is not a socket; refusing to replace it"
-            )
-        self.path.unlink()
+        _remove_stale_socket(self.path)
 
     def accept(self) -> UnixSession:
         connection, _ = self.sock.accept()
@@ -937,3 +943,213 @@ class UnixMessagePair:
             right.close()
             raise
         return server, client
+
+
+class RevocationFeedServer:
+    """Push revocation journal batches to subscribers (§5.5, sidecar).
+
+    This is the push channel behind the revocation journal: a dedicated
+    `AF_UNIX` stream socket carrying plain JSON frames
+    (`{"source", "cursor", "entries"}`) with the standard length framing. It
+    is deliberately **not** Bus traffic and carries no OSAP envelopes, so §5.5
+    notification never widens the Bus message surface.
+
+    `journal` is a zero-argument callable returning the full journal list,
+    which keeps this module decoupled from `capability`; pass
+    `lambda: authority.revocations` or a store read. On connect a subscriber
+    first receives the catch-up batch from sequence 0, then only new entries
+    after each `notify()` (or on the poll fallback). The server never writes
+    the journal; it is a reader.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        journal,
+        *,
+        source: str = "issuer",
+        backlog: int = 4,
+        peer_policy: PeerPolicy | None = None,
+    ) -> None:
+        if not callable(journal):
+            raise ValueError("journal must be a zero-argument callable")
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        self.path = Path(path)
+        self.journal = journal
+        self.source = source
+        self.peer_policy = peer_policy
+        _remove_stale_socket(self.path)
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self.sock.bind(str(self.path))
+        except OSError:
+            self.sock.close()
+            raise
+        os.chmod(self.path, 0o600)
+        self.sock.listen(backlog)
+        self.closed = False
+        self._condition = threading.Condition()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._connections: list[socket.socket] = []
+        self._connections_lock = threading.Lock()
+
+    def notify(self) -> None:
+        """Wake every subscriber after the journal grew."""
+
+        with self._condition:
+            self._condition.notify_all()
+
+    def accept(self) -> socket.socket:
+        connection, _ = self.sock.accept()
+        try:
+            peer = peer_credentials(connection)
+            if self.peer_policy is not None:
+                self.peer_policy.check(peer)
+            return connection
+        except Exception:
+            connection.close()
+            raise
+
+    def serve_forever(self, *, poll_interval: float = 0.05) -> None:
+        """Accept subscribers until `close()`; one push thread per subscriber."""
+
+        while not self.closed:
+            try:
+                readable, _, _ = select.select([self.sock], [], [], 0.05)
+            except (OSError, ValueError):
+                break
+            if not readable:
+                continue
+            try:
+                connection = self.accept()
+            except OsapError:
+                continue
+            except OSError:
+                break
+            with self._connections_lock:
+                self._connections.append(connection)
+            thread = threading.Thread(
+                target=self._push_loop,
+                args=(connection, poll_interval),
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+        self._stop.set()
+        with self._condition:
+            self._condition.notify_all()
+
+    def _push_loop(self, connection: socket.socket, poll_interval: float) -> None:
+        cursor = 0
+        try:
+            while not self._stop.is_set() and not self.closed:
+                with self._condition:
+                    self._condition.wait(poll_interval)
+                entries = [
+                    entry
+                    for entry in (self.journal() or [])
+                    if entry.get("seq", 0) > cursor
+                ]
+                if not entries:
+                    continue
+                frame = {
+                    "source": self.source,
+                    "cursor": entries[-1]["seq"],
+                    "entries": entries,
+                }
+                connection.sendall(framing.encode_stream(frame))
+                cursor = entries[-1]["seq"]
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            try:
+                connection.close()
+            except OSError:
+                pass
+            with self._connections_lock:
+                if connection in self._connections:
+                    self._connections.remove(connection)
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._stop.set()
+            with self._condition:
+                self._condition.notify_all()
+            self.sock.close()
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            with self._connections_lock:
+                connections = list(self._connections)
+            for connection in connections:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            for thread in self._threads:
+                thread.join(1)
+
+
+class RevocationFeedSession:
+    """One subscriber: apply every pushed batch to a replica authority."""
+
+    def __init__(self, session: UnixSession, replica, *, source: str | None = None) -> None:
+        apply = getattr(replica, "apply_revocations", None)
+        if not callable(apply):
+            raise ValueError("replica must expose apply_revocations()")
+        self.session = session
+        self.replica = replica
+        self.source = source
+        self.batches = 0
+
+    def receive(self) -> dict:
+        """Read one pushed batch, apply it, and return the replica report."""
+
+        frame = self.session.receive()
+        source = self.source or frame.get("source")
+        report = self.replica.apply_revocations(
+            frame.get("entries") or [], source=source
+        )
+        self.batches += 1
+        return report
+
+    def run(self, *, max_batches: int | None = None) -> int:
+        served = 0
+        while max_batches is None or served < max_batches:
+            try:
+                self.receive()
+            except (ConnectionError, OSError):
+                break
+            served += 1
+        return served
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> "RevocationFeedSession":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        self.close()
+
+
+class RevocationFeedClient:
+    """Connect to a `RevocationFeedServer` and return a subscriber session."""
+
+    @staticmethod
+    def connect(
+        path: str | os.PathLike[str],
+        replica,
+        *,
+        source: str | None = None,
+        peer_policy: PeerPolicy | None = None,
+        timeout: float | None = None,
+    ) -> RevocationFeedSession:
+        session = UnixStreamClient.connect(
+            path, peer_policy=peer_policy, timeout=timeout
+        )
+        return RevocationFeedSession(session, replica, source=source)

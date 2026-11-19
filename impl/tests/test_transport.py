@@ -15,7 +15,7 @@ import time
 import unittest
 from pathlib import Path
 
-from osap import AdmissionController, Quota, framing, transport
+from osap import AdmissionController, JsonStore, Quota, capability, framing, transport
 from osap.bus import Bus
 from osap.errors import OsapError
 
@@ -590,6 +590,167 @@ class AsyncioStreamTests(unittest.TestCase):
         self.server.close()
         thread.join(2)
         self.assertFalse(thread.is_alive())
+
+
+class RevocationFeedTests(unittest.TestCase):
+    """The push channel delivers journal batches to subscribers."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.source_path = os.path.join(self.tmp.name, "source.json")
+        self.replica_path = os.path.join(self.tmp.name, "replica.json")
+        self.path = os.path.join(self.tmp.name, "feed.sock")
+        self.source = capability.CapabilityAuthority(store=JsonStore(self.source_path))
+        self.replica = capability.CapabilityAuthority(store=JsonStore(self.replica_path))
+        self.source_store = JsonStore(self.source_path)
+        self.server = transport.RevocationFeedServer(
+            self.path,
+            # A fresh store per call: the journal file is the transport, so a
+            # subscriber must always re-read it, never trust a cached copy.
+            lambda: JsonStore(self.source_path).get("capability.revocations"),
+            source="issuer",
+        )
+
+    def tearDown(self):
+        self.server.close()
+        self.tmp.cleanup()
+
+    def journal(self):
+        return self.source_store.get("capability.revocations")
+
+    def stop(self, thread):
+        """The feed serves until close(); stop it before joining the thread."""
+
+        self.server.close()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def revoke_chain(self, prefix: str, length: int = 1) -> int:
+        template = load("capability.json")
+        template.pop("parent_cap_id", None)
+        template["cap_id"] = f"{prefix}_0"
+        template["depth"] = 0
+        self.source.issue(template)
+        parent = f"{prefix}_0"
+        for position in range(1, length + 1):
+            child = copy.deepcopy(load("capability.json"))
+            child["cap_id"] = f"{prefix}_{position}"
+            child["parent_cap_id"] = parent
+            child["depth"] = position
+            self.source.issue(child)
+            parent = child["cap_id"]
+        self.source.revoke(f"{prefix}_0")
+        self.server.notify()
+        return length + 1
+
+    def test_a_pushed_batch_is_applied_to_the_replica(self):
+        thread = start(self.server.serve_forever)
+        expected = self.revoke_chain("cap_feed_a")
+        with transport.RevocationFeedClient.connect(
+            self.path, self.replica, source="issuer"
+        ) as session:
+            report = session.receive()
+        self.assertEqual(report["applied"], expected)
+        self.assertEqual(report["cursor"], expected)
+        self.assertTrue(self.replica.is_revoked({"cap_id": "cap_feed_a_0"}))
+        self.assertTrue(self.replica.is_revoked({"cap_id": "cap_feed_a_1"}))
+        self.stop(thread)
+
+    def test_a_late_subscriber_gets_the_catch_up_batch(self):
+        thread = start(self.server.serve_forever)
+        expected = self.revoke_chain("cap_feed_b")
+        time.sleep(0.1)
+        with transport.RevocationFeedClient.connect(
+            self.path, self.replica, source="issuer"
+        ) as session:
+            report = session.receive()
+        self.assertEqual(report["applied"], expected)
+        self.assertEqual(self.replica.applied_sources().get("issuer"), expected)
+        self.stop(thread)
+
+    def test_two_subscribers_each_get_the_batch(self):
+        thread = start(self.server.serve_forever)
+        expected = self.revoke_chain("cap_feed_c")
+        other = capability.CapabilityAuthority(
+            store=JsonStore(os.path.join(self.tmp.name, "replica2.json"))
+        )
+        first = transport.RevocationFeedClient.connect(
+            self.path, self.replica, source="issuer"
+        )
+        second = transport.RevocationFeedClient.connect(
+            self.path, other, source="issuer"
+        )
+        try:
+            self.assertEqual(first.receive()["applied"], expected)
+            self.assertEqual(second.receive()["applied"], expected)
+        finally:
+            first.close()
+            second.close()
+        self.stop(thread)
+
+    def test_only_new_entries_are_pushed_after_the_first_batch(self):
+        thread = start(self.server.serve_forever)
+        with transport.RevocationFeedClient.connect(
+            self.path, self.replica, source="issuer"
+        ) as session:
+            first = self.revoke_chain("cap_feed_d1")
+            self.assertEqual(session.receive()["applied"], first)
+            second = self.revoke_chain("cap_feed_d2")
+            report = session.receive()
+            self.assertEqual(report["applied"], second)
+            self.assertEqual(session.batches, 2)
+        self.stop(thread)
+
+    def test_a_disconnected_subscriber_does_not_break_the_server(self):
+        thread = start(self.server.serve_forever)
+        dangling = transport.RevocationFeedClient.connect(
+            self.path, self.replica, source="issuer"
+        )
+        dangling.close()
+        expected = self.revoke_chain("cap_feed_e")
+        with transport.RevocationFeedClient.connect(
+            self.path, self.replica, source="issuer"
+        ) as session:
+            self.assertEqual(session.receive()["applied"], expected)
+        # The dangling subscriber's push thread must be gone.
+        time.sleep(0.1)
+        self.assertEqual(len(self.server._connections), 1)
+        self.stop(thread)
+
+    def test_a_denied_peer_gets_no_batches(self):
+        self.server.close()
+        policy = transport.PeerPolicy(uid=os.getuid() + 12345)
+        self.server = transport.RevocationFeedServer(
+            self.path,
+            lambda: JsonStore(self.source_path).get("capability.revocations"),
+            source="issuer",
+            peer_policy=policy,
+        )
+        thread = start(self.server.serve_forever)
+        self.revoke_chain("cap_feed_f")
+        session = transport.UnixStreamClient.connect(self.path, timeout=2)
+        try:
+            with self.assertRaises((ConnectionError, OSError)):
+                session.receive()
+        finally:
+            session.close()
+        self.stop(thread)
+
+    def test_invalid_arguments_are_rejected(self):
+        with self.assertRaises(ValueError):
+            transport.RevocationFeedServer(self.path, "not callable")
+        with self.assertRaises(ValueError):
+            transport.RevocationFeedServer(self.path, self.server.journal, source="")
+        with self.assertRaises(ValueError):
+            transport.RevocationFeedSession(self.replica, object())
+
+    def test_close_removes_the_socket_file(self):
+        thread = start(self.server.serve_forever)
+        time.sleep(0.1)
+        self.server.close()
+        self.assertFalse(os.path.exists(self.path))
+        self.stop(thread)
 
 
 class AdmissionTransportTests(unittest.TestCase):
