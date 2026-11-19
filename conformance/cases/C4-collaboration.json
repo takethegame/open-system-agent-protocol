@@ -140,7 +140,7 @@
       "id": "C4-08",
       "level": "C4",
       "title": "unfinished tasks do not silently stay running after a Bus restart",
-      "mode": "manual",
+      "mode": "automated",
       "operation": "restart",
       "preconditions": [
         "a task is in running state with no terminal result"
@@ -151,8 +151,21 @@
         "query the task state",
         "inspect the audit trail"
       ],
+      "input": {
+        "ref": "../../examples/task.json",
+        "mutations": [
+          { "op": "replace", "path": "/status", "value": "running" }
+        ],
+        "params": { "policy": "fail" }
+      },
       "expect": {
-        "outcome": "observe",
+        "outcome": "accept",
+        "state": {
+          "task_status": "failed",
+          "recovered_count": 1,
+          "audited": true,
+          "audit_verified": true
+        },
         "notes": "The task MUST become failed or be rescheduled by policy; silent running is non-conforming and the recovery MUST be audited."
       }
     },
@@ -160,7 +173,7 @@
       "id": "C4-09",
       "level": "C4",
       "title": "crash after effect intent is marked unknown and not replayed",
-      "mode": "manual",
+      "mode": "automated",
       "operation": "replay",
       "preconditions": [
         "an L2/L3 task has recorded effect.intent",
@@ -172,8 +185,24 @@
         "inspect the task state and the audit trail",
         "verify whether the side effect was repeated"
       ],
+      "input": {
+        "ref": "../../examples/task.json",
+        "params": {
+          "intent_ref": "intent_c4_09",
+          "target": "calendar:primary",
+          "idempotency_key": "idem_c4_09"
+        }
+      },
       "expect": {
-        "outcome": "observe",
+        "outcome": "accept",
+        "state": {
+          "task_status": "failed",
+          "effect_state": "unknown",
+          "requires_reconciliation": true,
+          "replay_blocked": true,
+          "audited": true,
+          "audit_verified": true
+        },
         "notes": "The effect and task MUST be marked unknown; automatic replay is forbidden until reconciliation (§8.11)."
       }
     },

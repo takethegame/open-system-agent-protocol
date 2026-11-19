@@ -21,10 +21,18 @@ Passing a `JsonStore` to `TaskBoard` persists the whole tree, including
 `consumed` counters, parent links, and the detached flag. Canonical state is
 written once at the end of each mutating public method, so a crash sees either
 the previous tree or the new one, never a half-applied transition.
+
+The board also keeps an effect journal (`task.effects`) for §8.11. An
+irreversible side effect records an intent before it runs and an outcome
+afterwards; `recover()` fails every non-terminal task and marks every
+intent-only effect `unknown` in one atomic write. A subsequent replay is
+refused until an explicit `reconcile_effect()` supplies the outcome, so a
+restart cannot silently repeat a side effect.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 
 from . import schema
@@ -36,6 +44,7 @@ TASK_SCHEMA = "task.schema.json"
 DELEGATE_SCHEMA = "delegate.schema.json"
 HANDOFF_SCHEMA = "handoff.schema.json"
 TASKS_SECTION = "task.tasks"
+EFFECTS_SECTION = "task.effects"
 
 STATUSES = (
     "created",
@@ -50,6 +59,15 @@ STATUSES = (
 
 #: States from which a task never moves again (§8.10).
 TERMINAL = frozenset({"succeeded", "failed", "cancelled", "rejected"})
+
+#: §8.11 effect states tracked by the board's journal.
+EFFECT_STATUSES = ("pending", "executed", "unknown", "reconciled")
+
+#: Reconciliation outcomes accepted by `reconcile_effect()`.
+RECONCILED_OUTCOMES = ("executed", "not_executed")
+
+#: Actor recorded on recovery events emitted by the Bus.
+RECOVERY_ACTOR = "system://osap/bus"
 
 #: Legal transitions of the state machine in §8.10.
 TRANSITIONS = {
@@ -254,15 +272,18 @@ class Task:
 
 
 class TaskBoard:
-    """Task tree with delegation, cancel, result, and handoff.
+    """Task tree with delegation, cancel, result, handoff, and recovery.
 
     An optional `JsonStore` makes the tree survive a restart. The board writes
     the canonical `task.tasks` section once per mutating public method; the
     in-memory `audit` list is not persisted, matching the other subsystems.
+    The effect journal lives in `task.effects`, and `recover()` writes both
+    sections through one `put_many`.
     """
 
     def __init__(self, *, store: JsonStore | None = None) -> None:
         self.tasks: dict[str, Task] = {}
+        self.effects: dict[str, dict] = {}
         self.audit: list[dict] = []
         self._store = store
         if store is not None:
@@ -271,6 +292,10 @@ class TaskBoard:
     # --- persistence -------------------------------------------------------
 
     def _restore(self) -> None:
+        self._restore_tasks()
+        self._restore_effects()
+
+    def _restore_tasks(self) -> None:
         loaded = self._store.get(TASKS_SECTION)
         if loaded is None:
             return
@@ -288,12 +313,74 @@ class TaskBoard:
             tasks[task_id] = record
         self.tasks = tasks
 
+    def _restore_effects(self) -> None:
+        loaded = self._store.get(EFFECTS_SECTION)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{EFFECTS_SECTION!r} must be a JSON object")
+        effects: dict[str, dict] = {}
+        for intent_ref, state in loaded.items():
+            if not isinstance(intent_ref, str) or not intent_ref:
+                raise ValueError("stored effect refs must be non-empty strings")
+            if not isinstance(state, dict):
+                raise ValueError("a stored effect must be a JSON object")
+            stored_ref = state.get("intent_ref")
+            if stored_ref != intent_ref:
+                raise ValueError(
+                    f"stored effect {intent_ref!r} carries intent_ref {stored_ref!r}"
+                )
+            for key in ("task_id", "target"):
+                if not isinstance(state.get(key), str) or not state[key]:
+                    raise ValueError(f"stored effect needs a non-empty {key}")
+            if state["task_id"] not in self.tasks:
+                raise ValueError(
+                    f"stored effect {intent_ref!r} references an unknown task"
+                )
+            status = state.get("status")
+            if status not in EFFECT_STATUSES:
+                raise ValueError(f"stored effect has an unknown status: {status!r}")
+            outcome = state.get("reconciled_outcome")
+            if status == "reconciled":
+                if outcome not in RECONCILED_OUTCOMES:
+                    raise ValueError(
+                        f"stored effect has an invalid reconciled outcome: {outcome!r}"
+                    )
+            elif outcome is not None:
+                raise ValueError(
+                    "stored effect has a reconciled outcome but is not reconciled"
+                )
+            key = state.get("idempotency_key")
+            if key is not None and (not isinstance(key, str) or not key):
+                raise ValueError("stored effect idempotency_key must be a non-empty string")
+            effects[intent_ref] = copy.deepcopy(state)
+        self.effects = effects
+
     def _persist(self) -> None:
         if self._store is None:
             return
         self._store.put(
             TASKS_SECTION,
             {task_id: record.to_state() for task_id, record in self.tasks.items()},
+        )
+
+    def _persist_effects(self) -> None:
+        if self._store is None:
+            return
+        self._store.put(EFFECTS_SECTION, copy.deepcopy(self.effects))
+
+    def _persist_recovery(self) -> None:
+        """Flush the recovered tree and journal in one atomic store write."""
+
+        if self._store is None:
+            return
+        self._store.put_many(
+            {
+                TASKS_SECTION: {
+                    task_id: record.to_state() for task_id, record in self.tasks.items()
+                },
+                EFFECTS_SECTION: copy.deepcopy(self.effects),
+            }
         )
 
     # --- index -------------------------------------------------------------
@@ -534,6 +621,227 @@ class TaskBoard:
         )
         self._persist()
         return "accepted"
+
+    # --- effect journal and restart recovery -------------------------------
+
+    def record_effect_intent(
+        self,
+        task_id: str,
+        *,
+        intent_ref: str,
+        target: str,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Persist an `effect.intent` before an irreversible side effect (§8.11)."""
+
+        record = self.require(task_id)
+        if record.status in TERMINAL:
+            raise OsapError(
+                "POLICY_DENIED",
+                "a terminal task cannot start a side effect",
+                details={"task_id": task_id, "status": record.status},
+            )
+        if not isinstance(intent_ref, str) or not intent_ref:
+            raise ValueError("intent_ref must be a non-empty string")
+        if not isinstance(target, str) or not target:
+            raise ValueError("target must be a non-empty string")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str) or not idempotency_key
+        ):
+            raise ValueError("idempotency_key must be a non-empty string")
+        if intent_ref in self.effects:
+            raise OsapError(
+                "DUPLICATE",
+                f"effect intent already exists: {intent_ref}",
+                details={"intent_ref": intent_ref},
+            )
+        effect = {
+            "intent_ref": intent_ref,
+            "task_id": task_id,
+            "target": target,
+            "status": "pending",
+        }
+        if idempotency_key is not None:
+            effect["idempotency_key"] = idempotency_key
+        self.effects[intent_ref] = effect
+        self.audit.append(
+            {
+                "action": "effect.intent",
+                "task_id": task_id,
+                "intent_ref": intent_ref,
+                "target": target,
+            }
+        )
+        self._persist_effects()
+        return copy.deepcopy(effect)
+
+    def record_effect_outcome(self, intent_ref: str) -> dict:
+        """Record `effect.executed`; an already-executed intent is idempotent."""
+
+        effect = self._effect(intent_ref)
+        if effect["status"] == "executed":
+            return copy.deepcopy(effect)
+        if effect["status"] != "pending":
+            raise OsapError(
+                "POLICY_DENIED",
+                "an effect with an unknown outcome must be reconciled first",
+                details={"intent_ref": intent_ref, "reason": "reconciliation_required"},
+            )
+        effect["status"] = "executed"
+        self.audit.append(
+            {
+                "action": "effect.executed",
+                "task_id": effect["task_id"],
+                "intent_ref": intent_ref,
+                "target": effect["target"],
+            }
+        )
+        self._persist_effects()
+        return copy.deepcopy(effect)
+
+    def reconcile_effect(self, intent_ref: str, *, outcome: str) -> dict:
+        """Write a reconciliation result back to an `unknown` effect (§8.11)."""
+
+        if outcome not in RECONCILED_OUTCOMES:
+            raise ValueError(f"reconciliation outcome must be one of {RECONCILED_OUTCOMES}")
+        effect = self._effect(intent_ref)
+        if effect["status"] != "unknown":
+            raise OsapError(
+                "POLICY_DENIED",
+                "only an unknown effect can be reconciled",
+                details={"intent_ref": intent_ref, "status": effect["status"]},
+            )
+        effect["status"] = "reconciled"
+        effect["reconciled_outcome"] = outcome
+        self.audit.append(
+            {
+                "action": "effect.reconciled",
+                "task_id": effect["task_id"],
+                "intent_ref": intent_ref,
+                "target": effect["target"],
+                "outcome": outcome,
+            }
+        )
+        self._persist_effects()
+        return copy.deepcopy(effect)
+
+    def require_replay_allowed(self, intent_ref: str) -> dict:
+        """Refuse a replay while the effect outcome is still unknown."""
+
+        effect = self._effect(intent_ref)
+        status = effect["status"]
+        if status in ("pending", "unknown"):
+            raise OsapError(
+                "POLICY_DENIED",
+                "effect outcome is unknown; reconcile before replay",
+                details={"intent_ref": intent_ref, "reason": "reconciliation_required"},
+            )
+        if status == "reconciled" and effect["reconciled_outcome"] == "executed":
+            raise OsapError(
+                "POLICY_DENIED",
+                "reconciliation confirmed the effect; replay would duplicate it",
+                details={"intent_ref": intent_ref, "reason": "already_executed"},
+            )
+        return copy.deepcopy(effect)
+
+    def recover(self, *, policy: str = "fail") -> dict:
+        """Recover after a Bus restart (§3.7, §8.10, §8.11).
+
+        Every non-terminal task becomes `failed`, or returns to `created` when
+        `policy="reschedule"`. Every intent-only effect becomes `unknown` and
+        is reported for reconciliation. Both sections are written atomically,
+        and the returned `audit` events are ready for an `AuditLedger`.
+        """
+
+        if policy not in ("fail", "reschedule"):
+            raise ValueError("policy must be 'fail' or 'reschedule'")
+        recovered, task_events = self._recover_tasks(policy)
+        effects_changed, effect_events = self._recover_effects()
+        if recovered or effects_changed:
+            self._persist_recovery()
+        unknown = [
+            intent_ref
+            for intent_ref, effect in self.effects.items()
+            if effect["status"] == "unknown"
+        ]
+        return {
+            "policy": policy,
+            "recovered_tasks": recovered,
+            "task_statuses": {
+                task_id: record.status for task_id, record in self.tasks.items()
+            },
+            "effects": {
+                "effect_state": "unknown" if unknown else "complete",
+                "pending_intents": unknown,
+                "requires_reconciliation": bool(unknown),
+            },
+            "audit": task_events + effect_events,
+        }
+
+    def _recover_tasks(self, policy: str) -> tuple[list[dict], list[dict]]:
+        target = "failed" if policy == "fail" else "created"
+        recovered: list[dict] = []
+        events: list[dict] = []
+        for record in self.tasks.values():
+            if record.status in TERMINAL or record.status == target:
+                continue
+            previous = record.status
+            record.status = target
+            recovered.append(
+                {"task_id": record.task_id, "from": previous, "to": target}
+            )
+            events.append(
+                {
+                    "actor": RECOVERY_ACTOR,
+                    "action": "task.failed" if target == "failed" else "task.created",
+                    "target": record.task_id,
+                    "decision": "allow",
+                    "task_id": record.task_id,
+                    "extensions": {
+                        "reason": "restart_recovery",
+                        "from": previous,
+                        "to": target,
+                        "policy": policy,
+                    },
+                }
+            )
+        self.audit.extend(copy.deepcopy(events))
+        return recovered, events
+
+    def _recover_effects(self) -> tuple[bool, list[dict]]:
+        changed = False
+        events: list[dict] = []
+        for effect in self.effects.values():
+            if effect["status"] != "pending":
+                continue
+            effect["status"] = "unknown"
+            changed = True
+            events.append(
+                {
+                    "actor": RECOVERY_ACTOR,
+                    "action": "error",
+                    "target": effect["target"],
+                    "decision": "deny",
+                    "task_id": effect["task_id"],
+                    "extensions": {
+                        "reason": "effect_outcome_unknown",
+                        "intent_ref": effect["intent_ref"],
+                        "requires_reconciliation": True,
+                    },
+                }
+            )
+        self.audit.extend(copy.deepcopy(events))
+        return changed, events
+
+    def _effect(self, intent_ref: str) -> dict:
+        effect = self.effects.get(intent_ref)
+        if effect is None:
+            raise OsapError(
+                "ROUTING_NOT_FOUND",
+                f"unknown effect intent: {intent_ref}",
+                details={"intent_ref": intent_ref},
+            )
+        return effect
 
     # --- ownership ---------------------------------------------------------
 

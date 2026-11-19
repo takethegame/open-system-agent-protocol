@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from osap import JsonStore, OsapError, task
+from osap import JsonStore, OsapError, audit, task
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -419,7 +419,8 @@ class PersistenceTests(unittest.TestCase):
 
     def test_a_record_with_an_unknown_status_is_rejected(self):
         store = JsonStore(self.path)
-        store.put(task.TASKS_SECTION, {"task_x": {**parent_task().to_state(), "status": "sleeping"}})
+        state = {**parent_task().to_state(), "status": "sleeping"}
+        store.put(task.TASKS_SECTION, {"task_x": state})
         with self.assertRaises(ValueError):
             task.TaskBoard(store=store)
 
@@ -438,6 +439,454 @@ class PersistenceTests(unittest.TestCase):
             task.TaskBoard(store=store)
 
 
+
+
+def running_record(board: task.TaskBoard):
+    """Add a task and move it to `running`, the state recovery must not leave."""
+
+    record = board.add(parent_task())
+    board.transition(record, "accepted")
+    board.transition(record, "running")
+    return record
+
+
+class RecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.json"
+
+    def board(self) -> task.TaskBoard:
+        return task.TaskBoard(store=JsonStore(self.path))
+
+    def test_a_running_task_becomes_failed_and_stays_failed(self):
+        first = self.board()
+        record = running_record(first)
+
+        second = self.board()
+        report = second.recover()
+
+        self.assertEqual(
+            report["recovered_tasks"],
+            [{"task_id": record.task_id, "from": "running", "to": "failed"}],
+        )
+        self.assertEqual(report["task_statuses"][record.task_id], "failed")
+        self.assertEqual(self.board().require(record.task_id).status, "failed")
+
+    def test_a_created_task_is_also_recovered(self):
+        first = self.board()
+        record = first.add(parent_task())
+
+        report = self.board().recover()
+
+        self.assertEqual(report["recovered_tasks"][0]["from"], "created")
+        self.assertEqual(report["task_statuses"][record.task_id], "failed")
+
+    def test_terminal_tasks_are_not_touched(self):
+        first = self.board()
+        record = running_record(first)
+        first.transition(record, "succeeded")
+
+        report = self.board().recover()
+
+        self.assertEqual(report["recovered_tasks"], [])
+        self.assertEqual(report["audit"], [])
+        self.assertEqual(self.board().require(record.task_id).status, "succeeded")
+
+    def test_a_detached_running_task_is_recovered(self):
+        first = self.board()
+        record = running_record(first)
+        record.detached = True
+        first._persist()
+
+        report = self.board().recover()
+
+        self.assertEqual(report["recovered_tasks"][0]["task_id"], record.task_id)
+        self.assertEqual(self.board().require(record.task_id).status, "failed")
+
+    def test_recovery_overrides_the_normal_state_machine(self):
+        board = task.TaskBoard()
+        record = board.add(parent_task())
+
+        with self.assertRaises(OsapError):
+            board.transition(record, "failed")
+
+        board.recover()
+
+        self.assertEqual(record.status, "failed")
+
+    def test_reschedule_returns_a_running_task_to_created(self):
+        first = self.board()
+        record = running_record(first)
+
+        report = self.board().recover(policy="reschedule")
+
+        self.assertEqual(
+            report["recovered_tasks"],
+            [{"task_id": record.task_id, "from": "running", "to": "created"}],
+        )
+        self.assertEqual(self.board().require(record.task_id).status, "created")
+
+    def test_reschedule_leaves_a_created_task_untouched(self):
+        first = self.board()
+        record = first.add(parent_task())
+
+        report = self.board().recover(policy="reschedule")
+
+        self.assertEqual(report["recovered_tasks"], [])
+        self.assertEqual(self.board().require(record.task_id).status, "created")
+
+    def test_parent_and_child_are_recovered_together(self):
+        first = self.board()
+        root = running_record(first)
+        child = child_record("task_child", parent=root.task_id)
+        first.add(child)
+
+        report = self.board().recover()
+
+        self.assertEqual(
+            {item["task_id"] for item in report["recovered_tasks"]},
+            {root.task_id, child.task_id},
+        )
+        self.assertEqual(self.board().require("task_child").status, "failed")
+
+    def test_a_second_recovery_is_a_no_op(self):
+        first = self.board()
+        running_record(first)
+        first.recover()
+
+        second = self.board()
+        report = second.recover()
+
+        self.assertEqual(report["recovered_tasks"], [])
+        self.assertEqual(report["audit"], [])
+
+    def test_recovery_events_fit_an_audit_ledger(self):
+        first = self.board()
+        record = running_record(first)
+
+        report = self.board().recover()
+        ledger = audit.AuditLedger(trace_id="trace_recovery")
+        for event in report["audit"]:
+            ledger.append(event)
+
+        self.assertTrue(ledger.verify())
+        event = ledger.events[0]
+        self.assertEqual(event["action"], "task.failed")
+        self.assertEqual(event["target"], record.task_id)
+        self.assertEqual(event["decision"], "allow")
+        self.assertEqual(event["extensions"]["reason"], "restart_recovery")
+
+    def test_recovery_persists_one_atomic_snapshot(self):
+        store = RecordingStore()
+        board = task.TaskBoard(store=store)
+        board.add(parent_task())
+        store.puts.clear()
+
+        board.recover()
+
+        self.assertEqual(store.puts, [task.TASKS_SECTION, task.EFFECTS_SECTION])
+        self.assertIn(parent_task().task_id, store.data[task.TASKS_SECTION])
+
+    def test_a_no_op_recovery_does_not_write(self):
+        store = RecordingStore()
+        board = task.TaskBoard(store=store)
+        record = board.add(parent_task())
+        board.transition(record, "accepted")
+        board.transition(record, "running")
+        board.transition(record, "succeeded")
+        store.puts.clear()
+
+        board.recover()
+
+        self.assertEqual(store.puts, [])
+
+    def test_an_unknown_policy_is_rejected(self):
+        for value in ("", "retry", None, 1):
+            with self.assertRaises(ValueError):
+                task.TaskBoard().recover(policy=value)
+
+
+class EffectJournalTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.json"
+
+    def board(self) -> task.TaskBoard:
+        return task.TaskBoard(store=JsonStore(self.path))
+
+    def intent(self, board: task.TaskBoard, record=None, **overrides):
+        record = record or board.add(parent_task())
+        if record.status == "created":
+            board.transition(record, "accepted")
+            board.transition(record, "running")
+        values = {
+            "intent_ref": "intent_calendar_write",
+            "target": "calendar:primary",
+            "idempotency_key": "idem_calendar_write",
+        }
+        values.update(overrides)
+        return board.record_effect_intent(record.task_id, **values)
+
+    def test_an_intent_is_persisted_before_the_effect(self):
+        first = self.board()
+        record = self.intent(first)
+
+        stored = JsonStore(self.path).get(task.EFFECTS_SECTION)
+        self.assertEqual(stored[record["intent_ref"]], record)
+        second = self.board()
+        self.assertEqual(second.effects[record["intent_ref"]], record)
+
+    def test_an_outcome_is_persisted(self):
+        board = self.board()
+        record = self.intent(board)
+        board.record_effect_outcome(record["intent_ref"])
+
+        self.assertEqual(
+            self.board().effects[record["intent_ref"]]["status"], "executed"
+        )
+
+    def test_an_outcome_is_idempotent(self):
+        board = self.board()
+        record = self.intent(board)
+        first = board.record_effect_outcome(record["intent_ref"])
+        second = board.record_effect_outcome(record["intent_ref"])
+
+        self.assertEqual(first, second)
+        self.assertEqual(second["status"], "executed")
+
+    def test_a_duplicate_intent_is_rejected(self):
+        board = self.board()
+        record = self.intent(board)
+
+        with self.assertRaises(OsapError) as caught:
+            self.intent(board, board.require(record["task_id"]))
+
+        self.assertEqual(caught.exception.code, "DUPLICATE")
+
+    def test_an_unknown_task_is_rejected(self):
+        with self.assertRaises(OsapError) as caught:
+            self.board().record_effect_intent(
+                "task_missing", intent_ref="intent_x", target="calendar:primary"
+            )
+
+        self.assertEqual(caught.exception.code, "ROUTING_NOT_FOUND")
+
+    def test_a_terminal_task_cannot_start_an_effect(self):
+        board = self.board()
+        record = board.add(parent_task())
+        board.transition(record, "cancelled")
+
+        with self.assertRaises(OsapError) as caught:
+            board.record_effect_intent(
+                record.task_id, intent_ref="intent_x", target="calendar:primary"
+            )
+
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+
+    def test_an_invalid_intent_is_rejected(self):
+        board = self.board()
+        record = board.add(parent_task())
+        for values in (
+            {"intent_ref": "", "target": "calendar:primary"},
+            {"intent_ref": "intent_x", "target": ""},
+            {"intent_ref": "intent_x", "target": "calendar:primary", "idempotency_key": ""},
+        ):
+            with self.assertRaises(ValueError):
+                board.record_effect_intent(record.task_id, **values)
+
+    def test_recovery_marks_an_intent_unknown(self):
+        board = self.board()
+        record = self.intent(board)
+
+        report = board.recover()
+
+        self.assertTrue(report["effects"]["requires_reconciliation"])
+        self.assertEqual(report["effects"]["effect_state"], "unknown")
+        self.assertEqual(report["effects"]["pending_intents"], [record["intent_ref"]])
+        self.assertTrue(report["audit"])
+
+    def test_unknown_effects_survive_a_reopen(self):
+        first = self.board()
+        record = self.intent(first)
+        first.recover()
+
+        second = self.board()
+        report = second.recover()
+
+        self.assertEqual(report["effects"]["pending_intents"], [record["intent_ref"]])
+        self.assertEqual(report["audit"], [])
+        self.assertEqual(second.effects[record["intent_ref"]]["status"], "unknown")
+
+    def test_the_effect_alert_is_a_valid_audit_event(self):
+        board = self.board()
+        self.intent(board)
+
+        report = board.recover()
+        ledger = audit.AuditLedger(trace_id="trace_effect")
+        for event in report["audit"]:
+            ledger.append(event)
+
+        self.assertTrue(ledger.verify())
+        alert = [event for event in ledger.events if event["action"] == "error"][0]
+        self.assertEqual(alert["decision"], "deny")
+        self.assertEqual(alert["extensions"]["reason"], "effect_outcome_unknown")
+        self.assertTrue(alert["extensions"]["requires_reconciliation"])
+
+    def test_recovery_writes_the_tree_and_journal_together(self):
+        store = RecordingStore()
+        board = task.TaskBoard(store=store)
+        self.intent(board)
+        store.puts.clear()
+
+        board.recover()
+
+        self.assertEqual(store.puts, [task.TASKS_SECTION, task.EFFECTS_SECTION])
+
+    def test_replay_is_blocked_for_a_pending_intent(self):
+        board = self.board()
+        record = self.intent(board)
+
+        with self.assertRaises(OsapError) as caught:
+            board.require_replay_allowed(record["intent_ref"])
+
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        self.assertEqual(caught.exception.details["reason"], "reconciliation_required")
+
+    def test_replay_is_blocked_for_an_unknown_effect(self):
+        board = self.board()
+        record = self.intent(board)
+        board.recover()
+
+        with self.assertRaises(OsapError) as caught:
+            board.require_replay_allowed(record["intent_ref"])
+
+        self.assertEqual(caught.exception.details["reason"], "reconciliation_required")
+
+    def test_replay_is_allowed_for_an_executed_effect(self):
+        board = self.board()
+        record = self.intent(board)
+        board.record_effect_outcome(record["intent_ref"])
+
+        allowed = board.require_replay_allowed(record["intent_ref"])
+
+        self.assertEqual(allowed["status"], "executed")
+
+    def test_reconciliation_can_confirm_execution(self):
+        board = self.board()
+        record = self.intent(board)
+        board.recover()
+        reconciled = board.reconcile_effect(
+            record["intent_ref"], outcome="executed"
+        )
+
+        self.assertEqual(reconciled["status"], "reconciled")
+        self.assertEqual(reconciled["reconciled_outcome"], "executed")
+        self.assertEqual(
+            self.board().effects[record["intent_ref"]]["reconciled_outcome"],
+            "executed",
+        )
+        with self.assertRaises(OsapError) as caught:
+            board.require_replay_allowed(record["intent_ref"])
+        self.assertEqual(caught.exception.details["reason"], "already_executed")
+
+    def test_reconciliation_can_confirm_a_miss_and_allow_a_retry(self):
+        board = self.board()
+        record = self.intent(board)
+        board.recover()
+        board.reconcile_effect(record["intent_ref"], outcome="not_executed")
+
+        allowed = board.require_replay_allowed(record["intent_ref"])
+
+        self.assertEqual(allowed["reconciled_outcome"], "not_executed")
+
+    def test_only_an_unknown_effect_can_be_reconciled(self):
+        board = self.board()
+        record = self.intent(board)
+        with self.assertRaises(OsapError) as caught:
+            board.reconcile_effect(record["intent_ref"], outcome="executed")
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+
+        board.recover()
+        with self.assertRaises(ValueError):
+            board.reconcile_effect(record["intent_ref"], outcome="maybe")
+
+    def test_a_late_outcome_must_be_reconciled(self):
+        board = self.board()
+        record = self.intent(board)
+        board.recover()
+
+        with self.assertRaises(OsapError) as caught:
+            board.record_effect_outcome(record["intent_ref"])
+
+        self.assertEqual(caught.exception.details["reason"], "reconciliation_required")
+
+    def test_corrupt_effect_sections_are_rejected(self):
+        cases = [
+            [],
+            {"intent_x": []},
+            {"intent_x": {"intent_ref": "intent_other", "task_id": "task_x"}},
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                path = Path(self.directory.name) / f"corrupt_{len(str(value))}.json"
+                store = JsonStore(path)
+                store.put(task.EFFECTS_SECTION, value)
+                with self.assertRaises(ValueError):
+                    task.TaskBoard(store=store)
+
+    def test_an_effect_with_a_bad_status_is_rejected(self):
+        store = JsonStore(self.path)
+        board = task.TaskBoard(store=store)
+        record = self.intent(board)
+        state = store.get(task.EFFECTS_SECTION)
+        state[record["intent_ref"]]["status"] = "maybe"
+        store.put(task.EFFECTS_SECTION, state)
+
+        with self.assertRaises(ValueError):
+            self.board()
+
+    def test_an_effect_for_a_missing_task_is_rejected(self):
+        store = JsonStore(self.path)
+        board = task.TaskBoard(store=store)
+        record = self.intent(board)
+        state = store.get(task.EFFECTS_SECTION)
+        state[record["intent_ref"]]["task_id"] = "task_missing"
+        store.put(task.EFFECTS_SECTION, state)
+
+        with self.assertRaises(ValueError):
+            self.board()
+
+    def test_a_reconciled_effect_needs_a_valid_outcome(self):
+        store = JsonStore(self.path)
+        board = task.TaskBoard(store=store)
+        record = self.intent(board)
+        state = store.get(task.EFFECTS_SECTION)
+        state[record["intent_ref"]]["status"] = "reconciled"
+        store.put(task.EFFECTS_SECTION, state)
+
+        with self.assertRaises(ValueError):
+            self.board()
+
+    def test_an_unreconciled_effect_cannot_carry_an_outcome(self):
+        store = JsonStore(self.path)
+        board = task.TaskBoard(store=store)
+        record = self.intent(board)
+        state = store.get(task.EFFECTS_SECTION)
+        state[record["intent_ref"]]["reconciled_outcome"] = "executed"
+        store.put(task.EFFECTS_SECTION, state)
+
+        with self.assertRaises(ValueError):
+            self.board()
+
+    def test_an_unknown_effect_ref_is_routing_not_found(self):
+        with self.assertRaises(OsapError) as caught:
+            self.board().require_replay_allowed("intent_missing")
+
+        self.assertEqual(caught.exception.code, "ROUTING_NOT_FOUND")
+
+
 class RecordingStore:
     """A tiny store that records one section name per write."""
 
@@ -451,6 +900,10 @@ class RecordingStore:
     def put(self, section, value):
         self.puts.append(section)
         self.data[section] = copy.deepcopy(value)
+
+    def put_many(self, sections):
+        self.puts.extend(sections)
+        self.data.update(copy.deepcopy(sections))
 
 
 class WriteCountTests(unittest.TestCase):

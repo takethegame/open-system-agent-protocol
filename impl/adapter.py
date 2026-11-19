@@ -33,6 +33,7 @@ from osap import (  # noqa: E402
     Bus,
     audit,
     Deadline,
+    JsonStore,
     OsapError,
     capability,
     consent,
@@ -490,6 +491,10 @@ def _check_c4(case: dict, documents: dict) -> dict:
         return _check_c4_delegate(primary, context[0])
     if operation == "handoff":
         return _check_c4_handoff(primary, context, params)
+    if operation == "restart":
+        return _check_c4_restart(primary, params)
+    if operation == "replay":
+        return _check_c4_replay(primary, params)
     return {"outcome": "skip", "reason": f"C4 operation {operation!r} has no automated check"}
 
 
@@ -584,6 +589,112 @@ def _check_c4_handoff(message: dict, context: list, params: dict) -> dict:
             "owner": after["owner"],
             "budget_unchanged": before["budget"] == after["budget"],
             "task_status_unchanged": before["status"] == after["status"],
+        },
+    }
+
+
+def _running_task(board: task.TaskBoard, document: dict) -> task.Task:
+    record = board.add(task.Task.from_document(document))
+    if record.status == "created":
+        board.transition(record, "accepted")
+    if record.status == "accepted":
+        board.transition(record, "running")
+    return record
+
+
+def _check_c4_restart(primary: dict, params: dict) -> dict:
+    """Fail or reschedule unfinished tasks after a restart and audit it (§3.7)."""
+
+    if primary is None:
+        raise ValueError("C4 restart case needs an input.ref task")
+    policy = params.get("policy", "fail")
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JsonStore(Path(tmp) / "bus.json")
+        board = task.TaskBoard(store=store)
+        record = _running_task(board, primary)
+
+        # Drop the in-memory board and reopen the tree from disk.
+        board = task.TaskBoard(store=store)
+        report = board.recover(policy=policy)
+
+        ledger = audit.AuditLedger(trace_id="trace_c4_08", store=store)
+        for event in report["audit"]:
+            ledger.append(event)
+
+        reopened = task.TaskBoard(store=store)
+        stored = reopened.require(record.task_id)
+        verified = audit.AuditLedger(trace_id="trace_c4_08", store=store).verify()
+
+    return {
+        "outcome": "accept",
+        "state": {
+            "task_status": stored.status,
+            "recovered_count": len(report["recovered_tasks"]),
+            "audited": bool(report["audit"]),
+            "audit_verified": verified,
+        },
+    }
+
+
+def _check_c4_replay(primary: dict, params: dict) -> dict:
+    """Mark an intent-only effect unknown and block replay until reconciliation."""
+
+    if primary is None:
+        raise ValueError("C4 replay case needs an input.ref task")
+    intent_ref = params.get("intent_ref", "intent_c4_09")
+    with tempfile.TemporaryDirectory() as tmp:
+        store = JsonStore(Path(tmp) / "bus.json")
+        board = task.TaskBoard(store=store)
+        record = _running_task(board, primary)
+        intent = board.record_effect_intent(
+            record.task_id,
+            intent_ref=intent_ref,
+            target=params.get("target", "calendar:primary"),
+            idempotency_key=params.get("idempotency_key", "idem_c4_09"),
+        )
+
+        # Write effect.intent, then crash before an outcome can be recorded.
+        ledger = audit.AuditLedger(trace_id="trace_c4_09", store=store)
+        ledger.append(
+            {
+                "audit_id": intent["intent_ref"],
+                "actor": "system://osap/bus",
+                "action": "effect.intent",
+                "phase": "intent",
+                "target": intent["target"],
+                "decision": "allow",
+                "task_id": intent["task_id"],
+                "extensions": {"idempotency_key": intent.get("idempotency_key")},
+            }
+        )
+
+        board = task.TaskBoard(store=store)
+        ledger = audit.AuditLedger(trace_id="trace_c4_09", store=store)
+        report = board.recover()
+        for event in report["audit"]:
+            ledger.append(event)
+
+        reopened = task.TaskBoard(store=store)
+        stored = reopened.require(record.task_id)
+        try:
+            reopened.require_replay_allowed(intent["intent_ref"])
+            replay_blocked = False
+        except OsapError as error:
+            replay_blocked = (
+                error.code == "POLICY_DENIED"
+                and error.details.get("reason") == "reconciliation_required"
+            )
+        verified = audit.AuditLedger(trace_id="trace_c4_09", store=store).verify()
+
+    return {
+        "outcome": "accept",
+        "state": {
+            "task_status": stored.status,
+            "effect_state": report["effects"]["effect_state"],
+            "requires_reconciliation": report["effects"]["requires_reconciliation"],
+            "replay_blocked": replay_blocked,
+            "audited": bool(report["audit"]),
+            "audit_verified": verified,
         },
     }
 
