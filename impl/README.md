@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控 / 恢复）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、撤销日志与跨进程副本应用、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -29,7 +29,8 @@
 | 能力凭证 | §5.2 | schema 校验、签发登记、`cap_id` 索引 |
 | 衰减 | §5.3 | 10 条规则逐项检查，返回全部违例维度 |
 | 绑定 | §5.4 | `audience` / `task_id` / `subject` 三项无状态校验 |
-| 撤销 | §5.5 | 父能力撤销级联到全部后代，撤销可跨“仅持有子凭证”的场景生效 |
+| 撤销 | §5.5 | 父能力撤销级联到全部后代，撤销可跨“仅持有子凭证”的场景生效；每个新撤销 token 写入 `capability.revocations` 日志（`{seq, cap_id, ts}`）并与撤销集一次 `put_many` 落盘 |
+| 撤销分发 | §5.5 | 副本用 `apply_revocations(entries, source=...)` 按来源游标应用批次：重复投递幂等、缺口报领域扩展码 `REVOCATION_GAP`、批内必须连续、写失败回滚后可原样重试；本实现只提供日志与校验，不自带网络传输 |
 | 风险分级 | §5.7 | L3/L4 必须有 `consent_receipt_id`，否则 `POLICY_CONSENT_REQUIRED` |
 | 同意回执 | §5.8 | 决策 → 过期 → `cap_id`/`task_id`/`audience` → `actions`/`resources` 的顺序校验 |
 | 同意请求 | §10.2 | `consent.request` payload 校验、TTL（`intent_preview.ttl`，缺省 10 分钟）、重复 `request_id` 拒绝 |
@@ -86,7 +87,7 @@ impl/
     __init__.py         公共导出
     bus.py              握手、校验、路由、幂等、错误回执
     audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留与归档、按用户分区与跨 trace 顺序、脱敏导出、回放、恢复
-    capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销
+    capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销与撤销日志/副本应用
     clock.py            单调时钟 deadline
     consent.py          §5.8 同意回执与能力范围校验
     consent_flow.py     §10.2、§10.3 同意请求、预约、授权/拒绝、激活、撤销、可选注册表验签
@@ -429,7 +430,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 5. **恢复审计不在同一事务内**：`TaskBoard` 可持久化整棵树与 `task.effects`，`recover()` 也返回完整审计事件；但 `TaskBoard.audit` 仍是内存列表，事件要由调用方写入 `AuditLedger`，两个写入不是原子的。`require_replay_allowed()` 只是闸门，绕过该 API 的直接副作用不受保护。
 6. **能力凭证只做结构校验**：能力 `proof.sig` 仍未验签，`cap_id` 也未由 CA 密钥覆盖；PCS 回执的签名、登记、轮换与撤销已由 `pcs.py` 覆盖，能力凭证本身仍待补。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
-8. **撤销可持久化但未分发**：`CapabilityAuthority.revoked` 可落盘并在重启后重建，但没有跨进程广播或重试；§5.5 要求的“通知受影响 Agent”尚未实现。
+8. **撤销分发是拉模式，不自动通知**：`revoke` 会把新撤销写入 `capability.revocations` 日志并原子落盘，另一个进程可以用 `apply_revocations(entries, source=...)` 拉取并级联应用；但没有任何自动广播、订阅或重试调度，§5.5 的“通知受影响 Agent”仍需调用方自建传输（Bus 消息、文件轮询或 IPC）。撤销 P95 仍是进程内口径。
 9. **委派未校验能力链**：`delegate` 只检查任务预算与深度，没有把 `delegated_capability` 与父能力凭证做完整衰减比对（夹具里没有父凭证）。
 10. **上下文持久化仍不是完整存储层**：`ContextFabric(store=...)` 可跨重启保留解析事件、句柄注册表、任务黑板与对象元数据/墓碑，但缓存窗口仍是纯计算，没有句柄撤销，也没有按用户分区；黑板关闭后只保留条目数与 `promoted_to_memory=false`，不保留条目内容。
 11. **没有真实对象存储**：`delete_object` 只返回判定结果，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
@@ -464,6 +465,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 | 回执中的 `agent` | §5.8 未明确要求回执绑定能力 `subject` | 实现额外校验 `receipt.agent == capability.subject`，不改变任何用例结果 |
 | `audience` 与 `actions` 的检查顺序 | 规范未规定 | 固定为 `cap_id` → `task_id` → `audience` → `actions` → `resources`，保证同一输入总是同一错误码 |
 | 委派超预算的错误码 | §8.6 只定义了执行期超支 | 委派阶段用 `POLICY_DENIED`，执行期用 `TASK_BUDGET_EXCEEDED` |
+| 撤销批次的缺口错误码 | §7.7 未为撤销分发定义专用码 | 领域扩展码 `REVOCATION_GAP`（与 `AUDIT_CHAIN_INVALID` 同类，不在 27 个标准码内），副本对缺失批次 fail closed |
 | 记忆句柄的识别 | §9.3 未定义记忆 wire format | 按 `ctx://user/memory` 前缀识别，要求 `memory.read` |
 | 标签违规的处理 | §9.4 未规定拒绝还是记录 | 解析成功后报告 `lowered`/`effective_label`，对应 C5-03 的 `observe` |
 | 被引用对象的删除 | §9.6 用 SHOULD 描述墓碑 | 软删除墓碑化；硬删被引用对象判为不合约 |
