@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.osap.Bus
+Exec=/usr/libexec/osap-bus
+SystemdService=osap-bus.service

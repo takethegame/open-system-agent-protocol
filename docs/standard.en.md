@@ -1697,6 +1697,8 @@ See [`GOVERNANCE.en.md`](../GOVERNANCE.en.md) for governance details.
 13. Standardized mapping between Context Fabric and OS handles/portals.
 14. Leader election and audit chain partitioning for multi-instance Buses.
 
+> Provisional decisions, alternatives, and re-review triggers for these fourteen issues are in [`decisions/README.md`](../decisions/README.md). ADRs are non-normative; this document prevails on conflict.
+
 ---
 
 ## Appendix A: Examples

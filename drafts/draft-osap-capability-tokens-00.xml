@@ -1,0 +1,1079 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc [
+  <!ENTITY nbsp "&#160;">
+]>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     ipr="trust200902"
+     category="info"
+     docName="draft-osap-capability-tokens-00"
+     submissionType="IETF"
+     consensus="false"
+     tocInclude="true"
+     symRefs="true"
+     sortRefs="true"
+     version="3">
+
+  <front>
+    <title abbrev="OSAP Capability Tokens">Capability Tokens for Local Agent Delegation</title>
+    <seriesInfo name="Internet-Draft" value="draft-osap-capability-tokens-00"/>
+    <author fullname="OSAP Editors" initials="O." surname="Editors">
+      <organization>OSAP Project</organization>
+      <address>
+        <email>editors@osap.example</email>
+      </address>
+    </author>
+    <date year="2026" month="November" day="19"/>
+    <area>Applications</area>
+    <workgroup>Individual Submission</workgroup>
+    <keyword>agent</keyword>
+    <keyword>capability</keyword>
+    <keyword>delegation</keyword>
+    <keyword>local authorization</keyword>
+    <abstract>
+      <t>This document defines a signed capability token format for delegating
+      authority between agents on a single local system. A token binds a
+      subject, an audience, a task, a set of actions and resources, and a
+      validity window. Tokens can only be attenuated: a child token is a subset
+      of its parent. The document specifies attenuation rules, binding checks,
+      revocation semantics, and the interaction with consent receipts. It does
+      not define a transport, a discovery protocol, or an agent runtime.</t>
+    </abstract>
+  </front>
+
+  <middle>
+
+    <section anchor="intro">
+      <name>Introduction</name>
+      <t>Applications on a personal computer are increasingly composed of
+      agents that invoke one another: a notes agent asks a calendar agent to
+      find a free slot, a mail agent asks a contacts agent to resolve a
+      recipient, and a supervisor agent delegates a multi-step task to two
+      specialist agents. Each such invocation crosses an application boundary
+      and therefore needs an explicit, verifiable grant of authority.</t>
+
+      <t>Existing authorization mechanisms do not fit this environment
+      directly. OAuth 2.0 access tokens are designed for HTTP resource servers
+      and assume a network authorization server. OAuth 2.0 Token Exchange
+      <xref target="RFC8693"/> and Rich Authorization Requests
+      <xref target="RFC9396"/> provide useful delegation and scope concepts,
+      but they do not require the audience and task binding that local
+      multi-agent execution needs. Operating-system permissions are attached to
+      applications, not to a task or to a particular agent instance.</t>
+
+      <t>This document specifies a capability token for the local case. The
+      token is a signed JSON object. It names the issuer, the subject that may
+      use it, the audience that must accept it, and the task to which it is
+      bound. It carries an explicit action and resource scope and a small set of
+      constraints such as expiry, use count, delegation depth, and budget. A
+      token can be attenuated by its holder, but a child token can never be
+      broader than its parent. A Capability Authority (CA) issues and revokes
+      tokens; a Policy and Consent Service (PCS) decides whether a token is
+      allowed and obtains user consent when required.</t>
+
+      <section anchor="scope">
+        <name>Scope</name>
+        <t>This document defines:</t>
+        <ul>
+          <li>the JSON structure of a capability token;</li>
+          <li>the canonical byte sequence that is signed;</li>
+          <li>the rules for attenuating a token;</li>
+          <li>the binding checks that a receiver performs;</li>
+          <li>revocation and freshness requirements; and</li>
+          <li>the relationship between a token and a consent receipt.</li>
+        </ul>
+        <t>This document does not define a message envelope, a transport
+        binding, a discovery protocol, a task state machine, a consent user
+        interface, or an audit storage format. Those elements are specified in
+        companion documents or left to the deployment.</t>
+      </section>
+
+      <section anchor="relation">
+        <name>Relation to Other Work</name>
+        <t>The token format is intentionally small. It can be carried in an
+        OAuth 2.0 token exchange response, in an application-layer message, or
+        in a local inter-process call. It does not replace OAuth; it describes a
+        local delegation artifact that can be mapped to OAuth claims when a
+        local action is bridged to a remote service.</t>
+        <t>Work on workload identity in the IETF WIMSE working group addresses
+        cross-domain workload credentials. This document addresses a narrower
+        problem: a user, or an agent acting for that user, delegates a bounded
+        task to another agent on the same device. The two models can be
+        composed, but this document does not define a cross-domain trust
+        root.</t>
+      </section>
+
+      <section anchor="conventions">
+        <name>Conventions and Terminology</name>
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+        "OPTIONAL" in this document are to be interpreted as described in BCP
+        14 <xref target="RFC2119"/> <xref target="RFC8174"/> when, and only
+        when, they appear in all capitals, as shown here.</t>
+        <t>This document uses the following terms:</t>
+        <dl>
+          <dt>Agent:</dt>
+          <dd>An addressable software component that can request or perform an
+          action. An agent is identified by an agent URI such as
+          <tt>agent://com.example.calendar/agent#9c</tt>.</dd>
+          <dt>Capability Authority (CA):</dt>
+          <dd>The component that issues, attenuates, and revokes capability
+          tokens. The CA is trusted to enforce scope and depth limits.</dd>
+          <dt>Policy and Consent Service (PCS):</dt>
+          <dd>The component that evaluates policy, computes the effective risk
+          class, and obtains user consent. The PCS may be part of the CA or a
+          separate service.</dd>
+          <dt>Issuer:</dt>
+          <dd>The principal on whose authority a token is issued. An issuer can
+          be a user, a system policy, or a parent agent.</dd>
+          <dt>Subject:</dt>
+          <dd>The agent that holds a token and may use it to make a request. The
+          subject must equal the sender of the request.</dd>
+          <dt>Audience:</dt>
+          <dd>The agent that must accept a token and perform the requested
+          action. The audience must equal the receiver of the request.</dd>
+          <dt>Task:</dt>
+          <dd>A unit of work with an identifier and, optionally, a parent and a
+          root. A token is bound to exactly one task identifier.</dd>
+          <dt>Attenuation:</dt>
+          <dd>The act of deriving a child token whose authority is a subset of
+          the parent token's authority.</dd>
+          <dt>Consent receipt:</dt>
+          <dd>A signed record of a user's decision to allow or deny a described
+          action. The format is defined in a companion document.</dd>
+          <dt>Risk class:</dt>
+          <dd>One of L0 through L4, describing the potential impact of an
+          action. Risk classes determine whether a consent receipt is
+          required.</dd>
+        </dl>
+      </section>
+    </section>
+
+    <section anchor="model">
+      <name>Capability Model Overview</name>
+      <t>A capability descriptor is a registry declaration. It states that an
+      application offers an action on a resource and describes the schema, risk,
+      and cost of that action. A descriptor is not an authorization and cannot
+      be used to perform an action.</t>
+      <t>A capability token is an authorization. It is issued by a CA after the
+      PCS has evaluated policy and, when necessary, after the user has granted
+      consent. The token is presented by its subject to its audience. The
+      audience validates the token before performing the action.</t>
+      <t>Authority is never ambient. An agent that does not hold a valid token
+      cannot perform a cross-application action, even if it has an operating
+      system permission that would otherwise allow the action. A token can be
+      narrowed by its holder, but it cannot be widened. The resulting chain of
+      tokens is the delegation chain.</t>
+      <t>Three roles are distinct even when one component plays more than one
+      of them:</t>
+      <ul>
+        <li>the issuer states the authority that is delegated;</li>
+        <li>the subject exercises the authority; and</li>
+        <li>the audience accepts and enforces the authority.</li>
+      </ul>
+      <t>In a delegation, the parent agent is the issuer of the child token, the
+      child agent is both the subject and the audience of the child token, and
+      the child agent must not receive the parent's token itself.</t>
+    </section>
+
+    <section anchor="format">
+      <name>Capability Token Format</name>
+      <t>A capability token is a JSON object <xref target="RFC8259"/> with the
+      members described in this section. Unknown top-level members MUST be
+      rejected. An extension member MAY be carried in the top-level
+      <tt>extensions</tt> object; extensions MUST NOT change the meaning of the
+      core members.</t>
+
+      <section anchor="fields">
+        <name>Top-Level Members</name>
+        <table>
+          <name>Capability token members</name>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Presence</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><tt>osap_cap</tt></td>
+              <td>MUST</td>
+              <td>Token format version. The value for this specification is the
+              string <tt>0.1</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>cap_id</tt></td>
+              <td>MUST</td>
+              <td>An opaque, globally unique identifier for this token. It is
+              the identifier used for revocation and audit.</td>
+            </tr>
+            <tr>
+              <td><tt>issuer</tt></td>
+              <td>MUST</td>
+              <td>The principal that issued the token. The value is a URI. It
+              identifies the user, system policy, or parent agent on whose
+              authority the token is issued.</td>
+            </tr>
+            <tr>
+              <td><tt>subject</tt></td>
+              <td>MUST</td>
+              <td>The agent that may use the token. The value is an agent URI
+              and MUST equal the sender of the request in which the token is
+              presented.</td>
+            </tr>
+            <tr>
+              <td><tt>audience</tt></td>
+              <td>MUST</td>
+              <td>The agent that must accept the token. The value is an agent
+              URI and MUST equal the receiver of the request.</td>
+            </tr>
+            <tr>
+              <td><tt>task_id</tt></td>
+              <td>MUST</td>
+              <td>The task to which the token is bound. The value MUST equal
+              the task identifier in the request, except for the delegation and
+              handoff cases described in <xref target="binding"/>.</td>
+            </tr>
+            <tr>
+              <td><tt>root_task_id</tt></td>
+              <td>MUST</td>
+              <td>The root of the task tree, used for audit aggregation.</td>
+            </tr>
+            <tr>
+              <td><tt>actions</tt></td>
+              <td>MUST</td>
+              <td>An array of action names that the subject may perform. The
+              array MUST be non-empty and MUST NOT contain duplicates.</td>
+            </tr>
+            <tr>
+              <td><tt>resources</tt></td>
+              <td>MUST</td>
+              <td>An array of resource identifiers to which the actions apply.
+              The array MUST be non-empty and MUST NOT contain duplicates.</td>
+            </tr>
+            <tr>
+              <td><tt>constraints</tt></td>
+              <td>MAY</td>
+              <td>An object of constraints described in <xref
+              target="constraints"/>. An absent constraint means that the
+              corresponding limit is inherited from the parent or, for a root
+              token, is not imposed by this member.</td>
+            </tr>
+            <tr>
+              <td><tt>iat</tt></td>
+              <td>MUST</td>
+              <td>Issuance time as an integer number of seconds since the Unix
+              epoch (1970-01-01T00:00:00Z).</td>
+            </tr>
+            <tr>
+              <td><tt>nbf</tt></td>
+              <td>MUST</td>
+              <td>Not-before time, in the same format as <tt>iat</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>exp</tt></td>
+              <td>MUST</td>
+              <td>Expiry time, in the same format as <tt>iat</tt>. The value
+              MUST be greater than <tt>nbf</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>parent_cap_id</tt></td>
+              <td>CONDITIONAL</td>
+              <td>The <tt>cap_id</tt> of the parent token. It MUST be present
+              for every token whose <tt>depth</tt> is greater than zero and MUST
+              be absent for a root token.</td>
+            </tr>
+            <tr>
+              <td><tt>depth</tt></td>
+              <td>CONDITIONAL</td>
+              <td>The absolute depth of the token in the delegation chain. A
+              root token has depth 0. A child token has depth equal to the
+              parent's depth plus one. The member MUST be present when
+              <tt>parent_cap_id</tt> is present.</td>
+            </tr>
+            <tr>
+              <td><tt>consent_receipt_id</tt></td>
+              <td>CONDITIONAL</td>
+              <td>The identifier of the consent receipt that authorizes an L3
+              or L4 action. It MUST be present when the effective risk class is
+              L3 or L4.</td>
+            </tr>
+            <tr>
+              <td><tt>proof</tt></td>
+              <td>MUST</td>
+              <td>A signature object described in <xref target="proof"/>.</td>
+            </tr>
+            <tr>
+              <td><tt>extensions</tt></td>
+              <td>MAY</td>
+              <td>An object for namespaced extensions. It participates in the
+              signed byte sequence.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="constraints">
+        <name>Constraints</name>
+        <t>The <tt>constraints</tt> object can contain the following
+        members:</t>
+        <dl>
+          <dt><tt>time_window</tt>:</dt>
+          <dd>An array of two RFC 3339 timestamps <xref target="RFC3339"/>.
+          When both <tt>time_window</tt> and <tt>nbf</tt>/<tt>exp</tt> are
+          present, the effective validity interval is their intersection. A
+          token MUST NOT be accepted outside the effective interval.</dd>
+          <dt><tt>max_uses</tt>:</dt>
+          <dd>A positive integer. The receiver MUST reject a use that would
+          exceed this count. The count is per token, not per action or
+          resource.</dd>
+          <dt><tt>rate</tt>:</dt>
+          <dd>A string of the form <tt>&lt;count&gt;/&lt;unit&gt;</tt>, where
+          <tt>unit</tt> is one of <tt>sec</tt>, <tt>min</tt>, <tt>hour</tt>, or
+          <tt>day</tt>. For example, <tt>5/min</tt> permits five uses per
+          minute. A receiver MUST enforce the rate; the exact enforcement
+          algorithm is implementation-defined as long as it does not permit a
+          wider rate than the stated value.</dd>
+          <dt><tt>max_depth</tt>:</dt>
+          <dd>A non-negative integer. It is the maximum absolute depth allowed
+          in the delegation chain, not a number of additional delegations. A
+          root token with <tt>max_depth</tt> 2 permits a child at depth 1 and a
+          grandchild at depth 2, but no token at depth 3.</dd>
+          <dt><tt>max_budget</tt>:</dt>
+          <dd>An object with one or more of <tt>wall_ms</tt>,
+          <tt>tool_calls</tt>, <tt>tokens</tt>, and <tt>money</tt>. The
+          <tt>money</tt> member is an object with <tt>amount</tt> and
+          <tt>currency</tt>. The budget is an upper bound on the resources that
+          the subject may consume while exercising the token.</dd>
+          <dt><tt>can_delegate</tt>:</dt>
+          <dd>A boolean. If absent, the value is <tt>false</tt>. A token can be
+          used to issue a child token only when this member is
+          <tt>true</tt>.</dd>
+          <dt><tt>session_id</tt>:</dt>
+          <dd>An optional session identifier. If present, the token is valid
+          only within that session.</dd>
+          <dt><tt>nonce</tt>:</dt>
+          <dd>An optional single-use value. A receiver that supports nonces MUST
+          reject a second use of the same nonce for the same token.</dd>
+        </dl>
+      </section>
+
+      <section anchor="example-token">
+        <name>Example Token</name>
+        <sourcecode type="json"><![CDATA[
+{
+  "osap_cap": "0.1",
+  "cap_id": "cap_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "issuer": "user://local/example-user",
+  "subject": "agent://com.example.notes/assistant#7f3a",
+  "audience": "agent://com.example.calendar/agent#9c",
+  "task_id": "task_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "root_task_id": "task_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "actions": ["propose"],
+  "resources": ["calendar:primary"],
+  "constraints": {
+    "time_window": ["2026-11-10T00:00:00Z", "2026-11-17T00:00:00Z"],
+    "max_uses": 5,
+    "rate": "5/min",
+    "max_depth": 2,
+    "max_budget": {
+      "wall_ms": 5000,
+      "tool_calls": 2
+    },
+    "can_delegate": true
+  },
+  "iat": 1794305685,
+  "nbf": 1794305685,
+  "exp": 1794309285,
+  "depth": 0,
+  "consent_receipt_id": "consent_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "proof": {
+    "alg": "EdDSA",
+    "kid": "user-key-1",
+    "sig": "c2lnbmF0dXJlLWV4YW1wbGUtbm90LXZhbGlk"
+  }
+}
+        ]]></sourcecode>
+        <t>The signature value in this example is illustrative and is not a
+        valid signature.</t>
+      </section>
+
+      <section anchor="serialization">
+        <name>Serialization and Canonicalization</name>
+        <t>A token is serialized as UTF-8 JSON. The signature is computed over
+        a canonical byte sequence derived from the token with the
+        <tt>proof</tt> member removed. The canonicalization rules are:</t>
+        <ol>
+          <li>the value MUST be a JSON object;</li>
+          <li>object members are sorted by the Unicode code point order of
+          their names;</li>
+          <li>arrays preserve their order;</li>
+          <li>there is no insignificant whitespace between tokens;</li>
+          <li>strings use the shortest escape sequence permitted by RFC 8259,
+          and non-ASCII characters are emitted as UTF-8 rather than as
+          <tt>\u</tt> escapes; and</li>
+          <li>all numbers in a capability token are integers. Floating-point
+          numbers MUST be rejected before canonicalization.</li>
+        </ol>
+        <t>These rules are a profile of the JSON Canonicalization Scheme
+        <xref target="RFC8785"/>. Because this document restricts all numbers
+        to integers and uses only ASCII member names in the core format, the
+        profile produces the same bytes as JCS for valid tokens. An
+        implementation MUST NOT substitute a different canonicalization that
+        can produce different bytes for the same token.</t>
+        <t>A JSON parser used for token processing MUST reject duplicate member
+        names. Accepting the last duplicate, or the first, would make the signed
+        bytes ambiguous.</t>
+      </section>
+
+      <section anchor="proof">
+        <name>Proof</name>
+        <t>The <tt>proof</tt> member is an object with three members:</t>
+        <dl>
+          <dt><tt>alg</tt>:</dt>
+          <dd>The signature algorithm. This specification defines the value
+          <tt>EdDSA</tt> and requires Ed25519 as defined in RFC 8032
+          <xref target="RFC8032"/>.</dd>
+          <dt><tt>kid</tt>:</dt>
+          <dd>An identifier for the verification key. The key may belong to a
+          user, a system policy, or a parent agent. A verifier MUST resolve the
+          key through a trusted key registry and MUST reject an unknown
+          <tt>kid</tt>.</dd>
+          <dt><tt>sig</tt>:</dt>
+          <dd>The signature encoded with base64url as defined in Section 5 of
+          RFC 4648 <xref target="RFC4648"/>, without padding.</dd>
+        </dl>
+        <t>The signature covers the canonical byte sequence described in
+        <xref target="serialization"/>. It does not cover the <tt>proof</tt>
+        object itself. Implementations MUST verify the signature before acting
+        on any other member of the token, except for the version and structural
+        checks needed to parse it safely.</t>
+      </section>
+    </section>
+
+    <section anchor="attenuation">
+      <name>Attenuation</name>
+      <t>A holder of a token may ask the CA for a child token. The CA MUST
+      reject the request unless every condition in this section is satisfied.
+      The child token is a new signed object; it is not a modification of the
+      parent.</t>
+
+      <section anchor="attenuation-rules">
+        <name>Attenuation Rules</name>
+        <ol>
+          <li>The child <tt>subject</tt> is the delegate and the child
+          <tt>audience</tt> is the actual receiver of the delegated
+          request.</li>
+          <li>The child <tt>actions</tt> are a subset of the parent
+          <tt>actions</tt>.</li>
+          <li>The child <tt>resources</tt> are a subset of the parent
+          <tt>resources</tt>.</li>
+          <li>The child <tt>exp</tt> is less than or equal to the parent
+          <tt>exp</tt>, and the child <tt>nbf</tt> is greater than or equal to
+          the parent <tt>nbf</tt>.</li>
+          <li>The child <tt>max_uses</tt> is less than or equal to the parent
+          <tt>max_uses</tt> when the parent has that constraint.</li>
+          <li>The child <tt>rate</tt> is no wider than the parent <tt>rate</tt>.
+          A child MUST NOT have a higher permitted rate than its parent.</li>
+          <li>Each child <tt>max_budget</tt> dimension is less than or equal to
+          the corresponding parent dimension. For <tt>money</tt>, the currency
+          MUST match and the amount MUST NOT exceed the parent amount.</li>
+          <li>The child <tt>depth</tt> equals the parent <tt>depth</tt> plus
+          one, and is less than or equal to the parent
+          <tt>constraints.max_depth</tt>. The child's own
+          <tt>constraints.max_depth</tt> MUST NOT exceed the parent's.</li>
+          <li>If the child carries a <tt>consent_receipt_id</tt>, that receipt
+          MUST still be valid and MUST cover the child's actions, resources,
+          task, and audience. If the parent's receipt does not cover the child,
+          the CA MUST obtain a new receipt before issuing the child.</li>
+          <li>The parent MUST have <tt>constraints.can_delegate</tt> set to
+          <tt>true</tt>.</li>
+        </ol>
+        <t>If any condition fails, the CA MUST reject the request with
+        <tt>CAPABILITY_ATTENUATION_INVALID</tt>. The CA MUST NOT issue a child
+        token with a warning or a partial scope.</t>
+      </section>
+
+      <section anchor="stateless-stateful">
+        <name>Stateless and Stateful Checks</name>
+        <t>Some checks can be decided from the token and the request alone;
+        others require state. The division is normative for interoperable
+        deployments:</t>
+        <ul>
+          <li>A router at the trust boundary MUST perform the stateless checks:
+          <tt>audience</tt>, <tt>subject</tt>, <tt>task_id</tt>, and
+          <tt>depth</tt>.</li>
+          <li>The receiver MUST perform the stateful checks before executing:
+          revocation status, <tt>max_uses</tt>, <tt>rate</tt>, consent receipt
+          validity, and remaining budget.</li>
+        </ul>
+        <t>A router that cannot perform a stateful check MUST NOT treat a token
+        as authorized for an L3 or L4 action. The receiver remains responsible
+        for the final decision.</t>
+      </section>
+
+      <section anchor="attenuation-failure">
+        <name>Failure Handling</name>
+        <t>A failed attenuation is a security-relevant event. The CA SHOULD
+        record it with the parent identifier, the requested child scope, and the
+        reason. The requester MUST receive a structured error and MUST NOT fall
+        back to forwarding the parent token.</t>
+      </section>
+    </section>
+
+    <section anchor="binding">
+      <name>Binding</name>
+
+      <section anchor="audience-binding">
+        <name>Audience Binding</name>
+        <t>The <tt>audience</tt> member MUST equal the identifier of the agent
+        that receives the request. A router MUST compare the member with the
+        resolved receiver before routing. The receiver MUST compare it again
+        before execution. A mismatch MUST produce
+        <tt>CAPABILITY_AUDIENCE_MISMATCH</tt>.</t>
+      </section>
+
+      <section anchor="task-binding">
+        <name>Task Binding</name>
+        <t>The <tt>task_id</tt> member MUST equal the task identifier in the
+        request. A token issued for one task MUST NOT be reused for another
+        task. A mismatch MUST produce <tt>CAPABILITY_TASK_MISMATCH</tt>.</t>
+        <t>Two message types have an explicit exception:</t>
+        <ul>
+          <li>in a delegation, the sender's token is bound to the parent task,
+          because the delegation creates a new child task; and</li>
+          <li>in a handoff, the sender's token is bound to the task being
+          transferred, because the handoff changes ownership without creating a
+          new task.</li>
+        </ul>
+        <t>The receiver MUST apply the exception only for those message types
+        and MUST reject every other cross-task use.</t>
+      </section>
+
+      <section anchor="sender-binding">
+        <name>Sender Binding</name>
+        <t>The <tt>subject</tt> member MUST equal the sender of the request. An
+        agent that receives a token MUST NOT forward that token to another
+        agent. If an agent needs to delegate, it asks the CA for a child token
+        as described in <xref target="attenuation"/>. A mismatch MUST produce
+        <tt>CAPABILITY_SUBJECT_MISMATCH</tt>.</t>
+      </section>
+
+      <section anchor="session-nonce">
+        <name>Session and Nonce Binding</name>
+        <t>If <tt>constraints.session_id</tt> is present, the token is valid
+        only in that session. A receiver MUST reject a token presented in a
+        different session. High-value actions SHOULD use a single-use
+        <tt>nonce</tt> or <tt>max_uses</tt> equal to one.</t>
+      </section>
+
+      <section anchor="delegation-handoff">
+        <name>Delegation and Handoff</name>
+        <t>A delegation creates a child task. The parent agent must hold a token
+        with <tt>can_delegate</tt> set to <tt>true</tt> and must request a child
+        token for the child agent and the child task. The parent token is not
+        sent as the child's credential.</t>
+        <t>A handoff transfers an existing task to a new owner. The new owner
+        receives a new token whose <tt>audience</tt> is the new owner and whose
+        <tt>task_id</tt> is the transferred task. The old token is not reused.
+        If the handoff is rejected, the task remains with the old owner and the
+        old token remains valid.</t>
+      </section>
+    </section>
+
+    <section anchor="revocation">
+      <name>Revocation</name>
+
+      <section anchor="revocation-interface">
+        <name>Revocation Interface</name>
+        <t>The CA MUST provide a revocation operation addressed by
+        <tt>cap_id</tt>. The operation MUST be idempotent: revoking an already
+        revoked token succeeds and does not create a second revocation event.
+        The CA SHOULD also provide a status operation that returns one of
+        <tt>active</tt>, <tt>revoked</tt>, <tt>expired</tt>, or
+        <tt>unknown</tt>.</t>
+      </section>
+
+      <section anchor="revocation-cascade">
+        <name>Cascade</name>
+        <t>Revoking a parent token MUST revoke every descendant token,
+        regardless of depth. A descendant MUST NOT remain usable because its
+        own identifier is not listed explicitly. A CA that cannot establish the
+        descendant set MUST fail closed and reject the token at the
+        receiver.</t>
+      </section>
+
+      <section anchor="revocation-freshness">
+        <name>Cache and Freshness</name>
+        <t>Tokens SHOULD be short-lived. An expiry of one hour or less is
+        RECOMMENDED for interactive delegation. A revocation list or status
+        cache SHOULD be usable offline, but a cached entry MUST have a
+        bounded freshness interval. A receiver MUST NOT use a stale negative
+        result to authorize an L3 or L4 action.</t>
+      </section>
+
+      <section anchor="revocation-execution">
+        <name>Execution-Time Check</name>
+        <t>A receiver MUST check revocation before executing an action. If the
+        receiver or the CA cannot check the status, the receiver MUST reject an
+        L3 or L4 action and SHOULD reject lower-risk actions that depend on the
+        token. A router's earlier check does not remove this obligation.</t>
+      </section>
+
+      <section anchor="revocation-audit">
+        <name>Audit and Notification</name>
+        <t>A successful revocation MUST be recorded in the audit log and MUST
+        be communicated to affected agents. Notification is advisory: a missed
+        notification does not extend the token's authority. The execution-time
+        check is the normative enforcement point.</t>
+      </section>
+    </section>
+
+    <section anchor="invariants">
+      <name>Authority Invariants</name>
+      <t>An implementation that claims conformance with this document MUST
+      preserve the following invariants:</t>
+      <table>
+        <name>Authority invariants</name>
+        <thead>
+          <tr>
+            <th>Identifier</th>
+            <th>Invariant</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>AI1</td>
+            <td>No ambient authority: an agent without a token cannot perform a
+            cross-application action.</td>
+          </tr>
+          <tr>
+            <td>AI2</td>
+            <td>Monotonic narrowing: a child token's authority is a subset of
+            its parent's authority.</td>
+          </tr>
+          <tr>
+            <td>AI3</td>
+            <td>Audience binding: a token cannot be used by an agent other than
+            its audience.</td>
+          </tr>
+          <tr>
+            <td>AI4</td>
+            <td>Task binding: a token cannot be reused for another task, except
+            for the delegation and handoff cases in <xref
+            target="task-binding"/>.</td>
+          </tr>
+          <tr>
+            <td>AI5</td>
+            <td>Revocation completeness: revoking a parent invalidates all
+            descendants.</td>
+          </tr>
+          <tr>
+            <td>AI6</td>
+            <td>No forwarding: an agent cannot pass its own credential to
+            another agent.</td>
+          </tr>
+          <tr>
+            <td>AI7</td>
+            <td>Consent prerequisite: an L3 or L4 action requires a valid
+            consent receipt before execution.</td>
+          </tr>
+          <tr>
+            <td>AI8</td>
+            <td>Audit prerequisite: an L3 or L4 action's audit record must be
+            writable before the side effect.</td>
+          </tr>
+          <tr>
+            <td>AI9</td>
+            <td>Bounded depth: delegation depth does not exceed
+            <tt>max_depth</tt>.</td>
+          </tr>
+          <tr>
+            <td>AI10</td>
+            <td>Budget monotonicity: a child task's budget does not exceed the
+            parent's remaining budget.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section anchor="risk-consent">
+      <name>Risk Classes and Consent Linkage</name>
+
+      <section anchor="risk-classes">
+        <name>Risk Classes</name>
+        <table>
+          <name>Risk classes</name>
+          <thead>
+            <tr>
+              <th>Class</th>
+              <th>Name</th>
+              <th>Example</th>
+              <th>Default consent</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>L0</td>
+              <td>Public read</td>
+              <td>Public weather or directory</td>
+              <td>Automatic</td>
+            </tr>
+            <tr>
+              <td>L1</td>
+              <td>Personal read</td>
+              <td>Calendar, contacts, notes</td>
+              <td>First use or task-level</td>
+            </tr>
+            <tr>
+              <td>L2</td>
+              <td>Local write</td>
+              <td>Create a local draft or update a to-do</td>
+              <td>Automatic with notification</td>
+            </tr>
+            <tr>
+              <td>L3</td>
+              <td>External side effect</td>
+              <td>Send a message, mail, or form</td>
+              <td>Per use, with batch or time limits</td>
+            </tr>
+            <tr>
+              <td>L4</td>
+              <td>High impact</td>
+              <td>Payment, deletion, public posting</td>
+              <td>Strong confirmation and re-authentication</td>
+            </tr>
+          </tbody>
+        </table>
+        <t>The risk class is declared by the capability descriptor. The PCS
+        computes the effective risk from the descriptor, the data labels, the
+        target, and the context. The PCS MAY raise the class but MUST NOT lower
+        it.</t>
+      </section>
+
+      <section anchor="consent-linkage">
+        <name>Consent Linkage</name>
+        <ul>
+          <li>An L3 or L4 token MUST carry a <tt>consent_receipt_id</tt>.</li>
+          <li>The receipt's <tt>actions</tt>, <tt>resources</tt>,
+          <tt>task_id</tt>, and <tt>audience</tt> MUST cover the token's
+          request. A mismatch MUST produce
+          <tt>POLICY_CONSENT_SCOPE_MISMATCH</tt>.</li>
+          <li>If the receipt expires or is revoked, the token MUST become
+          unusable, even if the token's own <tt>exp</tt> has not passed.</li>
+          <li>A batch or task-level consent MUST have an explicit task scope, a
+          time window, and an action set. It MUST NOT extend to another task by
+          implication.</li>
+        </ul>
+        <t>The receipt format, issuance ordering, and revocation rules are
+        defined in the companion consent receipt document.</t>
+      </section>
+    </section>
+
+    <section anchor="errors">
+      <name>Error Codes</name>
+      <t>An implementation reports failures with a structured error object that
+      contains at least <tt>code</tt>, <tt>message</tt>, and
+      <tt>retryable</tt>. The following codes are defined for token
+      processing:</t>
+      <table>
+        <name>Token error codes</name>
+        <thead>
+          <tr>
+            <th>Code</th>
+            <th>Meaning</th>
+            <th>Retryable</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><tt>AUTH_DENIED</tt></td>
+            <td>Peer authentication or signature verification failed.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>SCHEMA_INVALID</tt></td>
+            <td>The token does not match the required structure.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>CAPABILITY_AUDIENCE_MISMATCH</tt></td>
+            <td>The audience does not match the receiver.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>CAPABILITY_SUBJECT_MISMATCH</tt></td>
+            <td>The subject does not match the sender.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>CAPABILITY_TASK_MISMATCH</tt></td>
+            <td>The task does not match the request.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>CAPABILITY_ATTENUATION_INVALID</tt></td>
+            <td>A child token widens scope, extends time, exceeds depth, or
+            otherwise violates <xref target="attenuation"/>.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>CAPABILITY_REVOKED</tt></td>
+            <td>The token is revoked or expired.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>POLICY_DENIED</tt></td>
+            <td>Policy rejects the action.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>POLICY_CONSENT_REQUIRED</tt></td>
+            <td>An L3 or L4 action has no valid consent receipt.</td>
+            <td>After consent</td>
+          </tr>
+          <tr>
+            <td><tt>POLICY_CONSENT_EXPIRED</tt></td>
+            <td>The consent receipt expired or was revoked.</td>
+            <td>After consent</td>
+          </tr>
+          <tr>
+            <td><tt>POLICY_CONSENT_SCOPE_MISMATCH</tt></td>
+            <td>The receipt does not cover the request.</td>
+            <td>No</td>
+          </tr>
+          <tr>
+            <td><tt>TASK_BUDGET_EXCEEDED</tt></td>
+            <td>The budget for the task is exhausted.</td>
+            <td>No</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section anchor="security">
+      <name>Security Considerations</name>
+
+      <section anchor="confused-deputy">
+        <name>Confused Deputy</name>
+        <t>A low-privilege agent might try to induce a high-privilege agent to
+        perform an action. Audience and task binding prevent the low-privilege
+        agent from presenting a token issued for the high-privilege agent. The
+        prohibition on forwarding prevents the high-privilege agent from passing
+        its token to the low-privilege agent. Delegation requires a new,
+        narrower token and a new consent decision when the risk class requires
+        it.</t>
+      </section>
+
+      <section anchor="token-theft">
+        <name>Token Theft and Forwarding</name>
+        <t>A token is a bearer credential within its audience. An attacker that
+        steals a token and can impersonate the subject could use it. Short
+        expiry, audience binding, sender binding, and transport peer
+        authentication limit this risk. The token does not provide
+        confidentiality; a local transport must provide integrity and peer
+        authentication, and a deployment that treats local payloads as
+        untrusted must add encryption.</t>
+      </section>
+
+      <section anchor="replay">
+        <name>Replay</name>
+        <t>A replay attack reuses a valid token or request. Expiry, single-use
+        nonces, <tt>max_uses</tt>, and task binding limit replay. A receiver
+        that enforces <tt>max_uses</tt> or a nonce MUST update the use counter
+        atomically with the decision to execute, or earlier. Checking a counter
+        and executing in separate, unsynchronized steps allows a race.</t>
+      </section>
+
+      <section anchor="revocation-latency">
+        <name>Revocation Latency</name>
+        <t>Revocation is not instantaneous across every component. A token may
+        be accepted between the revocation decision and the next status check.
+        Short token lifetimes and execution-time checks bound this window. An L3
+        or L4 receiver that cannot check status MUST deny the action.</t>
+      </section>
+
+      <section anchor="canonicalization-security">
+        <name>Canonicalization</name>
+        <t>Signature verification is only as strong as the parser. A parser that
+        accepts duplicate member names, non-integer numbers, or multiple
+        encodings of the same string can verify a different document from the
+        one the issuer signed. Implementations MUST reject duplicate names and
+        non-integer numbers, and MUST use the canonicalization in <xref
+        target="serialization"/>.</t>
+      </section>
+
+      <section anchor="transport-assumptions">
+        <name>Local Transport Assumptions</name>
+        <t>This document assumes a local transport that authenticates both
+        peers and preserves message integrity. A loopback TCP connection
+        without authentication is not sufficient for L2 or higher actions. The
+        transport binding must state whether it is stream-oriented or
+        message-oriented and must preserve the sender identity that the token
+        binding checks rely on.</t>
+      </section>
+
+      <section anchor="key-compromise">
+        <name>Issuer Key Compromise</name>
+        <t>If an issuer key is compromised, an attacker can mint tokens until the
+        key is revoked. A verifier MUST resolve <tt>kid</tt> through a trusted
+        key registry and MUST reject a revoked or expired key. Key rotation
+        requires a new <tt>kid</tt>; reusing a <tt>kid</tt> for different key
+        material is prohibited.</t>
+      </section>
+    </section>
+
+    <section anchor="privacy">
+      <name>Privacy Considerations</name>
+      <t>Capability tokens contain user, agent, and task identifiers. They
+      should carry the minimum identity and resource information needed for
+      authorization. Resource identifiers should be opaque handles rather than
+      file paths or personal data. Deployments should define retention for
+      tokens and audit records, and should avoid using task identifiers as a
+      stable cross-application tracking key.</t>
+      <t>A token does not reveal the content of a resource, but the pattern of
+      issuance, use, and revocation can reveal a user's activity. Audit access
+      controls and retention limits are therefore part of the privacy
+      posture.</t>
+    </section>
+
+    <section anchor="iana">
+      <name>IANA Considerations</name>
+      <t>This document has no IANA actions.</t>
+    </section>
+
+  </middle>
+
+  <back>
+    <references>
+      <name>Normative References</name>
+      <reference anchor="RFC2119" target="https://www.rfc-editor.org/info/rfc2119">
+        <front>
+          <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials="S." surname="Bradner" fullname="Scott Bradner">
+            <organization/>
+          </author>
+          <date year="1997" month="March"/>
+        </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="2119"/>
+      </reference>
+      <reference anchor="RFC8174" target="https://www.rfc-editor.org/info/rfc8174">
+        <front>
+          <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+          <author initials="B." surname="Leiba" fullname="Barry Leiba">
+            <organization/>
+          </author>
+          <date year="2017" month="May"/>
+        </front>
+          <seriesInfo name="BCP" value="14"/>
+          <seriesInfo name="RFC" value="8174"/>
+      </reference>
+      <reference anchor="RFC3339" target="https://www.rfc-editor.org/info/rfc3339">
+        <front>
+          <title>Date and Time on the Internet: Timestamps</title>
+          <author initials="G." surname="Klyne" fullname="Graham Klyne">
+            <organization/>
+          </author>
+          <author initials="C." surname="Newman" fullname="Chris Newman">
+            <organization/>
+          </author>
+          <date year="2002" month="July"/>
+        </front>
+          <seriesInfo name="RFC" value="3339"/>
+      </reference>
+      <reference anchor="RFC4648" target="https://www.rfc-editor.org/info/rfc4648">
+        <front>
+          <title>The Base16, Base32, and Base64 Data Encodings</title>
+          <author initials="S." surname="Josefsson" fullname="Simon Josefsson">
+            <organization/>
+          </author>
+          <date year="2006" month="October"/>
+        </front>
+          <seriesInfo name="RFC" value="4648"/>
+      </reference>
+      <reference anchor="RFC8032" target="https://www.rfc-editor.org/info/rfc8032">
+        <front>
+          <title>Edwards-Curve Digital Signature Algorithm (EdDSA)</title>
+          <author initials="S." surname="Josefsson" fullname="Simon Josefsson">
+            <organization/>
+          </author>
+          <author initials="I." surname="Liusvaara" fullname="Ilari Liusvaara">
+            <organization/>
+          </author>
+          <date year="2017" month="January"/>
+        </front>
+          <seriesInfo name="RFC" value="8032"/>
+      </reference>
+      <reference anchor="RFC8259" target="https://www.rfc-editor.org/info/rfc8259">
+        <front>
+          <title>The JavaScript Object Notation (JSON) Data Interchange Format</title>
+          <author initials="T." surname="Bray" fullname="Tim Bray">
+            <organization/>
+          </author>
+          <date year="2017" month="December"/>
+        </front>
+          <seriesInfo name="STD" value="90"/>
+          <seriesInfo name="RFC" value="8259"/>
+      </reference>
+      <reference anchor="RFC8785" target="https://www.rfc-editor.org/info/rfc8785">
+        <front>
+          <title>JSON Canonicalization Scheme (JCS)</title>
+          <author initials="A." surname="Rundgren" fullname="Anders Rundgren">
+            <organization/>
+          </author>
+          <author initials="B." surname="Jordan" fullname="Bret Jordan">
+            <organization/>
+          </author>
+          <author initials="S." surname="Erdtman" fullname="Samuel Erdtman">
+            <organization/>
+          </author>
+          <date year="2020" month="June"/>
+        </front>
+          <seriesInfo name="RFC" value="8785"/>
+      </reference>
+    </references>
+
+    <references>
+      <name>Informative References</name>
+      <reference anchor="RFC8693" target="https://www.rfc-editor.org/info/rfc8693">
+        <front>
+          <title>OAuth 2.0 Token Exchange</title>
+          <author initials="M." surname="Jones" fullname="Michael B. Jones">
+            <organization/>
+          </author>
+          <author initials="A." surname="Nadalin" fullname="Anthony Nadalin">
+            <organization/>
+          </author>
+          <author initials="B." surname="Campbell" fullname="Brian Campbell">
+            <organization/>
+          </author>
+          <author initials="J." surname="Bradley" fullname="John Bradley">
+            <organization/>
+          </author>
+          <author initials="C." surname="Mortimore" fullname="Chuck Mortimore">
+            <organization/>
+          </author>
+          <date year="2020" month="January"/>
+        </front>
+          <seriesInfo name="RFC" value="8693"/>
+      </reference>
+      <reference anchor="RFC9396" target="https://www.rfc-editor.org/info/rfc9396">
+        <front>
+          <title>OAuth 2.0 Rich Authorization Requests</title>
+          <author initials="T." surname="Lodderstedt" fullname="Torsten Lodderstedt">
+            <organization/>
+          </author>
+          <author initials="J." surname="Richer" fullname="Justin Richer">
+            <organization/>
+          </author>
+          <author initials="M." surname="B. Jones" fullname="Michael B. Jones">
+            <organization/>
+          </author>
+          <date year="2023" month="August"/>
+        </front>
+          <seriesInfo name="RFC" value="9396"/>
+      </reference>
+    </references>
+  </back>
+</rfc>

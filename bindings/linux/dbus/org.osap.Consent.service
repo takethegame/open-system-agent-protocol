@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.osap.Consent
+Exec=/usr/libexec/osap-consent
+SystemdService=osap-consent.service

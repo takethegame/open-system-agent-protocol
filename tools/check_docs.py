@@ -35,6 +35,7 @@ PAIRS = [
     ("docs/conformance.md", "docs/conformance.en.md"),
     ("docs/design-draft.md", "docs/design-draft.en.md"),
     ("docs/prior-art.md", "docs/prior-art.en.md"),
+    ("bindings/linux/profile.md", "bindings/linux/profile.en.md"),
 ]
 
 # Personal identifiers and machine-specific paths that must never ship.

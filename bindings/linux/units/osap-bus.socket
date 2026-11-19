@@ -1,0 +1,12 @@
+[Unit]
+Description=OSAP user bus socket
+Documentation=https://github.com/takethegame/open-system-agent-protocol
+
+[Socket]
+ListenStream=%t/osap/bus.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

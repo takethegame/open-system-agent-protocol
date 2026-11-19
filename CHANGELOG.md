@@ -11,6 +11,13 @@ Entries are written in English to match commit messages; the Chinese text in
 
 ### Added
 
+- `drafts/`: two IETF xml2rfc v3 individual-draft skeletons, `draft-osap-capability-tokens-00` (token format, attenuation, binding, revocation, consent linkage) and `draft-osap-consent-receipts-00` (consent request, receipt, reservation ordering, audit, informative ISO/IEC 27560 mapping).
+- `drafts/README.md`: section-by-section mapping back to `docs/standard.md`, build commands, publication prerequisites, and known boundaries.
+- `tools/check_drafts.py` and `requirements-drafts.txt`: static checks for XML, v3 front matter, anchors/xrefs, references, JSON examples, placeholders, local references, and ASCII; `--compile` runs `xml2rfc` and emits text/HTML.
+- `bindings/linux/`: the Linux binding profile (Chinese and English) with D-Bus names, object paths, method signatures, peer authentication, error mapping, `xdg-desktop-portal` mapping, `systemd --user` units, and three sequence diagrams; example socket/service units and D-Bus activation files.
+- `decisions/0001-*.md` through `0014-*.md`: ADRs for the fourteen open issues in `docs/standard.md` Section 15, each with a provisional decision, consequences, alternatives, and a re-review trigger.
+- `GOVERNANCE.md` Section 9.1 (and the English parallel): the actual liaison status as of 2026-11-19, explicitly distinguishing individual drafts from IETF adoption.
+- `.github/workflows/ci.yml`: a `drafts` job that installs `requirements-drafts.txt` and runs `tools/check_drafts.py --compile`.
 - `conformance/`: machine-readable cases for C0 (7), C1 (6), C2 (6), C3 (12), C4 (11), C5 (11), C6 (8), and C7 (7), plus `case.schema.json`, `suite.schema.json`, `report.schema.json`, and `README.md`.
 - `examples/context-handle.json`, `examples/blackboard.json`, and `examples/audit-chain.json`: context-fabric and audit-chain fixtures.
 - `impl/`: reference implementation for M2.1 — envelope validation, the error model, stream and message framing, handshake, idempotency, and monotonic-clock deadlines.
@@ -68,6 +75,8 @@ Entries are written in English to match commit messages; the Chinese text in
 - `UnixStreamServer.serve_forever(concurrency=N)` serves up to N connections in parallel through a bounded thread pool; an idle peer no longer blocks another peer's handshake, same-Agent connections share in-flight and queue limits through the server controller, and `close()` shuts down sessions so blocked workers exit.
 - `TaskBoard` accepts a `JsonStore` and writes one atomic `task.tasks` section after `add`, `transition`, `cancel`, `delegate`, or an accepted `handoff`; a no-op transition and a rejected handoff do not write, cancellation flushes once for the whole subtree, and the audit list stays in memory.
 - CI now runs `python3 demo/run_demo.py` after the unit tests and the conformance suite.
+- `tools/check_docs.py` now also checks structural parity for the Linux binding profile (`bindings/linux/profile.md` and `profile.en.md`).
+- `docs/roadmap.md` marks the M4 packaging tasks complete and records that the drafts are local individual submissions, not IETF submissions; `docs/progress.md` adds Section 17 with the deliverables, evidence, and boundaries.
 
 ### Planned
 

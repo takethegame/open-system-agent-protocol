@@ -56,3 +56,21 @@ jobs:
 
       - name: Run the three-agent demo
         run: python demo/run_demo.py
+
+  drafts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install draft tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-drafts.txt
+
+      - name: Check and compile IETF drafts
+        run: python tools/check_drafts.py --compile

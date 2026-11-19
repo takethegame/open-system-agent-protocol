@@ -1,0 +1,4 @@
+# Tooling for the IETF xml2rfc v3 drafts in drafts/.
+# Kept separate so the reference implementation and schema checks do not
+# install a document toolchain on every CI job.
+xml2rfc>=3.23,<4

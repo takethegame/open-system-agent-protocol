@@ -118,6 +118,21 @@ Recommended liaison directions:
 
 OSAP positions itself as a **local binding/federation layer** and does not replace the protocols above.
 
+### 9.1 Liaison Status (2026-11-19)
+
+The table records **actions that have happened**, not intentions:
+
+| Organization/project | Status | Evidence/next step |
+|---|---|---|
+| IETF `agentproto` | No formal contact; two individual-draft skeletons are prepared | Submit to the WG mailing list after contributor consent and IPR disclosure |
+| IETF OAuth / WIMSE | No formal contact | Observe the WIMSE identity profile first; do not define a parallel PKI |
+| AAIF / Linux Foundation | No formal contact | Build external interoperability before discussing a home |
+| AGNTCY | No formal contact | Evaluate directory and transport mapping |
+| OS vendors | No formal contact | Collect feedback through public issues and documents; do not promise private endorsement |
+| GNOME/KDE/freedesktop | No formal contact | The Linux binding is on disk; open an issue about portal mapping |
+
+**Note:** an individual draft is not IETF adoption; submitting one requires contributor consent under Section 10.4.
+
 ---
 
 ## 10. License and Contribution

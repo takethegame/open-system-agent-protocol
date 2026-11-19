@@ -26,7 +26,7 @@
 | 上下文事件持久化（M4 前置） | ✅ 完成 | `ContextFabric(store=...)` 把 `context.resolve` 写入 `context.events`；重开逐条校验；`limit` 保留最新 N 条；582 tests | 2026-11-18 |
 | 审计保留与归档（M4 前置） | ✅ 完成 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 与归档原子双写；锚点校验与 `history()`；602 tests | 2026-11-18 |
 | 任务与副作用恢复（M4 前置） | ✅ 完成 | `TaskBoard.effects` 持久化 intent/outcome；`recover()` 原子失败/重调度非终态任务并把 intent-only effect 标为 unknown；重放闸门与对账；639 tests | 2026-11-19 |
-| M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
+| M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
 仓库规模：
@@ -38,11 +38,11 @@
 | 示例 | 17 |
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
-| Markdown 文件 | 23 |
+| Markdown 文件 | 42 |
 | 参考实现 | 23 个模块 + 适配器（7004 行）+ 639 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
-| 中英平行文档 | 8 对 |
+| 中英平行文档 | 9 对 |
 | CI 工作流 | 1（Python 3.11 / 3.12） |
 
 ---
@@ -1175,7 +1175,66 @@ python3 demo/run_demo.py
 
 ---
 
-## 17. 待确认的规范问题
+## 17. M4 标准打包（本地完成）
+
+### 17.1 交付物
+
+| 文件/目录 | 作用 |
+|---|---|
+| `drafts/draft-osap-capability-tokens-00.xml` | Draft A：能力 token、衰减、绑定、撤销、同意前置；xml2rfc v3 |
+| `drafts/draft-osap-consent-receipts-00.xml` | Draft B：同意请求、回执、预约顺序、审计、ISO/IEC 27560 信息性映射；xml2rfc v3 |
+| `drafts/README.md` | 两个 draft 的逐节来源映射、构建命令、发布前置条件与边界 |
+| `tools/check_drafts.py` | XML 良构、v3 根元素、front matter、anchor/xref、引用、JSON 代码块、占位符与本地引用检查；`--compile` 调用 `xml2rfc` |
+| `requirements-drafts.txt` | 独立的 `xml2rfc` 工具链，避免所有 CI job 都安装文档依赖 |
+| `bindings/linux/profile.md` / `profile.en.md` | Linux binding：D-Bus 名称/对象路径/方法签名、对端认证、错误映射、portal 映射、`systemd --user`、3 个序列图 |
+| `bindings/linux/units/` | `osap-bus.socket` 与 6 个 `Type=dbus` 用户服务示例，含 hardening 与激活选择说明 |
+| `bindings/linux/dbus/` | 6 个 `[D-BUS Service]` 激活文件，和 socket activation 二选一 |
+| `decisions/0001-*.md` … `0014-*.md` | `standard.md` §15 的 14 条 ADR，每条含暂定结论、后果、备选方案与重审触发条件 |
+| `decisions/README.md` | ADR 索引、状态约定与“ADR 不覆盖规范”的边界 |
+| `GOVERNANCE.md` §9.1 / `.en.md` | 记录真实联络状态：均未正式联络；individual draft ≠ IETF 采用 |
+| `.github/workflows/ci.yml` | 新增 `drafts` job：安装 `requirements-drafts.txt` 并执行 `check_drafts.py --compile` |
+
+### 17.2 语义与边界
+
+- **两个 draft 是 individual submission 骨架**，不是 WG 采用稿，也没有提交到 Datatracker。文档内不引用 `standard.md`、仓库路径或未发布文档；外部读者只看单个 draft 即可理解其范围。
+- **Draft A** 只写 token 格式、衰减、绑定、撤销与同意前置，不写总线、发现、任务状态机或传输。它与 §5 的 10 条衰减规则、AI1–AI10、§5.7 风险等级与 §5.8 回执覆盖一一对应。
+- **Draft B** 只写同意请求、回执、`cap_id` 预约顺序、审计与 27560 映射，不写 UI 或传输。27560 映射是**信息性**的，不声称 ISO 一致性；回执校验顺序写成实现建议，不新增协议 MUST。
+- **Linux binding** 不改变协议语义：D-Bus 是传输与服务生命周期绑定，portal 结果是受 TTL/标签约束的句柄，不是环境权限；所有 OSAP 能力、同意、撤销与审计规则仍然适用。
+- **14 条 ADR** 都是 `Provisional`；它们解释取舍并给出重审触发条件，不覆盖 `standard.md`。任何语义变更仍须走 `GOVERNANCE.md` §3。
+- **不新增一致性编号**：draft 与 Linux profile 都不新增 C 用例；`docs/conformance.md` 仍是唯一来源。Linux profile 第 8 节给出的是实现检查清单。
+
+### 17.3 验证证据
+
+2026-11-19，本地与 CI：
+
+```
+python3 tools/check_drafts.py
+→ OK: 36 checks passed across 2 drafts
+
+python3 tools/check_drafts.py --compile
+→ OK: 36 checks passed across 2 drafts and compiled
+→ build/drafts/draft-osap-capability-tokens-00.{txt,html}
+→ build/drafts/draft-osap-consent-receipts-00.{txt,html}
+
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+```
+
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §20 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+
+### 17.4 已知边界
+
+1. **未提交 IETF**：`draft-osap-*` 是本地文档名；提交前必须取得贡献者同意、完成 BCP 79 IPR 披露、替换 `OSAP Editors` 占位作者，并确认 `agentproto`/OAuth WG 的采用意向。
+2. **`ipr="trust200902"` 只是模板值**：它不代表已经完成 IETF Trust 版权同意或专利披露。
+3. **没有外部评审**：两个 draft 未经 WG 或独立安全评审；Linux binding 也未在真实 GNOME/KDE/Flatpak 环境中跑过端到端测试。
+4. **D-Bus 集成测试不在 CI**：本环境是 macOS；`units/` 与 `dbus/` 是示例，CI 只做静态/编译检查。Linux 集成测试应在 `dbus-run-session` 下单独运行。
+5. **27560 映射未做符合性测试**：它只是概念映射，不是 ISO 认证，也没有覆盖 notice/controller/jurisdiction 等完整记录字段。
+6. **ADR 是暂定的**：第 3、6、11、14 条尤其依赖 0.2 或平台进展；在外部实现出现前不应视为冻结。
+7. **来源映射是人工维护的**：`drafts/README.md` 的逐节表格不会被 CI 自动比对；`check_drafts.py` 只保证 draft 自包含、引用可解析与可编译。
+
+---
+
+## 18. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1191,18 +1250,19 @@ python3 demo/run_demo.py
 
 ---
 
-## 18. 下一步（按顺序）
+## 19. 下一步（按顺序）
 
 1. 为上下文句柄、黑板与对象元数据补存储层，并为审计账本补按用户分区与跨 trace 的全局顺序；
 2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
 5. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
-6. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
+6. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
+7. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 19. 变更记录
+## 20. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1235,3 +1295,4 @@ python3 demo/run_demo.py
 | 2026-11-18 | **上下文事件持久化**（`7274a27`）：`ContextFabric(store=...)` 写 `context.events`；重开校验与 `limit` 保留；新增 19 条测试，累计 582 |
 | 2026-11-18 | **审计保留与归档**（`1a8394d`）：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；锚点校验与 `history()`；新增 20 条测试，累计 602 |
 | 2026-11-19 | **任务与副作用恢复**（`c7e990c`）：`TaskBoard` 持久化 `task.effects`；`recover()` 失败/重调度非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；新增 37 条测试，累计 639 |
+| 2026-11-19 | **M4 本地打包**：两个 xml2rfc v3 individual draft（能力 token、同意回执）、逐节来源映射、`tools/check_drafts.py` + `requirements-drafts.txt`、Linux binding（D-Bus/portal/systemd/3 序列图）、14 条 ADR、`GOVERNANCE.md` §9.1 联络状态；CI 新增 `drafts` job；未提交 IETF |

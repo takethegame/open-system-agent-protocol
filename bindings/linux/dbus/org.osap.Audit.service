@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.osap.Audit
+Exec=/usr/libexec/osap-audit
+SystemdService=osap-audit.service

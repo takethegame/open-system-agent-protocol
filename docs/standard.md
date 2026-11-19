@@ -1695,6 +1695,8 @@ OSAP 不试图检测所有恶意文本，而是做三件事：
 13. Context Fabric 与 OS 句柄/portals 的标准化映射。
 14. 多实例 Bus 的 leader election 与审计链分区。
 
+> 这 14 条问题的暂定结论、备选方案与重审触发条件见 [`decisions/README.md`](../decisions/README.md)。ADR 是非规范性的；与本文冲突时以本文为准。
+
 ---
 
 ## Appendix A: Examples

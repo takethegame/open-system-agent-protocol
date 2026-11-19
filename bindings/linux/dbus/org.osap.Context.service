@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.osap.Context
+Exec=/usr/libexec/osap-context
+SystemdService=osap-context.service

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.osap.Registry
+Exec=/usr/libexec/osap-registry
+SystemdService=osap-registry.service

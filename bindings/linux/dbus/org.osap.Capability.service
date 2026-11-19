@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.osap.Capability
+Exec=/usr/libexec/osap-capability
+SystemdService=osap-capability.service

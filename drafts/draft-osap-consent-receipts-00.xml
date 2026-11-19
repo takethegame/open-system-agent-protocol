@@ -1,0 +1,1172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE rfc [
+  <!ENTITY nbsp "&#160;">
+]>
+<rfc xmlns:xi="http://www.w3.org/2001/XInclude"
+     ipr="trust200902"
+     category="info"
+     docName="draft-osap-consent-receipts-00"
+     submissionType="IETF"
+     consensus="false"
+     tocInclude="true"
+     symRefs="true"
+     sortRefs="true"
+     version="3">
+
+  <front>
+    <title abbrev="OSAP Consent Receipts">Consent Receipt Binding for Task-Scoped Authorization</title>
+    <seriesInfo name="Internet-Draft" value="draft-osap-consent-receipts-00"/>
+    <author fullname="OSAP Editors" initials="O." surname="Editors">
+      <organization>OSAP Project</organization>
+      <address>
+        <email>editors@osap.example</email>
+      </address>
+    </author>
+    <date year="2026" month="November" day="19"/>
+    <area>Applications</area>
+    <workgroup>Individual Submission</workgroup>
+    <keyword>consent</keyword>
+    <keyword>authorization</keyword>
+    <keyword>agent</keyword>
+    <keyword>privacy</keyword>
+    <abstract>
+      <t>This document defines a signed consent receipt for task-scoped
+      authorization between local agents. A receipt records a user's decision
+      to allow or deny a described action, binds that decision to a task, an
+      agent, an audience, an action set, and a resource set, and can be verified
+      offline. The document also defines the consent request, the reservation
+      ordering that avoids a circular dependency between a receipt and a
+      capability token, the audit events that accompany consent and side
+      effects, and an informative mapping to ISO/IEC 27560. It does not define
+      a user interface, a transport, or a capability token format.</t>
+    </abstract>
+  </front>
+
+  <middle>
+
+    <section anchor="intro">
+      <name>Introduction</name>
+      <t>Local agents can perform actions that leave the device, change shared
+      state, or are difficult to reverse. A user needs a way to approve such an
+      action for a specific task, with a clear description of who is acting,
+      what will happen, which data will be used, and how long the approval
+      lasts. The approval must be verifiable by an agent that did not observe
+      the user interface, and it must not silently become a general permission
+      for the agent.</t>
+
+      <t>This document defines a consent receipt for that purpose. A Policy and
+      Consent Service (PCS) constructs a consent request from a capability
+      descriptor and from policy. The user, or an operating-system consent
+      surface acting for the user, grants or denies the request. A grant
+      produces a signed receipt. The receipt is bound to the task, the agent,
+      the audience, the requested actions and resources, the risk class, and a
+      validity window. A Capability Authority (CA) verifies the receipt before
+      issuing the capability token that the agent will present to its
+      audience.</t>
+
+      <t>The receipt is not a general-purpose access token. It is an
+      authorization artifact for one task-scoped decision. It can be audited,
+      exported, and redacted, but it cannot be reused for another task or
+      another audience.</t>
+
+      <section anchor="scope">
+        <name>Scope</name>
+        <t>This document defines:</t>
+        <ul>
+          <li>the structure of a consent request and its intent preview;</li>
+          <li>the structure of a consent receipt;</li>
+          <li>the signature and canonicalization rules for a receipt;</li>
+          <li>the ordering that lets a receipt reference a capability
+          identifier before the capability is active;</li>
+          <li>the binding rules between a receipt and a capability token;</li>
+          <li>the audit events for consent, effects, and revocation; and</li>
+          <li>an informative mapping to ISO/IEC 27560.</li>
+        </ul>
+        <t>This document does not define a user-interface layout, a transport
+        binding, a capability token format, a discovery protocol, or an audit
+        storage engine. The capability token format is defined in a companion
+        document.</t>
+      </section>
+
+      <section anchor="relation">
+        <name>Relation to Other Work</name>
+        <t>ISO/IEC 27560 specifies a consent record information structure. It
+        is useful for interoperability with privacy-management systems, but it
+        is not an authorization protocol for local agents. This document
+        defines a task-scoped authorization receipt and provides an informative
+        mapping to the ISO structure in <xref target="iso-mapping"/>.</t>
+        <t>The Kantara Initiative's consent receipt work <xref target="KANTARA"/> provides a
+        human-readable and machine-readable record of a consent decision. This
+        document shares the goal of a verifiable record but adds the binding to
+        a local task, audience, capability identifier, and audit chain that
+        multi-agent execution requires.</t>
+        <t>OAuth 2.0 Rich Authorization Requests <xref target="RFC9396"/>
+        describes structured authorization details. A consent receipt can be
+        carried as an authorization detail in an OAuth deployment, but this
+        document does not define an OAuth grant type.</t>
+      </section>
+
+      <section anchor="conventions">
+        <name>Conventions and Terminology</name>
+        <t>The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+        "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+        "OPTIONAL" in this document are to be interpreted as described in BCP
+        14 <xref target="RFC2119"/> <xref target="RFC8174"/> when, and only
+        when, they appear in all capitals, as shown here.</t>
+        <t>This document uses the following terms:</t>
+        <dl>
+          <dt>Agent:</dt>
+          <dd>An addressable software component that requests or performs an
+          action. An agent is identified by an agent URI.</dd>
+          <dt>Audience:</dt>
+          <dd>The agent that will perform the approved action.</dd>
+          <dt>Capability Authority (CA):</dt>
+          <dd>The component that issues and revokes capability tokens. It
+          verifies a consent receipt before activating a token that needs
+          one.</dd>
+          <dt>Policy and Consent Service (PCS):</dt>
+          <dd>The component that evaluates policy, computes the effective risk
+          class, constructs consent requests, and records the user's
+          decision.</dd>
+          <dt>Consent request:</dt>
+          <dd>A structured description of the action for which consent is
+          sought.</dd>
+          <dt>Consent receipt:</dt>
+          <dd>A signed record of a grant or denial for one consent
+          request.</dd>
+          <dt>Reservation:</dt>
+          <dd>An allocated but inactive capability identifier. A receipt can
+          reference a reservation before the capability is issued.</dd>
+          <dt>Task:</dt>
+          <dd>A unit of work with an identifier, a root, and an optional parent.
+          A receipt is bound to exactly one task.</dd>
+          <dt>Risk class:</dt>
+          <dd>One of L0 through L4. L3 and L4 actions require a receipt.</dd>
+        </dl>
+      </section>
+    </section>
+
+    <section anchor="model">
+      <name>Consent Model</name>
+
+      <section anchor="risk-classes">
+        <name>Risk Classes</name>
+        <table>
+          <name>Risk classes and default consent</name>
+          <thead>
+            <tr>
+              <th>Class</th>
+              <th>Name</th>
+              <th>Example</th>
+              <th>Default consent</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>L0</td>
+              <td>Public read</td>
+              <td>Public weather or directory</td>
+              <td>Automatic</td>
+            </tr>
+            <tr>
+              <td>L1</td>
+              <td>Personal read</td>
+              <td>Calendar, contacts, notes</td>
+              <td>First use or task-level</td>
+            </tr>
+            <tr>
+              <td>L2</td>
+              <td>Local write</td>
+              <td>Create a local draft</td>
+              <td>Automatic with notification</td>
+            </tr>
+            <tr>
+              <td>L3</td>
+              <td>External side effect</td>
+              <td>Send a message or submit a form</td>
+              <td>Per use, with batch or time limits</td>
+            </tr>
+            <tr>
+              <td>L4</td>
+              <td>High impact</td>
+              <td>Payment, deletion, public posting</td>
+              <td>Strong confirmation and re-authentication</td>
+            </tr>
+          </tbody>
+        </table>
+        <t>The capability descriptor declares a risk class. The PCS computes
+        the effective class from the descriptor, the data labels, the target,
+        and the context. The PCS MAY raise the class but MUST NOT lower it. A
+        consent request MUST carry the effective class that the PCS used.</t>
+      </section>
+
+      <section anchor="task-scope">
+        <name>Task Scope</name>
+        <t>Every receipt is bound to one task identifier. A task-level grant may
+        cover multiple uses within that task, but it MUST NOT extend to a
+        sibling task, a child task, or a later task by implication. A child
+        task that needs an L3 or L4 action needs a receipt whose
+        <tt>task_id</tt> is the child task, or a receipt whose scope explicitly
+        covers the child task and whose audience matches the child's
+        audience.</t>
+        <t>A batch grant MUST state its action set, resource set, task scope,
+        and time window. A user interface that offers "allow for this task"
+        MUST show the resulting scope before the decision is recorded.</t>
+      </section>
+
+      <section anchor="consent-fatigue">
+        <name>Consent Fatigue</name>
+        <t>Asking for every low-risk action causes users to approve without
+        reading. This document therefore separates the default treatment by
+        risk class, as shown in <xref target="risk-classes"/>. L3 actions may
+        use a bounded task-level grant, and L4 actions require a strong
+        confirmation. A deployment SHOULD measure how often users deny or
+        revoke grants; a high denial rate is evidence that the request text or
+        the scope is not useful.</t>
+      </section>
+    </section>
+
+    <section anchor="request">
+      <name>Consent Request</name>
+      <t>A consent request is a message from the PCS to the user or to the
+      operating-system consent surface. It describes one decision. The request
+      is not itself an authorization; only a grant receipt is.</t>
+
+      <section anchor="request-object">
+        <name>Request Object</name>
+        <table>
+          <name>Consent request members</name>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Presence</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><tt>osap</tt></td>
+              <td>MUST</td>
+              <td>Protocol version. The value is <tt>0.1</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>type</tt></td>
+              <td>MUST</td>
+              <td>The string <tt>consent.request</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>id</tt></td>
+              <td>MUST</td>
+              <td>A unique message identifier.</td>
+            </tr>
+            <tr>
+              <td><tt>from</tt></td>
+              <td>MUST</td>
+              <td>The PCS agent URI.</td>
+            </tr>
+            <tr>
+              <td><tt>to</tt></td>
+              <td>MUST</td>
+              <td>The user principal URI.</td>
+            </tr>
+            <tr>
+              <td><tt>body.schema</tt></td>
+              <td>MUST</td>
+              <td>The value <tt>osap.consent.request/v1</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.request_id</tt></td>
+              <td>MUST</td>
+              <td>An opaque identifier for this request. It is distinct from
+              the message identifier and is used by the decision.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.task_id</tt></td>
+              <td>MUST</td>
+              <td>The task to which the decision will be bound.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.agent</tt></td>
+              <td>MUST</td>
+              <td>The agent that will exercise the resulting capability.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.audience</tt></td>
+              <td>MUST</td>
+              <td>The agent that will perform the action.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.actions</tt></td>
+              <td>MUST</td>
+              <td>The action set for which consent is sought.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.resources</tt></td>
+              <td>MUST</td>
+              <td>The resource set for which consent is sought.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.risk</tt></td>
+              <td>MUST</td>
+              <td>The effective risk class computed by the PCS.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.summary</tt></td>
+              <td>MUST</td>
+              <td>A short human-readable description of the action.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.intent_preview</tt></td>
+              <td>MUST</td>
+              <td>The structured preview described in <xref
+              target="intent-preview"/>.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.options</tt></td>
+              <td>MUST</td>
+              <td>The offered decisions. This document defines
+              <tt>allow_once</tt>, <tt>allow_task</tt>, and <tt>deny</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>body.data.expires_at</tt></td>
+              <td>SHOULD</td>
+              <td>An RFC 3339 <xref target="RFC3339"/> timestamp after which the
+              request is no longer actionable.</td>
+            </tr>
+            <tr>
+              <td><tt>ts</tt></td>
+              <td>MUST</td>
+              <td>The request timestamp in RFC 3339 format <xref target="RFC3339"/>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="intent-preview">
+        <name>Intent Preview</name>
+        <t>The intent preview makes the decision concrete. It contains:</t>
+        <dl>
+          <dt><tt>actor</tt>:</dt>
+          <dd>A human-readable name of the agent that will act.</dd>
+          <dt><tt>what</tt>:</dt>
+          <dd>A one-sentence description of the action.</dd>
+          <dt><tt>data</tt>:</dt>
+          <dd>An array of data categories or opaque references that will be
+          used. It SHOULD NOT contain raw personal data.</dd>
+          <dt><tt>cost</tt>:</dt>
+          <dd>An object with optional <tt>money</tt> and
+          <tt>external_calls</tt> members.</dd>
+          <dt><tt>ttl</tt>:</dt>
+          <dd>An ISO 8601 duration describing the proposed validity.</dd>
+          <dt><tt>irreversible</tt>:</dt>
+          <dd>A boolean indicating whether the action cannot be undone.</dd>
+        </dl>
+        <t>The PCS MUST derive the preview from the capability descriptor and
+        from policy, not only from text supplied by the requesting agent. If the
+        agent supplies a summary, the PCS MUST treat it as untrusted input.</t>
+      </section>
+
+      <section anchor="options">
+        <name>Options</name>
+        <t>The <tt>options</tt> array tells the consent surface which decisions
+        it may return:</t>
+        <ul>
+          <li><tt>allow_once</tt> grants a single use. The resulting receipt
+          MUST have <tt>max_uses</tt> equal to one.</li>
+          <li><tt>allow_task</tt> grants a bounded number of uses within the
+          task. The receipt MUST carry a positive <tt>max_uses</tt> and an
+          expiry.</li>
+          <li><tt>deny</tt> records a refusal. A denial is terminal for the
+          request.</li>
+        </ul>
+        <t>A consent surface MUST NOT return an option that the request did not
+        offer.</t>
+      </section>
+
+      <section anchor="request-example">
+        <name>Example Request</name>
+        <sourcecode type="json"><![CDATA[
+{
+  "osap": "0.1",
+  "type": "consent.request",
+  "id": "msg_03",
+  "from": "agent://system/policy#0",
+  "to": { "user": "user://local/example-user" },
+  "body": {
+    "schema": "osap.consent.request/v1",
+    "data": {
+      "request_id": "creq_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+      "task_id": "task_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+      "agent": "agent://com.example.orchestrator/main#1a2b",
+      "audience": "agent://com.example.messaging/agent#4d",
+      "actions": ["messaging.send"],
+      "resources": ["contact://directory/example-contact"],
+      "risk": "L3",
+      "summary": "Send one meeting summary message",
+      "intent_preview": {
+        "actor": "Orchestrator Agent",
+        "what": "Send 1 message",
+        "data": [
+          "meeting summary (reference)",
+          "contact: example contact"
+        ],
+        "cost": { "money": 0, "external_calls": 1 },
+        "ttl": "PT10M",
+        "irreversible": false
+      },
+      "options": ["allow_once", "allow_task", "deny"],
+      "expires_at": "2026-11-10T10:24:45Z"
+    }
+  },
+  "ts": "2026-11-10T10:14:45Z"
+}
+        ]]></sourcecode>
+      </section>
+    </section>
+
+    <section anchor="decision">
+      <name>Decision and Issuance Ordering</name>
+
+      <section anchor="grant">
+        <name>Grant</name>
+        <t>A grant decision produces a receipt and, when the request is part of
+        a capability issuance, the identifiers needed to activate the
+        capability. The grant response MUST contain:</t>
+        <ul>
+          <li><tt>receipt_id</tt>: the identifier of the signed receipt;</li>
+          <li><tt>cap_id</tt>: the reserved capability identifier that the
+          receipt authorizes;</li>
+          <li><tt>expires_at</tt>: the receipt expiry; and</li>
+          <li><tt>constraints</tt>: the effective constraints, including
+          <tt>max_uses</tt>.</li>
+        </ul>
+        <t>The receipt MUST bind the user, the agent, the task, the action set,
+        the resource set, the audience, the risk class, and the validity
+        window. A grant for <tt>allow_once</tt> MUST set <tt>max_uses</tt> to
+        one. A grant MUST NOT have an expiry later than the request's
+        <tt>expires_at</tt> when that member is present.</t>
+      </section>
+
+      <section anchor="deny">
+        <name>Deny</name>
+        <t>A denial MUST produce a structured response with a reason code and,
+        when available, one or more alternatives. A denial is terminal for the
+        request. A denied request MUST NOT be silently retried with a broader
+        scope. A new request requires a new identifier and, when the policy
+        requires it, a new user decision.</t>
+      </section>
+
+      <section anchor="reservation">
+        <name>Reservation Protocol</name>
+        <t>A capability token that needs a receipt must carry
+        <tt>consent_receipt_id</tt>, and a receipt must reference the
+        <tt>cap_id</tt> that it authorizes. This creates a circular dependency.
+        The following order breaks it:</t>
+        <ol>
+          <li>The receiver, through the PCS, evaluates the action and decides
+          that consent is required.</li>
+          <li>The CA reserves a <tt>cap_id</tt>. A reservation allocates an
+          identifier but does not sign a token and does not make the
+          capability usable.</li>
+          <li>The user or operating-system consent surface issues a receipt
+          that references the reserved <tt>cap_id</tt> and the target
+          <tt>audience</tt>.</li>
+          <li>The CA verifies the receipt, issues the capability token with
+          <tt>consent_receipt_id</tt> set, and activates the token.</li>
+          <li>If the request is denied, expires, or is revoked before
+          activation, the reserved <tt>cap_id</tt> MUST NOT become usable.</li>
+        </ol>
+        <t>An unactivated reservation MUST NOT pass any routing or
+        authorization check. A reservation SHOULD expire on the same schedule
+        as its consent request.</t>
+      </section>
+
+      <section anchor="revocation">
+        <name>Revocation</name>
+        <t>Revoking a receipt MUST invalidate every capability token that
+        references it, including descendants that inherited the receipt. A
+        revocation MUST be recorded in the audit log and communicated to
+        affected agents. Revocation is terminal for that receipt: a later
+        decision requires a new request and a new receipt.</t>
+        <t>A receiver MUST check receipt status before executing an L3 or L4
+        action. If the receiver cannot check status, it MUST deny the
+        action.</t>
+      </section>
+    </section>
+
+    <section anchor="receipt">
+      <name>Consent Receipt</name>
+
+      <section anchor="receipt-members">
+        <name>Receipt Members</name>
+        <table>
+          <name>Consent receipt members</name>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Presence</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><tt>osap_receipt</tt></td>
+              <td>MUST</td>
+              <td>Receipt format version. The value is <tt>0.1</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>receipt_id</tt></td>
+              <td>MUST</td>
+              <td>An opaque, globally unique identifier for this receipt.</td>
+            </tr>
+            <tr>
+              <td><tt>user</tt></td>
+              <td>MUST</td>
+              <td>The user principal that made the decision.</td>
+            </tr>
+            <tr>
+              <td><tt>agent</tt></td>
+              <td>MUST</td>
+              <td>The agent that will exercise the resulting capability.</td>
+            </tr>
+            <tr>
+              <td><tt>task_id</tt></td>
+              <td>MUST</td>
+              <td>The task to which the decision is bound.</td>
+            </tr>
+            <tr>
+              <td><tt>cap_id</tt></td>
+              <td>MUST</td>
+              <td>The reserved or issued capability identifier that this
+              receipt authorizes.</td>
+            </tr>
+            <tr>
+              <td><tt>audience</tt></td>
+              <td>MUST</td>
+              <td>The agent that will perform the action.</td>
+            </tr>
+            <tr>
+              <td><tt>actions</tt></td>
+              <td>MUST</td>
+              <td>The approved action set.</td>
+            </tr>
+            <tr>
+              <td><tt>resources</tt></td>
+              <td>MUST</td>
+              <td>The approved resource set.</td>
+            </tr>
+            <tr>
+              <td><tt>risk</tt></td>
+              <td>MUST</td>
+              <td>The effective risk class for the decision.</td>
+            </tr>
+            <tr>
+              <td><tt>decision</tt></td>
+              <td>MUST</td>
+              <td>Either <tt>grant</tt> or <tt>deny</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>constraints</tt></td>
+              <td>CONDITIONAL</td>
+              <td>An object with <tt>max_uses</tt> and <tt>expires_at</tt>. It
+              MUST be present for a grant.</td>
+            </tr>
+            <tr>
+              <td><tt>policy_hash</tt></td>
+              <td>SHOULD</td>
+              <td>An opaque digest of the policy or notice that the user saw.
+              It lets an auditor check that the decision was made against a
+              known policy without embedding the policy text.</td>
+            </tr>
+            <tr>
+              <td><tt>issued_at</tt></td>
+              <td>MUST</td>
+              <td>The decision time in RFC 3339 format.</td>
+            </tr>
+            <tr>
+              <td><tt>proof</tt></td>
+              <td>MUST</td>
+              <td>The signature object described in <xref
+              target="receipt-proof"/>.</td>
+            </tr>
+            <tr>
+              <td><tt>extensions</tt></td>
+              <td>MAY</td>
+              <td>A namespaced extension object. It participates in the signed
+              bytes.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="receipt-example">
+        <name>Example Receipt</name>
+        <sourcecode type="json"><![CDATA[
+{
+  "osap_receipt": "0.1",
+  "receipt_id": "consent_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "user": "user://local/example-user",
+  "agent": "agent://com.example.orchestrator/main#1a2b",
+  "task_id": "task_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "cap_id": "cap_01J8Z3K4M5N6P7Q8R9S0T1V2W3",
+  "audience": "agent://com.example.messaging/agent#4d",
+  "actions": ["messaging.send"],
+  "resources": ["contact://directory/example-contact"],
+  "risk": "L3",
+  "decision": "grant",
+  "constraints": {
+    "max_uses": 1,
+    "expires_at": "2026-11-10T10:24:45Z"
+  },
+  "policy_hash": "sha256:example-digest",
+  "issued_at": "2026-11-10T10:14:46Z",
+  "proof": {
+    "alg": "EdDSA",
+    "kid": "os-consent-key-1",
+    "sig": "c2lnbmF0dXJlLWV4YW1wbGUtbm90LXZhbGlk"
+  }
+}
+        ]]></sourcecode>
+        <t>The signature value and the policy hash in this example are
+        illustrative and are not valid values.</t>
+      </section>
+
+      <section anchor="receipt-proof">
+        <name>Canonicalization and Proof</name>
+        <t>A receipt is serialized as UTF-8 JSON. The signature covers the
+        canonical byte sequence of the receipt with the <tt>proof</tt> member
+        removed. The canonicalization rules are the same as for a capability
+        token:</t>
+        <ol>
+          <li>the value is a JSON object;</li>
+          <li>members are sorted by the Unicode code point order of their
+          names;</li>
+          <li>arrays preserve their order;</li>
+          <li>there is no insignificant whitespace;</li>
+          <li>strings use the shortest RFC 8259 <xref target="RFC8259"/> escape,
+          with non-ASCII characters emitted as UTF-8; and</li>
+          <li>all numbers are integers; floating-point numbers are
+          rejected.</li>
+        </ol>
+        <t>These rules are a profile of the JSON Canonicalization Scheme
+        <xref target="RFC8785"/> that is deterministic for receipts because
+        the format restricts numeric values to integers. A parser MUST reject
+        duplicate member names. A verifier MUST NOT accept a receipt whose
+        signature was computed over a different serialization.</t>
+        <t>The <tt>proof</tt> object has three members:</t>
+        <dl>
+          <dt><tt>alg</tt>:</dt>
+          <dd>The value <tt>EdDSA</tt>, using Ed25519 as defined in RFC 8032
+          <xref target="RFC8032"/>.</dd>
+          <dt><tt>kid</tt>:</dt>
+          <dd>The identifier of the user or operating-system key that signed
+          the receipt.</dd>
+          <dt><tt>sig</tt>:</dt>
+          <dd>The signature encoded with base64url as defined in Section 5 of
+          RFC 4648 <xref target="RFC4648"/>, without padding.</dd>
+        </dl>
+        <t>A receipt MUST be signed by the user or by an operating-system
+        consent service acting for the user. An agent MUST NOT sign its own
+        receipt. A verifier MUST resolve <tt>kid</tt> through a trusted key
+        registry and MUST reject an unknown, revoked, or expired key.</t>
+      </section>
+
+      <section anchor="receipt-validation">
+        <name>Validation Order</name>
+        <t>A verifier SHOULD process a receipt in the following order:</t>
+        <ol>
+          <li>check the syntax, version, and required members;</li>
+          <li>resolve <tt>proof.kid</tt> and verify the signature;</li>
+          <li>check that <tt>decision</tt> is <tt>grant</tt>;</li>
+          <li>check <tt>constraints.expires_at</tt> against the current
+          time;</li>
+          <li>check the binding to the request: <tt>user</tt>, <tt>agent</tt>,
+          <tt>task_id</tt>, <tt>audience</tt>, <tt>actions</tt>, and
+          <tt>resources</tt>; and</li>
+          <li>check that <tt>max_uses</tt> has not been exhausted.</li>
+        </ol>
+        <t>A denial receipt is not an authorization. A verifier that expects an
+        authorization MUST reject a receipt whose <tt>decision</tt> is
+        <tt>deny</tt>.</t>
+      </section>
+
+      <section anchor="receipt-expiry">
+        <name>Expiry and Scope</name>
+        <t>A receipt MUST have an expiry. An expired receipt MUST NOT be used,
+        even if the associated capability token has not expired. A receipt's
+        action and resource sets MUST exactly cover the request; a prefix match,
+        a case-insensitive match, or an implicit wildcard is not sufficient. If
+        a capability needs a narrower scope than the receipt, the CA MAY issue a
+        narrower token, but it MUST NOT issue a broader one.</t>
+        <t>A task-level grant SHOULD have a short validity window and a finite
+        <tt>max_uses</tt>. A receipt with no finite use count is not defined by
+        this document.</t>
+      </section>
+
+      <section anchor="offline">
+        <name>Offline Verification</name>
+        <t>A receipt is designed to be verifiable offline: the verifier needs
+        the receipt, the public key identified by <tt>kid</tt>, and the
+        canonicalization rules. Offline verification proves that the user or
+        consent service signed the stated decision. It does not prove that the
+        receipt has not been revoked since the verifier last fetched status. A
+        verifier that requires freshness MUST obtain a current status or rely on
+        a short expiry.</t>
+      </section>
+    </section>
+
+    <section anchor="binding">
+      <name>Binding to Capability Tokens</name>
+      <t>A capability token that requires consent MUST carry
+      <tt>consent_receipt_id</tt>. The receipt and the token MUST agree on
+      <tt>task_id</tt>, <tt>audience</tt>, <tt>actions</tt>, and
+      <tt>resources</tt>. The receipt's <tt>agent</tt> MUST equal the token's
+      <tt>subject</tt>. The receipt's <tt>user</tt> MUST be the principal on
+      whose behalf the token is issued.</t>
+      <t>If the token's scope is a subset of the receipt's scope, the token is
+      valid. If the token asks for an action or resource that the receipt does
+      not cover, the CA MUST reject the issuance with
+      <tt>POLICY_CONSENT_SCOPE_MISMATCH</tt>. If the receipt is expired or
+      revoked, the token MUST be treated as unusable and the receiver MUST
+      reject it with <tt>POLICY_CONSENT_EXPIRED</tt>.</t>
+      <t>A child token may reference the same receipt only when the receipt
+      still covers the child's task, audience, actions, and resources. A
+      delegation to a new audience normally requires a new receipt because the
+      original receipt's audience does not match the child's audience.</t>
+    </section>
+
+    <section anchor="audit">
+      <name>Audit and Trace</name>
+
+      <section anchor="audit-event">
+        <name>Event Shape</name>
+        <t>Every audit event contains at least the following members:</t>
+        <table>
+          <name>Audit event members</name>
+          <thead>
+            <tr>
+              <th>Member</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><tt>audit_id</tt></td>
+              <td>A unique event identifier.</td>
+            </tr>
+            <tr>
+              <td><tt>trace_id</tt></td>
+              <td>The identifier of the user intent that caused the event.</td>
+            </tr>
+            <tr>
+              <td><tt>task_id</tt></td>
+              <td>The task associated with the event.</td>
+            </tr>
+            <tr>
+              <td><tt>session_id</tt></td>
+              <td>The session associated with the event.</td>
+            </tr>
+            <tr>
+              <td><tt>actor</tt></td>
+              <td>The agent or service that produced the event.</td>
+            </tr>
+            <tr>
+              <td><tt>action</tt></td>
+              <td>The event type, such as <tt>consent.granted</tt> or
+              <tt>effect.executed</tt>.</td>
+            </tr>
+            <tr>
+              <td><tt>phase</tt></td>
+              <td><tt>intent</tt> or <tt>outcome</tt> for <tt>effect.*</tt>
+              events; absent for every other event.</td>
+            </tr>
+            <tr>
+              <td><tt>target</tt></td>
+              <td>The target of the action, expressed as a resource
+              identifier.</td>
+            </tr>
+            <tr>
+              <td><tt>decision</tt></td>
+              <td><tt>allow</tt>, <tt>deny</tt>, or another deployment-defined
+              decision.</td>
+            </tr>
+            <tr>
+              <td><tt>policy</tt></td>
+              <td>The policy or notice reference used for the decision.</td>
+            </tr>
+            <tr>
+              <td><tt>consent_receipt_id</tt></td>
+              <td>The receipt that authorized the action, when one applies.</td>
+            </tr>
+            <tr>
+              <td><tt>context_refs</tt></td>
+              <td>Opaque references to context handles or objects used.</td>
+            </tr>
+            <tr>
+              <td><tt>ts</tt></td>
+              <td>The event time in RFC 3339 format.</td>
+            </tr>
+            <tr>
+              <td><tt>prev_hash</tt></td>
+              <td>The hash of the previous event in the same trace.</td>
+            </tr>
+            <tr>
+              <td><tt>hash</tt></td>
+              <td>The hash of this event.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section anchor="audit-events">
+        <name>Required Event Types</name>
+        <t>An implementation that records the consent and effect lifecycle MUST
+        use the following event types:</t>
+        <ul>
+          <li><tt>agent.registered</tt> and
+          <tt>agent.registration_denied</tt>;</li>
+          <li><tt>capability.issued</tt>,
+          <tt>capability.attenuated</tt>,
+          <tt>capability.attenuation_denied</tt>,
+          <tt>capability.exercised</tt>, and
+          <tt>capability.revoked</tt>;</li>
+          <li><tt>discovery.query</tt> and <tt>discovery.result</tt>;</li>
+          <li><tt>message.sent</tt> and <tt>message.delivered</tt>;</li>
+          <li><tt>task.created</tt>, <tt>task.delegated</tt>,
+          <tt>task.handoff</tt>, <tt>task.cancelled</tt>,
+          <tt>task.completed</tt>, and <tt>task.failed</tt>;</li>
+          <li><tt>context.resolve</tt> and <tt>context.denied</tt>;</li>
+          <li><tt>consent.requested</tt>, <tt>consent.granted</tt>, and
+          <tt>consent.denied</tt>;</li>
+          <li><tt>effect.intent</tt>, <tt>effect.executed</tt>, and
+          <tt>effect.reconciled</tt>;</li>
+          <li><tt>egress.blocked</tt>; and</li>
+          <li><tt>error</tt>.</li>
+        </ul>
+      </section>
+
+      <section anchor="two-phase">
+        <name>Two-Phase Effects</name>
+        <t>An L3 or L4 side effect uses two audit records. Before the side
+        effect, the implementation writes <tt>effect.intent</tt> with
+        <tt>phase</tt> equal to <tt>intent</tt>, including the target, a digest
+        of the parameters, the consent receipt, and an idempotency key. After
+        the side effect, it writes <tt>effect.executed</tt> with
+        <tt>phase</tt> equal to <tt>outcome</tt> and a reference to the intent
+        record.</t>
+        <t>If a restart finds an intent with no outcome, the effect state is
+        <tt>unknown</tt>. The implementation MUST require reconciliation before
+        replaying the action. Reconciliation records an outcome of
+        <tt>executed</tt> or <tt>not_executed</tt>; it does not re-execute the
+        side effect.</t>
+      </section>
+
+      <section anchor="hash-chain">
+        <name>Hash Chain</name>
+        <t>Each event's <tt>hash</tt> is computed over the canonical event body
+        with the <tt>hash</tt> member removed. The body includes
+        <tt>prev_hash</tt>. The first event in a trace uses a fixed genesis
+        value. A verifier recomputes the hash chain and checks that every
+        <tt>prev_hash</tt> matches the previous event's <tt>hash</tt>. A
+        mismatch, a missing event, or a duplicate <tt>audit_id</tt> is an
+        integrity failure.</t>
+        <t>The hash chain proves that the recorded sequence was not modified
+        without detection. It does not prove that every real-world action was
+        recorded, and it does not make an audit record confidential.</t>
+      </section>
+
+      <section anchor="trace-redaction">
+        <name>Trace and Redaction</name>
+        <t>A user intent has one <tt>trace_id</tt>. Every agent hop records a
+        causation identifier, so a user can view the cross-application chain.
+        An export MUST preserve <tt>hash</tt> and <tt>prev_hash</tt>. Sensitive
+        fields MAY be replaced by a commitment using a salt that is unique to
+        the export. A verifier of a redacted export can check the chain and the
+        commitments, but cannot recover the clear text. A verifier MUST be told
+        that the export is redacted and MUST NOT treat it as a full record.</t>
+      </section>
+    </section>
+
+    <section anchor="iso-mapping">
+      <name>Informative Mapping to ISO/IEC 27560</name>
+      <t>ISO/IEC 27560 <xref target="ISO27560"/> specifies a consent record
+      information structure. The following table maps the receipt members in this document to the concepts
+      in that structure. The mapping is informative. It does not claim that a
+      receipt alone is an ISO-conformant consent record, because a complete
+      record also needs notice, controller, purpose, and jurisdiction
+      information that a local authorization artifact may not carry.</t>
+      <table>
+        <name>Informative mapping to ISO/IEC 27560 concepts</name>
+        <thead>
+          <tr>
+            <th>OSAP receipt member</th>
+            <th>ISO/IEC 27560 concept</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><tt>receipt_id</tt></td>
+            <td>Consent record identifier</td>
+          </tr>
+          <tr>
+            <td><tt>user</tt></td>
+            <td>PII principal</td>
+          </tr>
+          <tr>
+            <td><tt>agent</tt></td>
+            <td>Recipient or processor acting for the principal</td>
+          </tr>
+          <tr>
+            <td><tt>audience</tt></td>
+            <td>Recipient of the processing operation</td>
+          </tr>
+          <tr>
+            <td><tt>actions</tt> and <tt>resources</tt></td>
+            <td>Processing purpose and processing operation</td>
+          </tr>
+          <tr>
+            <td><tt>risk</tt></td>
+            <td>Risk or impact description</td>
+          </tr>
+          <tr>
+            <td><tt>decision</tt></td>
+            <td>Consent decision</td>
+          </tr>
+          <tr>
+            <td><tt>constraints.max_uses</tt> and
+            <tt>constraints.expires_at</tt></td>
+            <td>Restrictions and validity period</td>
+          </tr>
+          <tr>
+            <td><tt>policy_hash</tt></td>
+            <td>Reference to the notice or policy</td>
+          </tr>
+          <tr>
+            <td><tt>proof</tt></td>
+            <td>Assurance or signature information</td>
+          </tr>
+          <tr>
+            <td><tt>task_id</tt></td>
+            <td>Task scope, as an extension for local authorization</td>
+          </tr>
+        </tbody>
+      </table>
+      <t>An implementation that exports a receipt into a 27560-compatible
+      record SHOULD keep the original receipt identifier and signature so that
+      the exported record can be traced back to the authorization decision.</t>
+    </section>
+
+    <section anchor="security">
+      <name>Security Considerations</name>
+
+      <section anchor="forged-receipt">
+        <name>Forged Receipts</name>
+        <t>An agent might try to create its own receipt. A verifier MUST require
+        a signature by a key that is trusted for the user or for the
+        operating-system consent service. A receipt signed by the requesting
+        agent's key MUST be rejected, even if the agent is otherwise trusted for
+        the action.</t>
+      </section>
+
+      <section anchor="consent-phishing">
+        <name>Consent Phishing and Misleading Requests</name>
+        <t>A malicious agent can describe an action inaccurately. The PCS MUST
+        derive the preview from the capability descriptor and from policy, and
+        the consent surface MUST display the effective action, resource, risk,
+        cost, and duration. The user's decision applies to the scope shown in
+        the receipt, not to the agent's prose. A mismatch between the preview
+        and the receipt scope is a security failure.</t>
+      </section>
+
+      <section anchor="replay-receipt">
+        <name>Replay</name>
+        <t>A receipt is bound to a task, an audience, an action set, a resource
+        set, and a capability identifier. Reusing it for another task or
+        audience fails the binding check. A receipt with a finite
+        <tt>max_uses</tt> must be counted atomically, or the use count can be
+        exceeded by concurrent requests.</t>
+      </section>
+
+      <section anchor="reservation-race">
+        <name>Reservation and Activation Race</name>
+        <t>The reservation protocol separates allocation from activation. An
+        attacker that learns a reserved <tt>cap_id</tt> must not be able to
+        activate it without a valid receipt. Activation MUST verify the
+        receipt's signature, decision, expiry, and scope before changing the
+        reservation to active. A denied, expired, or revoked reservation MUST
+        remain unusable.</t>
+      </section>
+
+      <section anchor="audit-integrity">
+        <name>Audit Integrity</name>
+        <t>The hash chain detects modification of recorded events but not
+        omission of events that were never written. An implementation that
+        requires an audit record before an L3 or L4 side effect must make the
+        write durable before the effect. A redacted export proves integrity and
+        commitment consistency, not the original content.</t>
+      </section>
+
+      <section anchor="revocation-security">
+        <name>Revocation</name>
+        <t>A revoked receipt must invalidate every capability that references
+        it. A receiver that cannot check receipt status must deny an L3 or L4
+        action. Cached status must have a bounded freshness interval. A
+        revocation notification is advisory; it is not a substitute for the
+        execution-time status check.</t>
+      </section>
+    </section>
+
+    <section anchor="privacy">
+      <name>Privacy Considerations</name>
+      <t>Consent receipts contain a user identifier, an agent identifier, a
+      task identifier, and resource identifiers. They should carry the minimum
+      information needed to prove the decision. Resource identifiers should be
+      opaque handles rather than paths or personal data. The
+      <tt>policy_hash</tt> should commit to the notice the user saw without
+      embedding the notice text.</t>
+      <t>Audit exports should support redaction with per-export salts. Retention
+      should be limited to the period needed for user review, dispute
+      resolution, and legal obligations. A task identifier should not become a
+      stable cross-application tracking identifier.</t>
+      <t>When a receipt is exported into an ISO/IEC 27560 record, the exporter
+      should apply the same data-minimization rules and should not add personal
+      data that the local authorization did not need.</t>
+    </section>
+
+    <section anchor="iana">
+      <name>IANA Considerations</name>
+      <t>This document has no IANA actions.</t>
+    </section>
+
+  </middle>
+
+  <back>
+    <references>
+      <name>Normative References</name>
+      <reference anchor="RFC2119" target="https://www.rfc-editor.org/info/rfc2119">
+        <front>
+          <title>Key words for use in RFCs to Indicate Requirement Levels</title>
+          <author initials="S." surname="Bradner" fullname="Scott Bradner">
+            <organization/>
+          </author>
+          <date year="1997" month="March"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="2119"/>
+      </reference>
+      <reference anchor="RFC8174" target="https://www.rfc-editor.org/info/rfc8174">
+        <front>
+          <title>Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words</title>
+          <author initials="B." surname="Leiba" fullname="Barry Leiba">
+            <organization/>
+          </author>
+          <date year="2017" month="May"/>
+        </front>
+        <seriesInfo name="BCP" value="14"/>
+        <seriesInfo name="RFC" value="8174"/>
+      </reference>
+      <reference anchor="RFC3339" target="https://www.rfc-editor.org/info/rfc3339">
+        <front>
+          <title>Date and Time on the Internet: Timestamps</title>
+          <author initials="G." surname="Klyne" fullname="Graham Klyne">
+            <organization/>
+          </author>
+          <author initials="C." surname="Newman" fullname="Chris Newman">
+            <organization/>
+          </author>
+          <date year="2002" month="July"/>
+        </front>
+        <seriesInfo name="RFC" value="3339"/>
+      </reference>
+      <reference anchor="RFC4648" target="https://www.rfc-editor.org/info/rfc4648">
+        <front>
+          <title>The Base16, Base32, and Base64 Data Encodings</title>
+          <author initials="S." surname="Josefsson" fullname="Simon Josefsson">
+            <organization/>
+          </author>
+          <date year="2006" month="October"/>
+        </front>
+        <seriesInfo name="RFC" value="4648"/>
+      </reference>
+      <reference anchor="RFC8032" target="https://www.rfc-editor.org/info/rfc8032">
+        <front>
+          <title>Edwards-Curve Digital Signature Algorithm (EdDSA)</title>
+          <author initials="S." surname="Josefsson" fullname="Simon Josefsson">
+            <organization/>
+          </author>
+          <author initials="I." surname="Liusvaara" fullname="Ilari Liusvaara">
+            <organization/>
+          </author>
+          <date year="2017" month="January"/>
+        </front>
+        <seriesInfo name="RFC" value="8032"/>
+      </reference>
+      <reference anchor="RFC8259" target="https://www.rfc-editor.org/info/rfc8259">
+        <front>
+          <title>The JavaScript Object Notation (JSON) Data Interchange Format</title>
+          <author initials="T." surname="Bray" fullname="Tim Bray">
+            <organization/>
+          </author>
+          <date year="2017" month="December"/>
+        </front>
+        <seriesInfo name="STD" value="90"/>
+        <seriesInfo name="RFC" value="8259"/>
+      </reference>
+      <reference anchor="RFC8785" target="https://www.rfc-editor.org/info/rfc8785">
+        <front>
+          <title>JSON Canonicalization Scheme (JCS)</title>
+          <author initials="A." surname="Rundgren" fullname="Anders Rundgren">
+            <organization/>
+          </author>
+          <author initials="B." surname="Jordan" fullname="Bret Jordan">
+            <organization/>
+          </author>
+          <author initials="S." surname="Erdtman" fullname="Samuel Erdtman">
+            <organization/>
+          </author>
+          <date year="2020" month="June"/>
+        </front>
+        <seriesInfo name="RFC" value="8785"/>
+      </reference>
+    </references>
+
+    <references>
+      <name>Informative References</name>
+      <reference anchor="RFC9396" target="https://www.rfc-editor.org/info/rfc9396">
+        <front>
+          <title>OAuth 2.0 Rich Authorization Requests</title>
+          <author initials="T." surname="Lodderstedt" fullname="Torsten Lodderstedt">
+            <organization/>
+          </author>
+          <author initials="J." surname="Richer" fullname="Justin Richer">
+            <organization/>
+          </author>
+          <author initials="M." surname="B. Jones" fullname="Michael B. Jones">
+            <organization/>
+          </author>
+          <date year="2023" month="August"/>
+        </front>
+        <seriesInfo name="RFC" value="9396"/>
+      </reference>
+      <reference anchor="ISO27560">
+        <front>
+          <title>Information technology - Privacy framework - Part 1: Consent record information structure</title>
+          <author>
+            <organization>ISO/IEC</organization>
+          </author>
+          <date year="2023" month="July"/>
+        </front>
+        <seriesInfo name="ISO/IEC" value="27560:2023"/>
+      </reference>
+      <reference anchor="KANTARA">
+        <front>
+          <title>Consent Receipt Specification, Version 2.0</title>
+          <author>
+            <organization>Kantara Initiative</organization>
+          </author>
+          <date year="2020" month="March"/>
+        </front>
+      </reference>
+    </references>
+  </back>
+</rfc>
