@@ -30,6 +30,7 @@
 | 审计按用户分区与跨 trace 顺序（M4 前置） | ✅ 完成 | `AuditJournal` 写 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开拒绝缺口/重复/时间戳不符/孤儿条目；706 tests | 2026-11-19 |
 | Windows 密钥环与迁移工具（M4 前置） | ✅ 完成 | `KeyringKeyStore` 增加 Windows `PasswordVault`（PowerShell，密钥走 stdin）；后端失败细分 `KeyringError.reason`；`migrate_key_store` + `tools/migrate_pcs_key.py` 验证后迁移并在确认目标后删源；720 tests | 2026-11-19 |
 | 并发服务事件循环（M4 前置） | ✅ 完成 | `serve_forever(mode="selector")` 单线程多路复用监听与全部会话；断开/出错 peer 摘除不影响循环；配额共享 `AdmissionController`；726 tests | 2026-11-19 |
+| 跨进程撤销分发（M4 前置） | ✅ 完成 | `revoke` 写 `capability.revocations` 日志并与撤销集原子落盘；副本 `apply_revocations(entries, source=...)` 按来源游标幂等应用、缺口报 `REVOCATION_GAP`、写失败回滚；743 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -43,7 +44,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（8131 行）+ 726 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（8371 行）+ 743 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -104,6 +105,7 @@
 | `a2c6853` | 2026-11-19 | **审计按用户分区与跨 trace 顺序**：`AuditJournal` 写入 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与序号一次 `put_many`；重开交叉校验；21 条新测试，累计 706 |
 | `adba047` | 2026-11-19 | **Windows 密钥环与迁移工具**：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分 `backend_missing`/`lookup_failed`/`store_failed`；`migrate_key_store` 与 `tools/migrate_pcs_key.py`；14 条新测试，累计 720 |
 | `6656195` | 2026-11-19 | **并发服务事件循环**：`serve_forever(mode="selector")` 单线程多路复用；断开/出错 peer 摘除；配额仍走共享控制器；6 条新测试，累计 726 |
+| `893b357` | 2026-11-19 | **跨进程撤销分发**：`capability.revocations` 日志 + `apply_revocations(entries, source=...)` 来源游标；`REVOCATION_GAP` 领域扩展码；17 条新测试，累计 743 |
 
 ---
 
@@ -1230,7 +1232,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §24 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §25 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1472,7 +1474,61 @@ python3 demo/run_demo.py
 
 ---
 
-## 22. 待确认的规范问题
+## 22. 跨进程撤销分发（M4 前置，已完成）
+
+### 22.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/capability.py` | `revoke` 为每个新撤销 token 追加 `{seq, cap_id, ts}` 日志条目，与撤销集一次 `put_many` 原子落盘且写失败回滚；`apply_revocations(entries, source=...)` 按来源游标应用远端批次并级联；`REVOCATION_GAP` 领域扩展码；`last_seq` / `applied_sources()` |
+| `impl/tests/test_capability.py` | 17 条新测试：日志连续性/持久化/幂等/损坏拒绝、批次的级联/幂等/缺口/部分拉取/多来源/混合来源/已撤销不重级联、两次写失败回滚 |
+
+### 22.2 语义
+
+- **生产端**：`revoke(cap_id)` 沿父→子索引级联，只为新撤销的 token 追加日志条目（重复撤销不写）；本地日志序号从 1 连续。日志与 `capability.revoked` 在一次 `put_many` 中落盘，写失败时内存的撤销集、审计与日志全部回滚。
+- **消费端**：`apply_revocations(entries, source=...)` 以 `source` 命名远端流，条目里的 `seq` 是**来源流**的序号；副本维护每来源游标 `applied_sources()[source]`。序号 ≤ 游标的条目跳过（重复投递幂等），批内序号必须连续，第一条新条目必须等于游标 +1——首个批次必须从来源日志的第 1 条开始，否则报 `REVOCATION_GAP`。
+- **落库形状**：应用的条目在副本日志里记为 `{seq(本地), cap_id, ts, origin=source, source_seq}`；本地撤销条目不带 `origin`。恢复时校验：本地序号连续、`origin` 与 `source_seq` 成对且按来源连续、条目的 `cap_id` 必须在撤销集内、`cap_id` 不重复；任何损坏拒绝重开。
+- **级联与重试**：每个新条目走与本地 `revoke` 相同的级联（副本未持有的 token 也记撤销，`is_revoked` 沿祖先链生效）；副本已独立撤销的条目只记日志不重复级联。写失败回滚内存（撤销集、审计、日志、游标），调用方原样重试同一批次。
+- **fail closed**：来源批次有缺口时什么都不应用——静默跳过撤销会让副本继续执行已撤销的能力，比拒绝服务更危险。
+- **默认不变**：不传 `store` 时日志只在内存；`revoke` 签名与返回值不变，`consent_flow` 与适配器无需改动。
+
+### 22.3 验证证据
+
+2026-11-19，提交 `893b357`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl -p 'test_capability.py'
+→ Ran 69 tests ... OK
+
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 743 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 17 条测试覆盖：级联撤销的日志连续性、同批时间戳、本地序号与 `last_seq`；日志与撤销集同文件原子持久化、重开一致；重复撤销不写条目；纯内存不带盘；`put_many` 失败回滚撤销集/审计/日志并可重试成功；损坏日志（缺 `seq`、`seq=0`、布尔 `seq`、空 `cap_id`、坏 `ts`、`origin` 与 `source_seq` 缺一/非法）与重复 `cap_id` 拒绝重开；日志条目引用撤销集之外的重开拒绝；本地日志序号缺口重开报 `REVOCATION_GAP`；副本批次级联（含未持有 token）、幂等重投、部分拉取后缺口 fail closed 且补齐后原样重试成功、首批必须从来源第 1 条开始、双来源独立游标、混合 `origin` 拒绝、损坏批次无副作用、副本写失败回滚。
+
+### 22.4 已知边界
+
+1. **拉模式，不自动通知**：本实现只提供日志与校验；谁去读来源日志、何时读、失败重试几次都由调用方决定，§5.5 的“通知受影响 Agent”仍需自建传输（Bus 消息、文件轮询或 IPC）。
+2. **撤销 P95 仍是进程内口径**：`apply_revocations` 是另一个进程内的级联成本，与 `benchmark_revocation.py` 测的不是同一个数字；跨进程端到端传播时间没有测量。
+3. **日志只增不减**：`capability.revocations` 没有压缩或 TTL；来源侧长期运行后首批拉取会线性变长（副本靠游标跳过，但传输量不小）。
+4. **单一来源命名空间**：`source` 是调用方给的字符串标签，没有签名或来源认证；被攻破的对端可以喂假撤销（fail closed 方向）或重放旧批次（幂等无副作用），但不能让副本跳过撤销。
+5. **不处理时钟**：条目 `ts` 只做 RFC 3339 校验与展示，分发顺序完全由序号决定，不比较时间戳。
+6. **与同意撤销未打通**：`ConsentFlow` 撤销回执时级联签发能力（已有），但该撤销不写 `capability.revocations` 日志，跨进程只覆盖 `CapabilityAuthority.revoke` 的直接路径。
+
+---
+
+## 23. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1488,18 +1544,18 @@ python3 demo/run_demo.py
 
 ---
 
-## 23. 下一步（按顺序）
+## 24. 下一步（按顺序）
 
-1. 加入 XPC/Binder/named pipe 等平台原生传输与异步绑定；事件循环已完成（§21）；
-2. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
-3. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
-4. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
+1. 加入 XPC/Binder/named pipe 等平台原生传输与异步绑定；事件循环与撤销分发已完成（§21、§22）；
+2. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
+3. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
+4. 为撤销分发补自动广播/订阅与端到端传播测量（当前是拉模式，§22）；
 5. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
 6. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 24. 变更记录
+## 25. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1537,3 +1593,4 @@ python3 demo/run_demo.py
 | 2026-11-19 | **审计按用户分区与跨 trace 顺序**（`a2c6853`）：`AuditJournal` 写 `audit.user.<user>.chain/archive.<trace>` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开交叉校验并拒绝缺口/重复/时间戳不符/孤儿条目；新增 21 条测试，累计 706 |
 | 2026-11-19 | **Windows 密钥环与迁移工具**（`adba047`）：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分失败原因；`migrate_key_store` + `tools/migrate_pcs_key.py`；新增 14 条测试，累计 720 |
 | 2026-11-19 | **并发服务事件循环**（`6656195`）：`serve_forever(mode="selector")` 单线程 `DefaultSelector` 多路复用监听与会话；断开/出错 peer 摘除后循环继续；配额仍走共享 `AdmissionController`；新增 6 条测试，累计 726 |
+| 2026-11-19 | **跨进程撤销分发**（`893b357`）：`capability.revocations` 日志与撤销集原子落盘；副本 `apply_revocations(entries, source=...)` 按来源游标幂等应用；`REVOCATION_GAP` 领域扩展码；新增 17 条测试，累计 743 |
