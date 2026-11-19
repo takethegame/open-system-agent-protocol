@@ -35,6 +35,7 @@
 | 审计归档压缩与按用户导出（M4 前置） | ✅ 完成 | `AuditLedger(max_archive=...)` 压缩归档并记录 `base` 锚点，kept 前缀仍可端到端验证；`AuditJournal.export()` 输出整用户分区快照；774 tests | 2026-11-19 |
 | 撤销订阅与跨进程测量（M4 前置） | ✅ 完成 | `RevocationWatcher` 轮询源 store 自动应用撤销批次；`benchmark_revocation.py --cross-process` 量化 revoke → 副本 `is_revoked()` 端到端传播；778 tests | 2026-11-19 |
 | asyncio 绑定（M4 前置） | ✅ 完成 | `serve_forever(mode="asyncio")` 缓冲分帧协议，半帧停滞 peer 不再阻塞他人；`close()` 经 `call_soon_threadsafe` 通知 loop（kqueue fd 跨线程关闭会挂死）；782 tests | 2026-11-19 |
+| 撤销推送通道（M4 前置） | ✅ 完成 | `RevocationFeedServer/Client` 专用 AF_UNIX sidecar socket 推送撤销批次（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 支持整树 cascade 跨进程测量；790 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -48,7 +49,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（8902 行）+ 782 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（9118 行）+ 790 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -114,6 +115,7 @@
 | `da17a2b` | 2026-11-19 | **审计归档压缩与按用户导出**：`max_archive` 锚点压缩；`AuditJournal.export()` 快照；10 条新测试，累计 770 |
 | `1b477f6` | 2026-11-19 | **撤销订阅与跨进程测量**：`RevocationWatcher` 轮询订阅；`--cross-process` 基准；8 条新测试，累计 778 |
 | `c32fc97` | 2026-11-19 | **asyncio 绑定**：缓冲分帧协议，半帧停滞不阻塞他人；跨线程 fd 关闭挂死的修复；8 条新测试，累计 782 |
+| `c2b3f39` | 2026-11-19 | **撤销推送通道**：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量）；`--cross-process --tree` 整树 cascade 测量；8 条新测试，累计 790 |
 
 ---
 
@@ -1240,7 +1242,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §29 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §30 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1678,7 +1680,39 @@ python3 demo/run_demo.py
 
 ---
 
-## 27. 待确认的规范问题
+## 27. 撤销推送通道（M4 前置，已完成）
+
+### 27.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/transport.py` | `RevocationFeedServer(path, journal, *, source, peer_policy)`：专用 `AF_UNIX` sidecar socket，长度分帧承载纯 JSON 批次（`{"source", "cursor", "entries"}`）；连接即发 catch-up（从序号 0 起），之后每次 `notify()`（或 0.05 s 轮询兜底）只推新条目；`journal` 是零参调用方回调，模块不反向依赖 `capability`；`RevocationFeedClient/Session` 复用既有流分帧，把批次交给 `apply_revocations` |
+| `impl/tests/test_transport.py` | 8 条新测试：批次应用、迟到订阅 catch-up、双订阅者、增量推送、断连不影响服务、被拒 peer 无批次、参数校验、close 删除 socket 文件 |
+| `tools/benchmark_revocation.py` | `--cross-process --tree`：每个样本撤销一棵完整 width/depth 树，量化跨进程整树 cascade |
+
+### 27.2 语义
+
+- **sidecar 而非 Bus 流量**：推送通道承载纯 JSON 帧、无 `osap.*` 信封、不路由、不进幂等索引——§5.5 的“通知受影响 Agent”不扩大 Bus 的消息面；接收方仍是副本上的 `apply_revocations`，游标、`REVOCATION_GAP` 与回滚语义与拉模式完全一致。
+- **catch-up + 增量**：订阅者连上后先收到从序号 0 起的全部批次（迟到订阅自动补齐），此后只在 journal 增长后收到新条目。`notify()` 由签发方在 `revoke` 后显式调用；0.05 s 轮询是兜底，不是唯一触发。
+- **journal 解耦**：服务器只持有一个零参回调读取完整日志（如 `lambda: JsonStore(p).get("capability.revocations")`），每次调用重新读文件，因此跨进程写永远可见，且服务器绝不写日志。
+- **对端认证**：可选 `PeerPolicy`，被拒连接直接关闭、不推任何批次（测试断言客户端读到 EOF）。
+- **测量扩展**：`--cross-process --tree --width --depth` 每样本撤销整棵树；实测（3 样本、43 token/树、5 ms 轮询）p50 ≈ 22 ms、p95 ≈ 215 ms，量级与短链一致，主项是轮询等待与调度。
+
+### 27.3 验证证据
+
+2026-11-19，提交 `c2b3f39`：`test_transport.py` 45 条全过，全量 790 tests OK；`check_docs` 195/42、`check_schemas` 45/15、`validate_examples` 24、一致性 64 pass / 0 fail / 4 skip、demo 完整；本机跑通 `--cross-process --tree --samples 3 --width 6 --depth 2` 与短链两种基准。
+
+### 27.4 已知边界
+
+1. **`notify()` 是显式钩子**：签发方忘记调用时推送退化为 0.05 s 轮询兜底；`CapabilityAuthority` 与 feed 服务器之间没有自动接线（保持两者解耦）。
+2. **每订阅者一个线程**：推送线程按连接划分，无共享写缓冲；订阅者很多时成本线性（与线程池服务同一边界）。
+3. **sidecar 无身份认证默认关闭**：不传 `PeerPolicy` 时任何本机进程都能订阅撤销流；生产部署必须传策略。
+4. **帧内无签名**：推送批次是明文 JSON；被攻破的对端只能力 fail closed 或无害重放（与 §22 相同），但通道本身不是防篡改边界。
+5. **测量仍含轮询兜底延迟**：`--cross-process` 的数字包含 ≤ 0.05 s 的轮询兜底与调度，不代表纯推送延迟。
+
+---
+
+## 28. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1694,16 +1728,15 @@ python3 demo/run_demo.py
 
 ---
 
-## 28. 下一步（按顺序）
+## 29. 下一步（按顺序）
 
-1. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定已完成，§26）；
-2. 为撤销分发补推送通道与更大规模的跨进程 cascade 测量（§25）；
-3. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
-4. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
+1. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
+2. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
+3. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 29. 变更记录
+## 30. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1746,3 +1779,4 @@ python3 demo/run_demo.py
 | 2026-11-19 | **审计归档压缩与按用户导出**（`da17a2b`）：`max_archive` 锚点压缩，kept 前缀仍可端到端验证；`AuditJournal.export()` 整用户分区快照；新增 10 条测试，累计 770 |
 | 2026-11-19 | **撤销订阅与跨进程测量**（`1b477f6`）：`RevocationWatcher` 轮询订阅自动应用；`benchmark_revocation.py --cross-process` 端到端传播测量；新增 4 条测试，累计 778 |
 | 2026-11-19 | **asyncio 绑定**（`c32fc97`）：`serve_forever(mode="asyncio")` 缓冲分帧，半帧停滞 peer 不阻塞他人；跨线程 kqueue fd 关闭挂死修复；新增 8 条测试，累计 782 |
+| 2026-11-19 | **撤销推送通道**（`c2b3f39`）：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 整树 cascade 测量；新增 8 条测试，累计 790 |
