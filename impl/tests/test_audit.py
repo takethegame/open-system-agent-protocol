@@ -682,5 +682,354 @@ class CompromisedBusTests(unittest.TestCase):
         self.assertTrue(report["conforming"])
 
 
+class AuditJournalTests(unittest.TestCase):
+    USER = "user://alice"
+    OTHER = "user://bob"
+    TRACE_A = "trace_alpha"
+    TRACE_B = "trace_beta"
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "audit.json"
+
+    def journal(self, user_id=None, **kwargs):
+        return audit.AuditJournal(
+            user_id=user_id or self.USER,
+            store=JsonStore(self.path),
+            clock=clock,
+            **kwargs,
+        )
+
+    def order_section(self, user_id=None):
+        return f"{audit.ORDER_SECTION_PREFIX}{user_id or self.USER}"
+
+    def chain_section(self, trace_id, user_id=None):
+        return f"{audit.USER_PARTITION_PREFIX}{user_id or self.USER}.chain.{trace_id}"
+
+    def seed_order(self, entries, user_id=None):
+        JsonStore(self.path).put(
+            self.order_section(user_id),
+            {"user_id": user_id or self.USER, "entries": entries},
+        )
+
+    def test_one_contiguous_order_spans_traces(self):
+        journal = self.journal()
+        first = journal.append(self.TRACE_A, event(audit_id="audit_a1"))
+        second = journal.append(self.TRACE_B, event(audit_id="audit_b1"))
+        third = journal.append(self.TRACE_A, event(audit_id="audit_a2"))
+
+        self.assertEqual(
+            [entry["seq"] for entry in journal.order()], [1, 2, 3]
+        )
+        self.assertEqual(
+            [entry["trace_id"] for entry in journal.order()],
+            [self.TRACE_A, self.TRACE_B, self.TRACE_A],
+        )
+        self.assertEqual(
+            [entry["audit_id"] for entry in journal.order()],
+            ["audit_a1", "audit_b1", "audit_a2"],
+        )
+        self.assertEqual(journal.order()[0]["ts"], first["ts"])
+        self.assertEqual(journal.order()[1]["audit_id"], second["audit_id"])
+        self.assertEqual(journal.order()[2]["audit_id"], third["audit_id"])
+
+    def test_each_trace_keeps_its_own_chain(self):
+        journal = self.journal()
+        journal.append(self.TRACE_A, event())
+        journal.append(self.TRACE_B, event(action="capability.revoked"))
+        journal.append(self.TRACE_A, event(action="capability.exercised"))
+
+        alpha = journal.trace(self.TRACE_A)
+        beta = journal.trace(self.TRACE_B)
+        self.assertEqual(len(alpha), 2)
+        self.assertEqual(len(beta), 1)
+        self.assertTrue(alpha.verify())
+        self.assertTrue(beta.verify())
+        self.assertEqual(
+            alpha.events[0]["prev_hash"], audit.GENESIS_HASH
+        )
+        self.assertEqual(
+            beta.events[0]["prev_hash"], audit.GENESIS_HASH
+        )
+
+    def test_a_reopen_restores_chains_and_order(self):
+        first = self.journal()
+        first.append(self.TRACE_A, event(audit_id="audit_a1"))
+        first.append(self.TRACE_B, event(audit_id="audit_b1"))
+        first.append(self.TRACE_A, event(audit_id="audit_a2"))
+
+        second = self.journal()
+        self.assertEqual(second.traces(), [self.TRACE_A, self.TRACE_B])
+        self.assertEqual(second.order(), first.order())
+        self.assertEqual(second.trace(self.TRACE_A).chain(), first.trace(self.TRACE_A).chain())
+        self.assertEqual(second.trace(self.TRACE_B).chain(), first.trace(self.TRACE_B).chain())
+        self.assertTrue(second.verify())
+
+    def test_partitions_are_per_user(self):
+        store = JsonStore(self.path)
+        alice = audit.AuditJournal(user_id=self.USER, store=store, clock=clock)
+        alice.append(self.TRACE_A, event(audit_id="audit_alice"))
+        bob = audit.AuditJournal(user_id=self.OTHER, store=store, clock=clock)
+        bob.append(self.TRACE_B, event(audit_id="audit_bob"))
+
+        reopened_alice = self.journal()
+        reopened_bob = self.journal(self.OTHER)
+        self.assertEqual(reopened_alice.traces(), [self.TRACE_A])
+        self.assertEqual(reopened_bob.traces(), [self.TRACE_B])
+        self.assertEqual(
+            [entry["audit_id"] for entry in reopened_alice.order()],
+            ["audit_alice"],
+        )
+        self.assertEqual(
+            [entry["audit_id"] for entry in reopened_bob.order()],
+            ["audit_bob"],
+        )
+        sections = JsonStore(self.path).sections()
+        self.assertIn(self.chain_section(self.TRACE_A), sections)
+        self.assertIn(self.chain_section(self.TRACE_B, self.OTHER), sections)
+        self.assertIn(self.order_section(), sections)
+        self.assertIn(self.order_section(self.OTHER), sections)
+
+    def test_retention_archives_do_not_break_the_order(self):
+        journal = self.journal(max_events=1)
+        journal.append(self.TRACE_A, event(audit_id="audit_1"))
+        journal.append(self.TRACE_B, event(audit_id="audit_2"))
+        journal.append(self.TRACE_A, event(audit_id="audit_3"))
+
+        reopened = self.journal(max_events=1)
+        self.assertEqual(len(reopened.trace(self.TRACE_A)), 1)
+        self.assertEqual(len(reopened.trace(self.TRACE_B)), 1)
+        self.assertEqual(len(reopened.order()), 3)
+        self.assertTrue(reopened.verify())
+        history = reopened.trace(self.TRACE_A).history()
+        self.assertEqual(
+            [item["audit_id"] for item in history["events"]],
+            ["audit_1", "audit_3"],
+        )
+
+    def test_an_audit_id_is_unique_across_traces(self):
+        journal = self.journal()
+        journal.append(self.TRACE_A, event(audit_id="audit_same"))
+        with self.assertRaises(OsapError) as caught:
+            journal.append(self.TRACE_B, event(audit_id="audit_same"))
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+        self.assertEqual(len(journal.order()), 1)
+        self.assertEqual(len(journal.trace(self.TRACE_B)), 0)
+
+    def test_a_foreign_trace_is_rejected(self):
+        journal = self.journal()
+        with self.assertRaises(OsapError) as caught:
+            journal.append(self.TRACE_A, event(trace_id=self.TRACE_B))
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+        self.assertEqual(journal.order(), [])
+
+    def test_an_invalid_event_does_not_advance_the_order(self):
+        journal = self.journal()
+        payload = event()
+        del payload["decision"]
+        with self.assertRaises(OsapError) as caught:
+            journal.append(self.TRACE_A, payload)
+        self.assertEqual(caught.exception.code, "SCHEMA_INVALID")
+        self.assertEqual(journal.order(), [])
+        journal.append(self.TRACE_A, event(audit_id="audit_after"))
+        self.assertEqual(journal.order()[0]["seq"], 1)
+        self.assertEqual(journal.order()[0]["audit_id"], "audit_after")
+
+    def test_a_failed_write_rolls_back_chain_and_order(self):
+        store = JsonStore(self.path)
+        journal = audit.AuditJournal(
+            user_id=self.USER, store=store, clock=clock
+        )
+
+        def fail(_sections):
+            raise OSError("disk full")
+
+        store.put_many = fail
+        with self.assertRaises(OSError):
+            journal.append(self.TRACE_A, event(audit_id="audit_lost"))
+        self.assertEqual(journal.order(), [])
+        self.assertEqual(len(journal.trace(self.TRACE_A)), 0)
+
+        del store.put_many
+        journal.append(self.TRACE_A, event(audit_id="audit_kept"))
+        self.assertEqual(journal.order()[0]["seq"], 1)
+        self.assertEqual(len(self.journal().trace(self.TRACE_A)), 1)
+
+    def test_an_order_index_without_a_chain_is_rejected(self):
+        self.seed_order(
+            [
+                {
+                    "seq": 1,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_missing",
+                    "ts": "2026-11-10T10:14:45Z",
+                }
+            ]
+        )
+        with self.assertRaises(OsapError) as caught:
+            self.journal()
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_a_chain_without_an_order_entry_is_rejected(self):
+        journal = self.journal()
+        journal.trace(self.TRACE_A).append(event())
+        with self.assertRaises(OsapError) as caught:
+            self.journal()
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_a_gap_in_the_order_is_rejected(self):
+        self.seed_order(
+            [
+                {
+                    "seq": 1,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_1",
+                    "ts": "2026-11-10T10:14:45Z",
+                },
+                {
+                    "seq": 3,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_3",
+                    "ts": "2026-11-10T10:14:45Z",
+                },
+            ]
+        )
+        with self.assertRaises(OsapError) as caught:
+            self.journal()
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_a_duplicate_order_entry_is_rejected(self):
+        self.seed_order(
+            [
+                {
+                    "seq": 1,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_same",
+                    "ts": "2026-11-10T10:14:45Z",
+                },
+                {
+                    "seq": 2,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_same",
+                    "ts": "2026-11-10T10:14:45Z",
+                },
+            ]
+        )
+        with self.assertRaises(OsapError) as caught:
+            self.journal()
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_an_order_timestamp_must_match_the_chain(self):
+        journal = self.journal()
+        journal.append(self.TRACE_A, event(audit_id="audit_1"))
+        stored = JsonStore(self.path).get(self.order_section())
+        stored["entries"][0]["ts"] = "2026-11-10T10:15:00Z"
+        JsonStore(self.path).put(self.order_section(), stored)
+        with self.assertRaises(OsapError) as caught:
+            self.journal()
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_an_orphaned_order_entry_is_rejected(self):
+        journal = self.journal()
+        journal.append(self.TRACE_A, event(audit_id="audit_1"))
+        stored = JsonStore(self.path).get(self.order_section())
+        stored["entries"].append(
+            {
+                "seq": 2,
+                "trace_id": self.TRACE_B,
+                "audit_id": "audit_orphan",
+                "ts": "2026-11-10T10:14:45Z",
+            }
+        )
+        JsonStore(self.path).put(self.order_section(), stored)
+        with self.assertRaises(OsapError) as caught:
+            self.journal()
+        self.assertEqual(caught.exception.code, audit.CHAIN_INVALID)
+
+    def test_the_order_section_user_must_match(self):
+        JsonStore(self.path).put(
+            self.order_section(),
+            {"user_id": self.OTHER, "entries": []},
+        )
+        with self.assertRaises(ValueError):
+            self.journal()
+
+    def test_order_entries_must_be_well_formed(self):
+        for entries in (
+            {},
+            [["not", "an", "entry"]],
+            [{"seq": 1, "trace_id": self.TRACE_A, "audit_id": "audit_1"}],
+            [
+                {
+                    "seq": True,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_1",
+                    "ts": "2026-11-10T10:14:45Z",
+                }
+            ],
+            [
+                {
+                    "seq": 1,
+                    "trace_id": "",
+                    "audit_id": "audit_1",
+                    "ts": "2026-11-10T10:14:45Z",
+                }
+            ],
+            [
+                {
+                    "seq": 1,
+                    "trace_id": self.TRACE_A,
+                    "audit_id": "audit_1",
+                    "ts": "not-a-time",
+                }
+            ],
+        ):
+            self.seed_order(entries)
+            with self.assertRaises(ValueError):
+                self.journal()
+
+    def test_invalid_construction_arguments_are_rejected(self):
+        for user_id in ("", None, 7):
+            with self.assertRaises(ValueError):
+                audit.AuditJournal(user_id=user_id)
+        for max_events in (0, -1, True, 1.5):
+            with self.assertRaises(ValueError):
+                audit.AuditJournal(user_id=self.USER, max_events=max_events)
+        journal = self.journal()
+        for trace_id in ("", None, 7):
+            with self.assertRaises(ValueError):
+                journal.append(trace_id, event())
+
+    def test_explicit_identity_and_timestamp_are_kept(self):
+        journal = self.journal()
+        record = journal.append(
+            self.TRACE_A,
+            event(audit_id="audit_explicit", ts="2026-11-10T10:00:00Z"),
+        )
+        self.assertEqual(record["audit_id"], "audit_explicit")
+        self.assertEqual(journal.order()[0]["ts"], "2026-11-10T10:00:00Z")
+
+    def test_returned_order_and_events_are_detached(self):
+        journal = self.journal()
+        record = journal.append(self.TRACE_A, event())
+        order = journal.order()
+        order[0]["audit_id"] = "tampered"
+        record["target"] = "tampered"
+        self.assertEqual(journal.order()[0]["audit_id"], record["audit_id"])
+        self.assertNotEqual(
+            journal.trace(self.TRACE_A).events[0]["target"], "tampered"
+        )
+        self.assertTrue(journal.verify())
+
+    def test_an_in_memory_journal_keeps_order_without_writing(self):
+        journal = audit.AuditJournal(user_id=self.USER, clock=clock)
+        journal.append(self.TRACE_A, event())
+        journal.append(self.TRACE_B, event())
+        self.assertEqual([entry["seq"] for entry in journal.order()], [1, 2])
+        self.assertTrue(journal.verify())
+        self.assertFalse(self.path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,14 @@ has both sections can therefore walk one chain from genesis; a live section
 that was re-rooted after a trim fails verification because its first
 `prev_hash` no longer matches the archive tail.
 
+`AuditJournal` adds two things a single-trace ledger cannot provide. It
+partitions chains by user under `audit.user.<user>.*`, so one user's history is
+never opened together with another's, and it keeps one cross-trace order index
+in `audit.order.<user>`. Each append writes the trace chain and the next order
+entry in one atomic `put_many`, so the global order can never miss an event
+that was persisted. Sequence numbers start at 1 and stay contiguous; a reopen
+rejects a gap, a duplicate, or an order entry that does not match the chain.
+
 `AUDIT_CHAIN_INVALID` is a domain extension: §10.5 requires verification to
 fail but defines no audit-specific standard code.
 """
@@ -40,6 +48,7 @@ import secrets
 from datetime import datetime, timezone
 
 from . import crypto, schema
+from .clock import parse_timestamp
 from .errors import OsapError
 from .idempotency import IdempotencyIndex
 from .store import JsonStore
@@ -52,6 +61,12 @@ LEDGER_SECTION_PREFIX = "audit.chain."
 
 #: Prefix of the per-trace section a trimming ledger archives into.
 ARCHIVE_SECTION_PREFIX = "audit.archive."
+
+#: Prefix of a per-user partition written by `AuditJournal`.
+USER_PARTITION_PREFIX = "audit.user."
+
+#: Prefix of the per-user cross-trace order index.
+ORDER_SECTION_PREFIX = "audit.order."
 
 #: `prev_hash` of the first event in a new chain.
 GENESIS_HASH = "sha256:0000000000000000"
@@ -252,7 +267,7 @@ class AuditLedger:
                 details={"reason": error.code, "message": error.message},
             ) from error
 
-    def _persist(self, *, archive_changed: bool = False) -> None:
+    def _persist(self, *, archive_changed: bool = False, extra: dict | None = None) -> None:
         if self._store is None:
             return
         live = {
@@ -261,19 +276,21 @@ class AuditLedger:
             "created_at": self.created_at,
             "events": copy.deepcopy(self.events),
         }
-        if not archive_changed:
-            self._store.put(self._section, live)
-            return
-        self._store.put_many(
-            {
-                self._section: live,
-                self._archive_section: {
-                    "chain_id": self.chain_id,
-                    "trace_id": self.trace_id,
-                    "events": copy.deepcopy(self._archived),
-                },
+        updates = {self._section: live}
+        if archive_changed:
+            updates[self._archive_section] = {
+                "chain_id": self.chain_id,
+                "trace_id": self.trace_id,
+                "events": copy.deepcopy(self._archived),
             }
-        )
+        if extra:
+            if not isinstance(extra, dict):
+                raise ValueError("extra sections must be a JSON object")
+            updates.update(copy.deepcopy(extra))
+        if len(updates) == 1:
+            self._store.put(self._section, live)
+        else:
+            self._store.put_many(updates)
 
     # --- writing -----------------------------------------------------------
 
@@ -299,8 +316,16 @@ class AuditLedger:
     def __len__(self) -> int:
         return len(self.events)
 
-    def append(self, event: dict) -> dict:
-        """Validate, hash, and append one event, then flush it."""
+    def append(self, event: dict, *, companion=None) -> dict:
+        """Validate, hash, and append one event, then flush it.
+
+        `companion`, when given, is called with the finalized record and must
+        return extra `{section: value}` entries. They are flushed in the same
+        atomic write as the chain, which is how `AuditJournal` keeps the
+        cross-trace order index consistent with the event. The callback must
+        not mutate caller-visible state until `append` returns, because a
+        failed write rolls the ledger back.
+        """
 
         if not isinstance(event, dict):
             raise ValueError("an audit event must be a JSON object")
@@ -329,8 +354,17 @@ class AuditLedger:
                 "duplicate audit_id in the chain",
                 details={"audit_id": record["audit_id"]},
             )
+        before_events = list(self.events)
+        before_archived = list(self._archived)
         self.events.append(record)
-        self._persist(archive_changed=self._trim())
+        try:
+            trimmed = self._trim()
+            extra = companion(record) if companion is not None else None
+            self._persist(archive_changed=trimmed, extra=extra)
+        except BaseException:
+            self.events = before_events
+            self._archived = before_archived
+            raise
         return copy.deepcopy(record)
 
     def _trim(self) -> bool:
@@ -425,6 +459,287 @@ class AuditLedger:
             "created_at": self.created_at,
             "events": copy.deepcopy(self._archived) + copy.deepcopy(self.events),
         }
+
+
+class AuditJournal:
+    """A per-user audit partition with one cross-trace order index (§10.5).
+
+    Every trace keeps its own hash chain under
+    `audit.user.<user_id>.chain.<trace_id>` and an optional archive under
+    `audit.user.<user_id>.archive.<trace_id>`. `append` also adds the next
+    sequence entry to `audit.order.<user_id>` and writes the chain, archive,
+    and order index in one atomic `put_many`, so a crash cannot leave an event
+    that the global order does not know about.
+
+    Sequence numbers start at 1 and are contiguous. A reopen rejects a gap, a
+    duplicate `audit_id`, an order entry whose timestamp does not match the
+    chain event, or a chain event that has no order entry. A journal stores one
+    `user://` partition only; authorization for a cross-user read is still the
+    caller's responsibility through `authorize_cross_user`. Journals for
+    different users must share one `JsonStore` instance per path, because two
+    live stores over one file would overwrite each other's partitions.
+    """
+
+    def __init__(
+        self,
+        *,
+        user_id: str,
+        store: JsonStore | None = None,
+        clock=None,
+        max_events: int | None = None,
+    ) -> None:
+        if not isinstance(user_id, str) or not user_id:
+            raise ValueError("user_id must be a non-empty string")
+        if max_events is not None and (
+            not isinstance(max_events, int)
+            or isinstance(max_events, bool)
+            or max_events < 1
+        ):
+            raise ValueError("max_events must be a positive integer")
+        self.user_id = user_id
+        self.max_events = max_events
+        self._clock = clock or _now
+        self._store = store
+        self._order: list[dict] = []
+        self._next_seq = 1
+        self._ledgers: dict[str, AuditLedger] = {}
+        if store is not None:
+            self._restore()
+
+    # --- section naming ----------------------------------------------------
+
+    @property
+    def order_section(self) -> str:
+        return f"{ORDER_SECTION_PREFIX}{self.user_id}"
+
+    def chain_section(self, trace_id: str) -> str:
+        return f"{USER_PARTITION_PREFIX}{self.user_id}.chain.{trace_id}"
+
+    def archive_section(self, trace_id: str) -> str:
+        return f"{USER_PARTITION_PREFIX}{self.user_id}.archive.{trace_id}"
+
+    # --- restore -----------------------------------------------------------
+
+    def _restore(self) -> None:
+        self._restore_order()
+        self._restore_ledgers()
+        self._check_order_matches()
+
+    def _restore_order(self) -> None:
+        loaded = self._store.get(self.order_section)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{self.order_section!r} must be a JSON object")
+        if loaded.get("user_id") != self.user_id:
+            raise ValueError(
+                f"{self.order_section!r} holds user {loaded.get('user_id')!r}, "
+                f"not {self.user_id!r}"
+            )
+        entries = loaded.get("entries")
+        if not isinstance(entries, list):
+            raise ValueError(f"{self.order_section!r} entries must be a JSON array")
+        order: list[dict] = []
+        seen: set[str] = set()
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"{self.order_section!r} entry {index} must be a JSON object"
+                )
+            seq = entry.get("seq")
+            if not isinstance(seq, int) or isinstance(seq, bool):
+                raise ValueError(
+                    f"{self.order_section!r} entry {index} has an invalid seq"
+                )
+            if seq != index + 1:
+                raise OsapError(
+                    CHAIN_INVALID,
+                    "audit order sequence is not contiguous",
+                    details={"index": index, "expected": index + 1, "actual": seq},
+                )
+            for field in ("trace_id", "audit_id", "ts"):
+                value = entry.get(field)
+                if not isinstance(value, str) or not value:
+                    raise ValueError(
+                        f"{self.order_section!r} entry {index} has an invalid {field}"
+                    )
+            try:
+                parse_timestamp(entry["ts"])
+            except OsapError:
+                raise ValueError(
+                    f"{self.order_section!r} entry {index} has a malformed ts"
+                ) from None
+            if entry["audit_id"] in seen:
+                raise OsapError(
+                    CHAIN_INVALID,
+                    "duplicate audit_id in the audit order",
+                    details={"index": index, "audit_id": entry["audit_id"]},
+                )
+            seen.add(entry["audit_id"])
+            order.append(
+                {
+                    "seq": seq,
+                    "trace_id": entry["trace_id"],
+                    "audit_id": entry["audit_id"],
+                    "ts": entry["ts"],
+                }
+            )
+        self._order = order
+        self._next_seq = len(order) + 1
+
+    def _restore_ledgers(self) -> None:
+        prefix = f"{USER_PARTITION_PREFIX}{self.user_id}.chain."
+        for section in self._store.sections():
+            if not section.startswith(prefix):
+                continue
+            trace_id = section[len(prefix) :]
+            if not trace_id:
+                raise ValueError(f"{section!r} has no trace identifier")
+            self._ledgers[trace_id] = AuditLedger(
+                trace_id=trace_id,
+                store=self._store,
+                clock=self._clock,
+                section=section,
+                max_events=self.max_events,
+                archive_section=self.archive_section(trace_id),
+            )
+
+    def _check_order_matches(self) -> None:
+        events: dict[tuple[str, str], dict] = {}
+        for trace_id, ledger in self._ledgers.items():
+            for event in ledger.history()["events"]:
+                key = (trace_id, event["audit_id"])
+                if key in events:
+                    raise OsapError(
+                        CHAIN_INVALID,
+                        "duplicate audit_id across journal traces",
+                        details={"trace_id": trace_id, "audit_id": event["audit_id"]},
+                    )
+                events[key] = event
+        ordered = {
+            (entry["trace_id"], entry["audit_id"]): entry for entry in self._order
+        }
+        missing = sorted(set(events) - set(ordered))
+        orphaned = sorted(set(ordered) - set(events))
+        if missing or orphaned:
+            raise OsapError(
+                CHAIN_INVALID,
+                "audit order does not match the stored chains",
+                details={
+                    "unordered_events": [list(item) for item in missing],
+                    "orphaned_entries": [list(item) for item in orphaned],
+                },
+            )
+        for key, entry in ordered.items():
+            if events[key]["ts"] != entry["ts"]:
+                raise OsapError(
+                    CHAIN_INVALID,
+                    "audit order timestamp does not match the chain event",
+                    details={
+                        "trace_id": key[0],
+                        "audit_id": key[1],
+                        "expected": events[key]["ts"],
+                        "actual": entry["ts"],
+                    },
+                )
+        if self._next_seq != len(self._order) + 1:
+            raise OsapError(
+                CHAIN_INVALID,
+                "audit order next sequence is inconsistent",
+                details={
+                    "expected": len(self._order) + 1,
+                    "actual": self._next_seq,
+                },
+            )
+
+    # --- writing -----------------------------------------------------------
+
+    def trace(self, trace_id: str) -> AuditLedger:
+        """Return (and lazily create) the ledger for one trace."""
+
+        if not isinstance(trace_id, str) or not trace_id:
+            raise ValueError("trace_id must be a non-empty string")
+        ledger = self._ledgers.get(trace_id)
+        if ledger is None:
+            ledger = AuditLedger(
+                trace_id=trace_id,
+                store=self._store,
+                clock=self._clock,
+                section=self.chain_section(trace_id),
+                max_events=self.max_events,
+                archive_section=self.archive_section(trace_id),
+            )
+            self._ledgers[trace_id] = ledger
+        return ledger
+
+    def traces(self) -> list[str]:
+        """Trace identifiers currently held by this user partition."""
+
+        return sorted(self._ledgers)
+
+    def append(self, trace_id: str, event: dict) -> dict:
+        """Append one event and its global order entry in one atomic write."""
+
+        ledger = self.trace(trace_id)
+        if not isinstance(event, dict):
+            raise ValueError("an audit event must be a JSON object")
+        record = copy.deepcopy(event)
+        record.setdefault("trace_id", trace_id)
+        if record["trace_id"] != trace_id:
+            raise OsapError(
+                CHAIN_INVALID,
+                "audit event does not belong to this trace",
+                details={"trace_id": record["trace_id"], "journal_trace_id": trace_id},
+            )
+        record.setdefault("audit_id", f"audit_{secrets.token_hex(8)}")
+        record.setdefault("ts", _stamp(self._clock()))
+        try:
+            parse_timestamp(record["ts"])
+        except OsapError:
+            raise ValueError("audit order timestamp must be RFC 3339") from None
+        if any(entry["audit_id"] == record["audit_id"] for entry in self._order):
+            raise OsapError(
+                CHAIN_INVALID,
+                "duplicate audit_id in the audit order",
+                details={"audit_id": record["audit_id"]},
+            )
+
+        seq = self._next_seq
+        entry = {
+            "seq": seq,
+            "trace_id": trace_id,
+            "audit_id": record["audit_id"],
+            "ts": record["ts"],
+        }
+        proposed = self._order + [entry]
+
+        def companion(_record: dict) -> dict:
+            return {
+                self.order_section: {
+                    "user_id": self.user_id,
+                    "entries": copy.deepcopy(proposed),
+                }
+            }
+
+        saved = ledger.append(record, companion=companion)
+        self._order = proposed
+        self._next_seq = seq + 1
+        return saved
+
+    # --- inspection --------------------------------------------------------
+
+    def order(self) -> list[dict]:
+        """Detached copy of the cross-trace order, oldest first."""
+
+        return copy.deepcopy(self._order)
+
+    def verify(self) -> bool:
+        """Verify every trace chain and the cross-trace order index."""
+
+        for ledger in self._ledgers.values():
+            ledger.verify()
+        self._check_order_matches()
+        return True
 
 
 def _commitment(salt: str, value: str) -> str:

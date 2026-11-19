@@ -25,6 +25,8 @@ Covered so far:
   index, capability issuance/revocation state, consent flow, task tree,
   effect journal, and audit ledger so a restart replays instead of
   re-executing and a corrupt audit chain fails closed (§7.8, §5.5, §10.5);
+  `AuditJournal` partitions chains by user and keeps one atomic cross-trace
+  order index per user;
 - recovery: `TaskBoard.recover()` fails or reschedules non-terminal tasks,
   marks intent-only effects `unknown`, gates replay until reconciliation,
   and returns audit-ready events (§3.7, §8.11);
@@ -50,7 +52,7 @@ from . import (
     task,
     transport,
 )
-from .audit import AuditLedger
+from .audit import AuditJournal, AuditLedger
 from .bus import Bus, sender_identity
 from .clock import Deadline
 from .envelope import KNOWN_TYPES, SUPPORTED_MAJOR, validate
@@ -65,6 +67,7 @@ from .store import JsonStore
 __all__ = [
     "Admission",
     "AdmissionController",
+    "AuditJournal",
     "AuditLedger",
     "Binding",
     "Bus",

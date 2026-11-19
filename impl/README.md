@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控 / 恢复）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / OS 密钥环）、上下文解析事件持久化、审计保留与归档、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / OS 密钥环）、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -65,6 +65,7 @@
 | 外部信任 | §6.4 | 外部协议内容标 `origin=external`；未验签时不得保持 `system`，归一为 `unverified` |
 | 审计链验证 | §10.5、§10.6 | 事件 schema、phase 规则、trace 一致、`audit_id` 唯一、`prev_hash` 链接；`AuditLedger` 追加时生成哈希并在重启时重算 |
 | 审计保留与归档 | §10.5 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 首条 `prev_hash` 指向归档尾；`history()` 导出完整链 |
+| 按用户分区与全局顺序 | §10.5 | `AuditJournal` 把每个用户的链写入 `audit.user.<user>.*`，并在 `audit.order.<user>` 记录跨 trace 的连续序号；链、归档与序号一次 `put_many` 原子写入；重开拒绝缺口、重复、时间戳不符与无对应事件 |
 | 脱敏导出 | §10.6 | 目标、策略、回执、上下文引用替换为每次导出唯一的盐值承诺；链仍可验证 |
 | 回放 | §10.6 | 同一幂等键重复请求只执行一次副作用 |
 | 重启任务恢复 | §3.7、§8.10 | `TaskBoard.recover()` 把非终态任务转为 `failed`，或按策略改回 `created`；任务树与 effect 日志一次 `put_many` 原子写入 |
@@ -83,7 +84,7 @@ impl/
   osap/
     __init__.py         公共导出
     bus.py              握手、校验、路由、幂等、错误回执
-    audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留与归档、脱敏导出、回放、恢复
+    audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留与归档、按用户分区与跨 trace 顺序、脱敏导出、回放、恢复
     capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销
     clock.py            单调时钟 deadline
     consent.py          §5.8 同意回执与能力范围校验
@@ -101,7 +102,7 @@ impl/
     pcs.py              §4.5、§10.4 PCS 回执签名、离线验签、公钥登记/轮换/撤销
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
-    store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本）
+    store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
     task.py             §8 任务树、预算、取消、结果、handoff、整树持久化
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、并发服务
   tests/                单元测试（unittest）
@@ -418,7 +419,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 
 ## 6. 已知限制
 
-1. **部分内存态**：幂等索引、能力签发/撤销、同意流程、任务树、effect 日志、审计账本与 PCS 公钥可通过 `JsonStore` 跨重启，但清单/能力注册表、注册表轮换状态与上下文仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
+1. **部分内存态**：幂等索引、能力签发/撤销、同意流程、任务树、effect 日志、审计账本与 PCS 公钥可通过 `JsonStore` 跨重启，但清单/能力注册表、注册表轮换状态与缓存窗口仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
 2. **开发密钥环**：一致性适配器在导入时生成一次性 Ed25519 密钥并为示例 App 签清单。示例里的 `base64url-example-*` 是占位字符串，不是真实密钥。
 3. **OS 认证只覆盖 Linux/macOS 本地 socket**：已实现 `SO_PEERCRED` / `getpeereid` / `LOCAL_PEERPID` 与可执行文件解析；audit token、package identity、代码签名和 Windows SID 都未实现。
 4. **不是平台原生绑定**：只有 `AF_UNIX` stream 与数据报 socketpair，没有 XPC、Binder、named pipe 或 localhost mTLS；对端认证是 uid/gid/pid/可执行文件，不是平台代码签名。
@@ -439,7 +440,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 19. **并发上限由线程池决定**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；没有事件循环、异步 I/O 或按 Agent 的加权调度。`max_messages` 在并发模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
-22. **审计账本按 trace 单链**：`max_events` 只裁剪 live 链，归档仍只增不减，没有跨 trace 全局顺序、归档压缩或按用户分区；`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随归档增长。
+22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_events` 只裁剪 live 链，归档仍只增不减，没有压缩。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 24. **密钥环只覆盖 macOS/Linux**：`KeyringKeyStore` 没有 Windows Credential Manager 后端；macOS 路径把密钥放在 `security` 的命令行参数里；也没有从既有 `consent.pcs_key` 自动迁移到密钥环的工具，迁移需要调用方先 `load()` 再 `save()`。
 
