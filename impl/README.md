@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控 / 恢复）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、撤销日志与跨进程副本应用、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、撤销日志与跨进程副本应用、恢复同事务审计与 effect 归档、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -71,12 +71,14 @@
 | 脱敏导出 | §10.6 | 目标、策略、回执、上下文引用替换为每次导出唯一的盐值承诺；链仍可验证 |
 | 回放 | §10.6 | 同一幂等键重复请求只执行一次副作用 |
 | 重启任务恢复 | §3.7、§8.10 | `TaskBoard.recover()` 把非终态任务转为 `failed`，或按策略改回 `created`；任务树与 effect 日志一次 `put_many` 原子写入 |
+| 恢复审计同事务 | §3.7、§10.5 | `TaskBoard(ledger=...)` 挂共享同一 `JsonStore` 的 `AuditLedger`；`recover()` 用 `AuditLedger.append_many` 一次落盘任务树、effect 日志与审计链；写失败回滚状态、日志与暂存事件，可原样重试 |
+| effect 归档 | §8.11 | `TaskBoard(max_effects=...)` 把最旧的已决 effect 移入 `task.effects.archive`（与 live 同一原子写入）；pending/unknown 永不归档，重放闸门不受裁剪影响；effect 变更写失败时回滚内存 |
 | 恢复对账 | §8.11、§10.5 | `task.effects` 先写 `effect.intent` 再写 outcome；只有 intent 时标记 `unknown`；`require_replay_allowed()` 在 unknown 时拒绝重放 |
 | 对账写回 | §8.11 | `reconcile_effect(intent_ref, outcome=...)` 只接受 `unknown`；确认未执行后才允许显式重试，确认已执行则拒绝重放 |
 | 跨用户 | §11.2 | 默认拒绝；显式开启且双方同意才放行 |
 | 被攻破的 Bus | §3.6、§11.1 | 0.1 不声称 P0 防护；声明了即判不合约 |
 
-**不在本阶段**：跨进程撤销分发、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
+**不在本阶段**：跨进程撤销的自动广播/通知（拉模式日志已实现）、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
 
 ## 2. 目录
 
@@ -105,7 +107,7 @@ impl/
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
-    task.py             §8 任务树、预算、取消、结果、handoff、整树持久化
+    task.py             §8 任务树、预算、取消、结果、handoff、整树持久化、恢复同事务审计与 effect 归档
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、线程池与 selector 事件循环
   tests/                单元测试（unittest）
 ```
@@ -427,7 +429,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 2. **开发密钥环**：一致性适配器在导入时生成一次性 Ed25519 密钥并为示例 App 签清单。示例里的 `base64url-example-*` 是占位字符串，不是真实密钥。
 3. **OS 认证只覆盖 Linux/macOS 本地 socket**：已实现 `SO_PEERCRED` / `getpeereid` / `LOCAL_PEERPID` 与可执行文件解析；audit token、package identity、代码签名和 Windows SID 都未实现。
 4. **不是平台原生绑定**：只有 `AF_UNIX` stream 与数据报 socketpair，没有 XPC、Binder、named pipe 或 localhost mTLS；对端认证是 uid/gid/pid/可执行文件，不是平台代码签名。
-5. **恢复审计不在同一事务内**：`TaskBoard` 可持久化整棵树与 `task.effects`，`recover()` 也返回完整审计事件；但 `TaskBoard.audit` 仍是内存列表，事件要由调用方写入 `AuditLedger`，两个写入不是原子的。`require_replay_allowed()` 只是闸门，绕过该 API 的直接副作用不受保护。
+5. **恢复审计事务要求同库**：`TaskBoard(ledger=...)` 可以把任务树、effect 日志与审计链放进同一次 `put_many`，但前提是 `AuditLedger` 与 board 共享同一个 `JsonStore` 实例（构造时校验）；ledger 用独立文件时事务无从谈起。`require_replay_allowed()` 仍只是闸门，绕过该 API 的直接副作用不受保护。
 6. **能力凭证只做结构校验**：能力 `proof.sig` 仍未验签，`cap_id` 也未由 CA 密钥覆盖；PCS 回执的签名、登记、轮换与撤销已由 `pcs.py` 覆盖，能力凭证本身仍待补。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
 8. **撤销分发是拉模式，不自动通知**：`revoke` 会把新撤销写入 `capability.revocations` 日志并原子落盘，另一个进程可以用 `apply_revocations(entries, source=...)` 拉取并级联应用；但没有任何自动广播、订阅或重试调度，§5.5 的“通知受影响 Agent”仍需调用方自建传输（Bus 消息、文件轮询或 IPC）。撤销 P95 仍是进程内口径。
