@@ -21,7 +21,9 @@ back instead of half-applying.
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import schema
 from .clock import parse_timestamp
@@ -539,3 +541,77 @@ class CapabilityAuthority:
                 f"{risk} actions require a consent receipt",
                 details={"risk": risk},
             )
+
+
+class RevocationWatcher:
+    """Poll a source store's revocation journal and apply new entries.
+
+    This is the pull-mode subscription on top of the journal: the watcher
+    re-reads the source `JsonStore` file on an interval, hands the whole
+    journal to the replica's `apply_revocations`, and relies on the
+    per-source cursor for idempotence. The file — or whatever populates
+    `source_path` — is the transport; there is no push channel and no
+    protocol messages. Callers that need lower latency should build a push
+    channel and call `apply_revocations` directly with the fetched batch.
+    """
+
+    def __init__(
+        self,
+        source_path,
+        replica: "CapabilityAuthority",
+        *,
+        source: str = "issuer",
+        interval: float = 0.05,
+    ) -> None:
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        if not isinstance(replica, CapabilityAuthority):
+            raise ValueError("replica must be a CapabilityAuthority")
+        if not isinstance(interval, (int, float)) or isinstance(interval, bool) or interval <= 0:
+            raise ValueError("interval must be a positive number")
+        self.source_path = Path(source_path)
+        self.replica = replica
+        self.source = source
+        self.interval = float(interval)
+        self.last_report: dict | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def poll_once(self) -> dict | None:
+        """Read the source journal once and apply it; None when absent.
+
+        A fresh `JsonStore` is opened per poll so external writes by another
+        process are always seen; the single-writer rule is never broken
+        because the watcher never writes the source file.
+        """
+
+        entries = JsonStore(self.source_path).get(REVOCATIONS_SECTION)
+        if entries is None:
+            return None
+        report = self.replica.apply_revocations(entries, source=self.source)
+        self.last_report = report
+        return report
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("watcher is already running")
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.poll_once()
+            except Exception:
+                # Distribution failures are retried on the next tick; the
+                # replica state never moves on a failed apply.
+                continue
+
+    def stop(self, *, timeout: float = 2.0) -> bool:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is None:
+            return False
+        thread.join(timeout)
+        return not thread.is_alive()

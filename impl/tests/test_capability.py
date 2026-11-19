@@ -5,6 +5,7 @@
 import copy
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -726,6 +727,88 @@ class RevocationApplyTests(unittest.TestCase):
         self.assertEqual(report["applied"], 3)
         self.assertEqual(replica.last_seq, 3)
         self.assertEqual(replica.applied_sources(), {"issuer": 3})
+
+
+class RevocationWatcherTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.source_path = Path(self.directory.name) / "source.json"
+        self.replica_path = Path(self.directory.name) / "replica.json"
+        self.source = capability.CapabilityAuthority(store=JsonStore(self.source_path))
+        self.replica = capability.CapabilityAuthority(store=JsonStore(self.replica_path))
+
+    def watcher(self, **kwargs) -> capability.RevocationWatcher:
+        kwargs.setdefault("source", "issuer")
+        return capability.RevocationWatcher(self.source_path, self.replica, **kwargs)
+
+    def wait_for(self, predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.001)
+        raise AssertionError("condition was not reached before the timeout")
+
+    def test_the_watcher_applies_revocations_automatically(self):
+        watcher = self.watcher(interval=0.005)
+        watcher.start()
+        try:
+            self.source.issue(parent())
+            self.assertEqual(self.source.revoke(PARENT_ID), 1)
+            self.wait_for(
+                lambda: self.replica.applied_sources().get("issuer") == 1
+            )
+            self.assertTrue(self.replica.is_revoked({"cap_id": PARENT_ID}))
+            # A later revocation is picked up by the same watcher.
+            self.assertEqual(self.source.revoke("cap_second"), 1)
+            self.wait_for(
+                lambda: self.replica.applied_sources().get("issuer") == 2
+            )
+            self.assertTrue(self.replica.is_revoked({"cap_id": "cap_second"}))
+        finally:
+            self.assertTrue(watcher.stop())
+            self.assertFalse(watcher.stop())
+        # A manual poll after the watcher stops still reports the cursor.
+        report = watcher.poll_once()
+        self.assertEqual(report["applied"], 0)
+        self.assertEqual(report["cursor"], 2)
+
+    def test_start_twice_is_rejected(self):
+        watcher = self.watcher(interval=0.05)
+        with self.assertRaises(RuntimeError):
+            watcher.start()
+            watcher.start()
+        watcher.stop()
+
+    def test_invalid_arguments_are_rejected(self):
+        for kwargs in (
+            {"source": ""},
+            {"interval": 0},
+            {"interval": -1},
+            {"interval": True},
+        ):
+            with self.assertRaises(ValueError):
+                self.watcher(**kwargs)
+        with self.assertRaises(ValueError):
+            capability.RevocationWatcher(self.source_path, object())
+
+    def test_a_failed_apply_is_retried_on_the_next_tick(self):
+        watcher = self.watcher(interval=0.005)
+        self.source.issue(parent())
+        self.source.revoke(PARENT_ID)
+        # A gap fails closed; the watcher keeps the replica empty and retries.
+        journal = JsonStore(self.source_path).get(capability.REVOCATIONS_SECTION)
+        poisoned = [{**journal[0], "seq": 2}]
+        JsonStore(self.source_path).put(capability.REVOCATIONS_SECTION, poisoned)
+        with self.assertRaises(OsapError):
+            watcher.poll_once()
+        self.assertEqual(self.replica.revoked, set())
+        # Restoring the real journal lets the next poll succeed.
+        JsonStore(self.source_path).put(capability.REVOCATIONS_SECTION, journal)
+        report = watcher.poll_once()
+        self.assertEqual(report["applied"], 1)
+        self.assertTrue(self.replica.is_revoked({"cap_id": PARENT_ID}))
 
 
 if __name__ == "__main__":
