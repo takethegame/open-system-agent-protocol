@@ -484,5 +484,516 @@ class PersistenceTests(unittest.TestCase):
         self.assertFalse(self.path.exists())
 
 
+class DurableFabricTests(unittest.TestCase):
+    """Shared fixture: one JSON file, reopened by constructing a new fabric."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "context.json"
+
+    def fabric(self, **kwargs):
+        return context.ContextFabric(store=JsonStore(self.path), **kwargs)
+
+    def reopened(self, **kwargs):
+        return context.ContextFabric(store=JsonStore(self.path), **kwargs)
+
+    def seed(self, section, value):
+        JsonStore(self.path).put(section, value)
+
+    def stored(self, section):
+        return JsonStore(self.path).get(section)
+
+
+class HandleRegistryTests(DurableFabricTests):
+    def test_a_registered_handle_survives_a_reopen(self):
+        document = handle()
+        self.fabric().register_handle(document)
+        self.assertEqual(self.reopened().handle(document["handle"]), document)
+        self.assertEqual(self.stored(context.HANDLES_SECTION)[document["handle"]], document)
+
+    def test_registration_is_idempotent(self):
+        document = handle()
+        fabric = self.fabric()
+        first = fabric.register_handle(document)
+        second = fabric.register_handle(document)
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.stored(context.HANDLES_SECTION)), 1)
+
+    def test_a_conflicting_registration_is_rejected(self):
+        document = handle()
+        fabric = self.fabric()
+        fabric.register_handle(document)
+        with self.assertRaises(ValueError):
+            fabric.register_handle(handle(label="public"))
+        self.assertEqual(fabric.handle(document["handle"])["label"], "personal")
+
+    def test_a_returned_handle_is_a_copy(self):
+        document = handle()
+        fabric = self.fabric()
+        registered = fabric.register_handle(document)
+        registered["label"] = "public"
+        registered["constraints"]["allow_egress"] = True
+        self.assertEqual(fabric.handle(document["handle"])["label"], "personal")
+        self.assertFalse(fabric.handle(document["handle"])["constraints"]["allow_egress"])
+
+    def test_a_string_resolves_through_the_registry(self):
+        document = handle()
+        fabric = self.fabric()
+        fabric.register_handle(document)
+        result = fabric.resolve(
+            document["handle"],
+            agent=document["audience"],
+            granted_actions=["resolve"],
+            now=now_of(document),
+        )
+        self.assertEqual(result["handle"], document["handle"])
+        self.assertEqual(result["label"], "personal")
+        self.assertEqual(result["expires_at"], document["expires_at"])
+
+    def test_a_registered_handle_still_checks_expiry(self):
+        document = handle()
+        fabric = self.fabric()
+        fabric.register_handle(document)
+        later = parse_timestamp("2026-11-10T11:00:00Z")
+        with self.assertRaises(OsapError) as caught:
+            fabric.resolve(
+                document["handle"],
+                agent=document["audience"],
+                granted_actions=["resolve"],
+                now=later,
+            )
+        self.assertEqual(caught.exception.code, "CONTEXT_EXPIRED")
+        self.assertEqual(fabric.audit[-1]["reason"], "expired")
+
+    def test_a_registered_handle_still_checks_the_audience(self):
+        document = handle()
+        fabric = self.fabric()
+        fabric.register_handle(document)
+        with self.assertRaises(OsapError) as caught:
+            fabric.resolve(
+                document["handle"],
+                agent=NOTES,
+                granted_actions=["resolve"],
+                now=now_of(document),
+            )
+        self.assertEqual(caught.exception.code, "CONTEXT_DENIED")
+        self.assertEqual(fabric.audit[-1]["reason"], "audience")
+
+    def test_an_unknown_identifier_is_audited_and_not_found(self):
+        fabric = self.fabric()
+        with self.assertRaises(OsapError) as caught:
+            fabric.resolve(
+                "ctx://user/profile#unknown",
+                agent=NOTES,
+                granted_actions=["resolve"],
+                now=now_of(handle()),
+            )
+        self.assertEqual(caught.exception.code, "CONTEXT_NOT_FOUND")
+        self.assertEqual(fabric.audit[-1]["decision"], "deny")
+        self.assertEqual(fabric.audit[-1]["reason"], "not_found")
+        self.assertEqual(self.stored(context.EVENTS_SECTION)[-1]["reason"], "not_found")
+
+    def test_an_empty_identifier_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.fabric().resolve(
+                "",
+                agent=NOTES,
+                granted_actions=["resolve"],
+                now=now_of(handle()),
+            )
+
+    def test_drop_handle_is_persisted(self):
+        document = handle()
+        fabric = self.fabric()
+        fabric.register_handle(document)
+        self.assertTrue(fabric.drop_handle(document["handle"]))
+        self.assertFalse(fabric.drop_handle(document["handle"]))
+        self.assertIsNone(self.reopened().handle(document["handle"]))
+
+    def test_an_unknown_handle_is_none(self):
+        self.assertIsNone(self.fabric().handle("ctx://user/profile#unknown"))
+
+    def test_invalid_handle_records_are_rejected(self):
+        for record in (
+            {"scheme": "ctx"},
+            {"handle": ""},
+            handle(scope=7),
+            handle(ttl=-1),
+            handle(ttl=True),
+            handle(label="restricted"),
+            handle(created_at="not-a-time"),
+            handle(expires_at=""),
+            handle(derived_from="obj://sha256:9f2c7b1a"),
+            handle(constraints=[]),
+        ):
+            with self.assertRaises(ValueError):
+                self.fabric().register_handle(record)
+
+    def test_a_non_object_handle_section_is_rejected(self):
+        self.seed(context.HANDLES_SECTION, [])
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_a_handle_key_must_match_its_record(self):
+        self.seed(
+            context.HANDLES_SECTION,
+            {"ctx://user/profile#other": handle()},
+        )
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_a_corrupt_handle_record_is_rejected(self):
+        document = handle()
+        self.seed(
+            context.HANDLES_SECTION,
+            {document["handle"]: {"handle": document["handle"], "ttl": -1}},
+        )
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_handle_registration_keeps_other_sections(self):
+        document = handle()
+        fabric = self.fabric()
+        fabric.resolve(
+            document,
+            agent=document["audience"],
+            granted_actions=["resolve"],
+            now=now_of(document),
+        )
+        fabric.register_handle(document)
+        restored = self.reopened()
+        self.assertEqual(len(restored.audit), 1)
+        self.assertEqual(restored.handle(document["handle"]), document)
+
+    def test_an_in_memory_fabric_registers_without_writing(self):
+        document = handle()
+        fabric = context.ContextFabric()
+        fabric.register_handle(document)
+        self.assertEqual(fabric.handle(document["handle"]), document)
+        self.assertFalse(self.path.exists())
+
+
+class BlackboardPersistenceTests(DurableFabricTests):
+    TASK = "task_01J9Z6Q3V8N2K4M7P1R5T0WXAB"
+
+    def test_an_open_blackboard_survives_a_reopen(self):
+        board = load("blackboard.json")
+        self.fabric().open_blackboard(board["task_id"], board=board)
+        restored = self.reopened().blackboard(board["task_id"])
+        self.assertEqual(restored["blackboard"], board["blackboard"])
+        self.assertEqual(restored["entries"], board["entries"])
+        self.assertEqual(restored["version"], board["version"])
+        self.assertEqual(restored["ttl"], board["ttl"])
+        self.assertEqual(restored["created_at"], board["created_at"])
+        self.assertEqual(restored["updated_at"], board["updated_at"])
+        self.assertFalse(restored["closed"])
+        self.assertFalse(restored["promoted_to_memory"])
+
+    def test_open_is_idempotent_and_rejects_conflicts(self):
+        fabric = self.fabric()
+        first = fabric.open_blackboard(self.TASK, entries=[{"key": "plan"}])
+        self.assertEqual(
+            fabric.open_blackboard(self.TASK, entries=[{"key": "plan"}]),
+            first,
+        )
+        with self.assertRaises(ValueError):
+            fabric.open_blackboard(self.TASK, entries=[{"key": "other"}])
+
+    def test_a_board_must_match_its_task_id(self):
+        fabric = self.fabric()
+        with self.assertRaises(ValueError):
+            fabric.open_blackboard("task_other", board=load("blackboard.json"))
+
+    def test_board_and_entries_are_mutually_exclusive(self):
+        with self.assertRaises(ValueError):
+            self.fabric().open_blackboard(
+                self.TASK,
+                board=load("blackboard.json"),
+                entries=[],
+            )
+
+    def test_entries_are_persisted_by_write(self):
+        fabric = self.fabric()
+        fabric.open_blackboard(self.TASK, entries=[{"key": "plan"}])
+        fabric.write_blackboard(
+            self.TASK,
+            [{"key": "plan"}, {"key": "draft", "value_ref": "obj://x"}],
+        )
+        restored = self.reopened().blackboard(self.TASK)
+        self.assertEqual([entry["key"] for entry in restored["entries"]], ["plan", "draft"])
+
+    def test_an_unknown_blackboard_is_not_found(self):
+        fabric = self.fabric()
+        for call in (
+            lambda: fabric.write_blackboard(self.TASK, []),
+            lambda: fabric.close_blackboard(self.TASK),
+        ):
+            with self.assertRaises(OsapError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "CONTEXT_NOT_FOUND")
+
+    def test_closing_clears_entries_and_never_promotes(self):
+        fabric = self.fabric()
+        fabric.open_blackboard(
+            self.TASK,
+            entries=[{"key": "plan"}, {"key": "draft"}],
+        )
+        report = fabric.close_blackboard(self.TASK)
+        self.assertTrue(report["closed"])
+        self.assertTrue(report["cleared_or_archived"])
+        self.assertEqual(report["entries_archived"], 2)
+        self.assertFalse(report["promoted_to_memory"])
+        restored = self.reopened().blackboard(self.TASK)
+        self.assertTrue(restored["closed"])
+        self.assertEqual(restored["entries"], [])
+        self.assertEqual(restored["entries_archived"], 2)
+        self.assertFalse(restored["promoted_to_memory"])
+
+    def test_closing_is_idempotent(self):
+        fabric = self.fabric()
+        fabric.open_blackboard(self.TASK, entries=[{"key": "plan"}])
+        first = fabric.close_blackboard(self.TASK)
+        second = fabric.close_blackboard(self.TASK)
+        self.assertEqual(first, second)
+        self.assertEqual(self.reopened().blackboard(self.TASK)["entries_archived"], 1)
+
+    def test_a_closed_blackboard_cannot_be_reopened_or_written(self):
+        fabric = self.fabric()
+        fabric.open_blackboard(self.TASK, entries=[{"key": "plan"}])
+        fabric.close_blackboard(self.TASK)
+        with self.assertRaises(ValueError):
+            fabric.open_blackboard(self.TASK, entries=[])
+        with self.assertRaises(ValueError):
+            fabric.write_blackboard(self.TASK, [{"key": "plan"}])
+
+    def test_an_invalid_task_id_is_rejected(self):
+        for task_id in ("", None, 7):
+            with self.assertRaises(ValueError):
+                self.fabric().open_blackboard(task_id)
+
+    def test_corrupt_blackboard_records_are_rejected(self):
+        base = {
+            "task_id": self.TASK,
+            "blackboard": self.TASK,
+            "entries": [],
+            "closed": False,
+            "entries_archived": 0,
+            "promoted_to_memory": False,
+        }
+        corrupt = [
+            [("entries", "not-a-list")],
+            [("entries", [["not", "an", "object"]])],
+            [("closed", "yes")],
+            [("entries_archived", -1)],
+            [("promoted_to_memory", "no")],
+            [("version", -1)],
+            [("ttl", True)],
+            [("created_at", "not-a-time")],
+            [("closed", True), ("entries", [{"key": "plan"}])],
+            [("closed", True), ("promoted_to_memory", True)],
+        ]
+        for overrides in corrupt:
+            record = dict(base)
+            record.update(overrides)
+            self.seed(context.BLACKBOARDS_SECTION, {self.TASK: record})
+            with self.assertRaises(ValueError):
+                self.reopened()
+
+    def test_a_non_object_blackboard_section_is_rejected(self):
+        self.seed(context.BLACKBOARDS_SECTION, [])
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_a_blackboard_key_must_match_its_record(self):
+        self.seed(
+            context.BLACKBOARDS_SECTION,
+            {
+                "task_other": {
+                    "task_id": self.TASK,
+                    "blackboard": self.TASK,
+                    "entries": [],
+                }
+            },
+        )
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_an_in_memory_fabric_keeps_a_blackboard_without_writing(self):
+        fabric = context.ContextFabric()
+        fabric.open_blackboard(self.TASK, entries=[{"key": "plan"}])
+        self.assertEqual(fabric.blackboard(self.TASK)["entries"], [{"key": "plan"}])
+        self.assertFalse(self.path.exists())
+
+
+class ObjectMetadataTests(DurableFabricTests):
+    URI = "obj://sha256:9f2c7b1a"
+
+    def test_object_metadata_survives_a_reopen(self):
+        self.fabric().register_object(
+            self.URI,
+            label="personal",
+            metadata={"size": 12, "media_type": "text/plain"},
+        )
+        restored = self.reopened().object_state(self.URI)
+        self.assertEqual(restored["uri"], self.URI)
+        self.assertEqual(restored["reference_count"], 0)
+        self.assertFalse(restored["deleted"])
+        self.assertFalse(restored["tombstoned"])
+        self.assertEqual(restored["label"], "personal")
+        self.assertEqual(restored["metadata"], {"size": 12, "media_type": "text/plain"})
+
+    def test_registration_is_idempotent_and_rejects_conflicts(self):
+        fabric = self.fabric()
+        first = fabric.register_object(self.URI, label="public")
+        self.assertEqual(fabric.register_object(self.URI, label="public"), first)
+        with self.assertRaises(ValueError):
+            fabric.register_object(self.URI, label="personal")
+        self.assertEqual(fabric.object_state(self.URI)["label"], "public")
+
+    def test_retain_and_release_persist(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI)
+        self.assertEqual(fabric.retain_object(self.URI)["reference_count"], 1)
+        self.assertEqual(fabric.retain_object(self.URI)["reference_count"], 2)
+        self.assertEqual(fabric.release_object(self.URI)["reference_count"], 1)
+        self.assertEqual(self.reopened().object_state(self.URI)["reference_count"], 1)
+
+    def test_release_never_goes_below_zero(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI)
+        self.assertEqual(fabric.release_object(self.URI)["reference_count"], 0)
+        self.assertEqual(fabric.release_object(self.URI)["reference_count"], 0)
+
+    def test_delete_of_an_unreferenced_object_is_a_hard_delete(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI)
+        report = fabric.delete_object(self.URI)
+        self.assertTrue(report["deleted"])
+        self.assertFalse(report["tombstoned"])
+        restored = self.reopened().object_state(self.URI)
+        self.assertTrue(restored["deleted"])
+        self.assertFalse(restored["tombstoned"])
+
+    def test_delete_of_a_referenced_object_tombstones(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI, reference_count=1)
+        report = fabric.delete_object(self.URI)
+        self.assertFalse(report["deleted"])
+        self.assertTrue(report["tombstoned"])
+        self.assertTrue(report["conforming"])
+        restored = self.reopened().object_state(self.URI)
+        self.assertFalse(restored["deleted"])
+        self.assertTrue(restored["tombstoned"])
+
+    def test_hard_delete_of_a_referenced_object_is_refused(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI, reference_count=2)
+        report = fabric.delete_object(self.URI, hard_delete=True)
+        self.assertFalse(report["conforming"])
+        self.assertFalse(report["deleted"])
+        self.assertFalse(report["tombstoned"])
+        self.assertEqual(report["reason"], "referenced objects must be tombstoned, not hard-deleted")
+        restored = self.reopened().object_state(self.URI)
+        self.assertEqual(restored["reference_count"], 2)
+        self.assertFalse(restored["deleted"])
+        self.assertFalse(restored["tombstoned"])
+
+    def test_a_deleted_object_cannot_be_retained_released_or_deleted_again(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI)
+        fabric.delete_object(self.URI)
+        for call in (
+            lambda: fabric.retain_object(self.URI),
+            lambda: fabric.release_object(self.URI),
+            lambda: fabric.delete_object(self.URI),
+        ):
+            with self.assertRaises(OsapError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "CONTEXT_NOT_FOUND")
+
+    def test_an_unknown_object_is_not_found(self):
+        fabric = self.fabric()
+        for call in (
+            lambda: fabric.retain_object(self.URI),
+            lambda: fabric.release_object(self.URI),
+            lambda: fabric.delete_object(self.URI),
+        ):
+            with self.assertRaises(OsapError) as caught:
+                call()
+            self.assertEqual(caught.exception.code, "CONTEXT_NOT_FOUND")
+        self.assertIsNone(fabric.object_state(self.URI))
+
+    def test_invalid_object_records_are_rejected(self):
+        for kwargs in (
+            {"reference_count": -1},
+            {"reference_count": True},
+            {"label": "restricted"},
+            {"metadata": []},
+        ):
+            with self.assertRaises(ValueError):
+                self.fabric().register_object(self.URI, **kwargs)
+        with self.assertRaises(ValueError):
+            self.fabric().register_object("")
+
+    def test_a_returned_object_state_is_a_copy(self):
+        fabric = self.fabric()
+        fabric.register_object(self.URI, metadata={"size": 1})
+        state = fabric.object_state(self.URI)
+        state["metadata"]["size"] = 99
+        state["reference_count"] = 5
+        self.assertEqual(fabric.object_state(self.URI)["metadata"]["size"], 1)
+        self.assertEqual(fabric.object_state(self.URI)["reference_count"], 0)
+
+    def test_corrupt_object_records_are_rejected(self):
+        base = {
+            "uri": self.URI,
+            "reference_count": 0,
+            "deleted": False,
+            "tombstoned": False,
+        }
+        corrupt = [
+            [("reference_count", -1)],
+            [("reference_count", True)],
+            [("deleted", "yes")],
+            [("tombstoned", "no")],
+            [("deleted", True), ("tombstoned", True)],
+            [("deleted", True), ("reference_count", 1)],
+            [("label", "restricted")],
+            [("metadata", [])],
+        ]
+        for overrides in corrupt:
+            record = dict(base)
+            record.update(overrides)
+            self.seed(context.OBJECTS_SECTION, {self.URI: record})
+            with self.assertRaises(ValueError):
+                self.reopened()
+
+    def test_a_non_object_object_section_is_rejected(self):
+        self.seed(context.OBJECTS_SECTION, [])
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_an_object_key_must_match_its_record(self):
+        self.seed(
+            context.OBJECTS_SECTION,
+            {
+                "obj://sha256:other": {
+                    "uri": self.URI,
+                    "reference_count": 0,
+                }
+            },
+        )
+        with self.assertRaises(ValueError):
+            self.reopened()
+
+    def test_an_in_memory_fabric_tracks_objects_without_writing(self):
+        fabric = context.ContextFabric()
+        fabric.register_object(self.URI, reference_count=1)
+        fabric.retain_object(self.URI)
+        self.assertEqual(fabric.object_state(self.URI)["reference_count"], 2)
+        self.assertFalse(self.path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

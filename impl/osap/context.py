@@ -19,12 +19,17 @@ Audit events are kept in memory by default. With a `JsonStore` they are also
 written to one `context.events` section after every resolution, and a restart
 restores the list so "who resolved which handle when" survives the process.
 `context.resolve` records the caller, the handle, the label, and the decision,
-as §9.2 requires. Handles themselves are still passed in by the caller, so the
-fabric persists decisions, not a handle registry.
+as §9.2 requires. The same store can hold the handle registry
+(`context.handles`), task blackboards (`context.blackboards`), and object
+metadata plus tombstones (`context.objects`); each mutation is one atomic
+section write, and a reopen validates every record before restoring it. A
+handle passed as a string is resolved through the registry, so an
+unregistered identifier fails closed with `CONTEXT_NOT_FOUND`.
 """
 
 from __future__ import annotations
 
+import copy
 from datetime import timedelta
 
 from .clock import parse_timestamp
@@ -53,6 +58,12 @@ STORAGE_DUTIES = (
 
 #: Section a persistent fabric writes its resolution events to.
 EVENTS_SECTION = "context.events"
+#: Section a persistent fabric writes the handle registry to.
+HANDLES_SECTION = "context.handles"
+#: Section a persistent fabric writes open and closed task blackboards to.
+BLACKBOARDS_SECTION = "context.blackboards"
+#: Section a persistent fabric writes object metadata and tombstones to.
+OBJECTS_SECTION = "context.objects"
 DECISIONS = frozenset({"allow", "deny"})
 
 #: State that must never be promoted to long-term memory (§3.7, §9.3, §9.5).
@@ -127,13 +138,15 @@ def label_violation(handle: dict, source_labels: dict) -> dict:
 
 
 class ContextFabric:
-    """CF that resolves handles and records audit events.
+    """CF that resolves handles, owns task blackboards, and records events.
 
-    A `JsonStore` makes the event list durable: every resolution rewrites the
-    `context.events` section, and a reopen validates each stored event before
-    restoring it. `limit` optionally keeps only the newest events, which is a
-    retention floor rather than an archive; the in-memory list follows the
-    same rule so memory and disk cannot drift.
+    A `JsonStore` makes the four context sections durable: resolution events,
+    the handle registry, task blackboards, and object metadata. Every public
+    mutation rewrites only the section it changes, and a reopen validates each
+    record before restoring it. `limit` optionally keeps only the newest
+    events, which is a retention floor rather than an archive; the in-memory
+    list follows the same rule so memory and disk cannot drift. Blackboards
+    are cleared when their task ends and are never promoted to memory.
     """
 
     def __init__(
@@ -151,6 +164,9 @@ class ContextFabric:
         self._section = section
         self.limit = limit
         self.audit: list[dict] = []
+        self._handles: dict[str, dict] = {}
+        self._blackboards: dict[str, dict] = {}
+        self._objects: dict[str, dict] = {}
         if store is not None:
             self._restore()
 
@@ -158,12 +174,65 @@ class ContextFabric:
 
     def _restore(self) -> None:
         loaded = self._store.get(self._section)
+        if loaded is not None:
+            if not isinstance(loaded, list):
+                raise ValueError(f"{self._section!r} must be a JSON array")
+            events = [self._restore_event(index, item) for index, item in enumerate(loaded)]
+            self.audit = self._clamp(events)
+        self._restore_handles()
+        self._restore_blackboards()
+        self._restore_objects()
+
+    def _restore_handles(self) -> None:
+        loaded = self._store.get(HANDLES_SECTION)
         if loaded is None:
             return
-        if not isinstance(loaded, list):
-            raise ValueError(f"{self._section!r} must be a JSON array")
-        events = [self._restore_event(index, item) for index, item in enumerate(loaded)]
-        self.audit = self._clamp(events)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{HANDLES_SECTION!r} must be a JSON object")
+        handles: dict[str, dict] = {}
+        for identifier, record in loaded.items():
+            where = f"context handle {identifier!r}"
+            if not isinstance(identifier, str) or not identifier:
+                raise ValueError("context handle keys must be non-empty strings")
+            handle = self._validated_handle(record, where)
+            if handle["handle"] != identifier:
+                raise ValueError(f"{where} must match its registry key")
+            handles[identifier] = handle
+        self._handles = handles
+
+    def _restore_blackboards(self) -> None:
+        loaded = self._store.get(BLACKBOARDS_SECTION)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{BLACKBOARDS_SECTION!r} must be a JSON object")
+        boards: dict[str, dict] = {}
+        for task_id, record in loaded.items():
+            where = f"context blackboard {task_id!r}"
+            if not isinstance(task_id, str) or not task_id:
+                raise ValueError("context blackboard keys must be non-empty strings")
+            board = self._validated_blackboard(record, where)
+            if board["task_id"] != task_id:
+                raise ValueError(f"{where} must match its registry key")
+            boards[task_id] = board
+        self._blackboards = boards
+
+    def _restore_objects(self) -> None:
+        loaded = self._store.get(OBJECTS_SECTION)
+        if loaded is None:
+            return
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{OBJECTS_SECTION!r} must be a JSON object")
+        objects: dict[str, dict] = {}
+        for uri, record in loaded.items():
+            where = f"context object {uri!r}"
+            if not isinstance(uri, str) or not uri:
+                raise ValueError("context object keys must be non-empty strings")
+            state = self._validated_object(record, where)
+            if state["uri"] != uri:
+                raise ValueError(f"{where} must match its registry key")
+            objects[uri] = state
+        self._objects = objects
 
     def _restore_event(self, index: int, event) -> dict:
         where = f"context event {index}"
@@ -200,6 +269,141 @@ class ContextFabric:
         if self._store is not None:
             self._store.put(self._section, [dict(event) for event in self.audit])
 
+    def _write(self, section: str, value) -> None:
+        if self._store is not None:
+            self._store.put(section, copy.deepcopy(value))
+
+    @staticmethod
+    def _validated_handle(record, where: str) -> dict:
+        if not isinstance(record, dict):
+            raise ValueError(f"{where} must be a JSON object")
+        identifier = record.get("handle")
+        if not isinstance(identifier, str) or not identifier:
+            raise ValueError(f"{where} needs a non-empty 'handle'")
+        for field in ("scheme", "scope", "audience"):
+            value = record.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{where} has a non-string {field}")
+        for field in ("created_at", "expires_at"):
+            value = record.get(field)
+            if value is not None:
+                if not isinstance(value, str) or not value:
+                    raise ValueError(f"{where} has an invalid {field}")
+                try:
+                    parse_timestamp(value)
+                except OsapError:
+                    raise ValueError(f"{where} has a malformed {field}") from None
+        label = record.get("label")
+        if label is not None and label not in LABELS:
+            raise ValueError(f"{where} has an unknown label {label!r}")
+        ttl = record.get("ttl")
+        if ttl is not None and (
+            not isinstance(ttl, int) or isinstance(ttl, bool) or ttl < 0
+        ):
+            raise ValueError(f"{where} has an invalid ttl")
+        derived = record.get("derived_from")
+        if derived is not None and (
+            not isinstance(derived, list)
+            or any(not isinstance(item, str) for item in derived)
+        ):
+            raise ValueError(f"{where} has an invalid derived_from")
+        constraints = record.get("constraints")
+        if constraints is not None and not isinstance(constraints, dict):
+            raise ValueError(f"{where} has an invalid constraints")
+        return copy.deepcopy(record)
+
+    @staticmethod
+    def _validated_blackboard(record, where: str) -> dict:
+        if not isinstance(record, dict):
+            raise ValueError(f"{where} must be a JSON object")
+        task_id = record.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError(f"{where} needs a non-empty 'task_id'")
+        board_name = record.get("blackboard")
+        if board_name is not None and not isinstance(board_name, str):
+            raise ValueError(f"{where} has a non-string blackboard")
+        entries = record.get("entries")
+        if not isinstance(entries, list) or any(
+            not isinstance(entry, dict) for entry in entries
+        ):
+            raise ValueError(f"{where} needs an entries array of objects")
+        closed = record.get("closed", False)
+        if not isinstance(closed, bool):
+            raise ValueError(f"{where} has a non-boolean closed")
+        archived = record.get("entries_archived", 0)
+        if not isinstance(archived, int) or isinstance(archived, bool) or archived < 0:
+            raise ValueError(f"{where} has an invalid entries_archived")
+        promoted = record.get("promoted_to_memory", False)
+        if not isinstance(promoted, bool):
+            raise ValueError(f"{where} has a non-boolean promoted_to_memory")
+        if closed and entries:
+            raise ValueError(f"{where} is closed but still has entries")
+        if closed and promoted:
+            raise ValueError(f"{where} must not promote a closed blackboard to memory")
+        state = {
+            "task_id": task_id,
+            "blackboard": board_name if board_name is not None else task_id,
+            "entries": copy.deepcopy(entries),
+            "closed": closed,
+            "entries_archived": archived,
+            "promoted_to_memory": promoted,
+        }
+        for field in ("version", "ttl"):
+            value = record.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{where} has an invalid {field}")
+            state[field] = value
+        for field in ("created_at", "expires_at", "updated_at"):
+            value = record.get(field)
+            if value is None:
+                continue
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{where} has an invalid {field}")
+            try:
+                parse_timestamp(value)
+            except OsapError:
+                raise ValueError(f"{where} has a malformed {field}") from None
+            state[field] = value
+        return state
+
+    @staticmethod
+    def _validated_object(record, where: str) -> dict:
+        if not isinstance(record, dict):
+            raise ValueError(f"{where} must be a JSON object")
+        uri = record.get("uri")
+        if not isinstance(uri, str) or not uri:
+            raise ValueError(f"{where} needs a non-empty 'uri'")
+        count = record.get("reference_count", 0)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError(f"{where} has an invalid reference_count")
+        deleted = record.get("deleted", False)
+        tombstoned = record.get("tombstoned", False)
+        if not isinstance(deleted, bool) or not isinstance(tombstoned, bool):
+            raise ValueError(f"{where} has a non-boolean deleted/tombstoned")
+        if deleted and tombstoned:
+            raise ValueError(f"{where} cannot be both deleted and tombstoned")
+        if deleted and count:
+            raise ValueError(f"{where} cannot be deleted while referenced")
+        label = record.get("label")
+        if label is not None and label not in LABELS:
+            raise ValueError(f"{where} has an unknown label {label!r}")
+        metadata = record.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError(f"{where} has invalid metadata")
+        state = {
+            "uri": uri,
+            "reference_count": count,
+            "deleted": deleted,
+            "tombstoned": tombstoned,
+        }
+        if label is not None:
+            state["label"] = label
+        if metadata is not None:
+            state["metadata"] = copy.deepcopy(metadata)
+        return state
+
     def _event(self, handle: dict, agent: str | None, decision: str, reason: str) -> dict:
         identifier = handle.get("handle")
         if not isinstance(identifier, str) or not identifier:
@@ -229,7 +433,7 @@ class ContextFabric:
 
     def resolve(
         self,
-        handle: dict,
+        handle: dict | str,
         *,
         agent: str | None,
         granted_actions: list[str],
@@ -238,7 +442,34 @@ class ContextFabric:
         egress: bool = False,
         user_approval: bool = False,
     ) -> dict:
-        """Resolve one handle or raise `CONTEXT_DENIED`/`CONTEXT_EXPIRED` (§9.2)."""
+        """Resolve one handle or raise `CONTEXT_DENIED`/`CONTEXT_EXPIRED` (§9.2).
+
+        A string is looked up in the handle registry; an unknown identifier is
+        audited as a denial and raises `CONTEXT_NOT_FOUND`. A dict keeps the
+        original behaviour, so a caller that already holds a handle does not
+        have to register it first.
+        """
+
+        if isinstance(handle, str):
+            identifier = handle
+            if not identifier:
+                raise ValueError("handle identifier must be a non-empty string")
+            stored = self._handles.get(identifier)
+            if stored is None:
+                self._event(
+                    {"handle": identifier, "label": None},
+                    agent,
+                    "deny",
+                    "not_found",
+                )
+                raise OsapError(
+                    "CONTEXT_NOT_FOUND",
+                    "context handle is not registered",
+                    details={"handle": identifier, "reason": "not_found"},
+                )
+            handle = stored
+        elif not isinstance(handle, dict):
+            raise ValueError("handle must be a context handle object or identifier")
 
         # Identity and OS checks come first so a caller that cannot use the
         # handle learns nothing about its expiry state (§9.2).
@@ -290,6 +521,272 @@ class ContextFabric:
             "expires_at": handle.get("expires_at"),
         }
 
+    # --- handle registry --------------------------------------------------
+
+    def register_handle(self, handle: dict) -> dict:
+        """Register a handle so it can be resolved by identifier after restart.
+
+        Registration is idempotent for an identical body and rejects a second,
+        different body: silently overwriting a live handle would change what a
+        capability is allowed to resolve.
+        """
+
+        record = self._validated_handle(handle, "context handle")
+        identifier = record["handle"]
+        existing = self._handles.get(identifier)
+        if existing is not None:
+            if existing != record:
+                raise ValueError(
+                    f"context handle {identifier!r} is already registered "
+                    "with a different body"
+                )
+            return copy.deepcopy(existing)
+        self._handles[identifier] = record
+        self._write(HANDLES_SECTION, self._handles)
+        return copy.deepcopy(record)
+
+    def handle(self, identifier: str) -> dict | None:
+        """Return a registered handle, or None when it is unknown."""
+
+        if not isinstance(identifier, str) or not identifier:
+            raise ValueError("handle identifier must be a non-empty string")
+        record = self._handles.get(identifier)
+        return copy.deepcopy(record) if record is not None else None
+
+    def drop_handle(self, identifier: str) -> bool:
+        """Remove a handle from the registry; return whether it existed."""
+
+        if not isinstance(identifier, str) or not identifier:
+            raise ValueError("handle identifier must be a non-empty string")
+        if identifier not in self._handles:
+            return False
+        del self._handles[identifier]
+        self._write(HANDLES_SECTION, self._handles)
+        return True
+
+    # --- task blackboards -------------------------------------------------
+
+    def open_blackboard(
+        self,
+        task_id: str,
+        *,
+        board: dict | None = None,
+        entries: list | None = None,
+    ) -> dict:
+        """Open (or return) the blackboard for a running task (§9.5).
+
+        `board` may carry the fields from an existing blackboard object (name,
+        version, TTL, timestamps); `entries` is a shortcut for an empty board
+        with the given entries. Passing both is rejected.
+        """
+
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id must be a non-empty string")
+        if board is not None and entries is not None:
+            raise ValueError("pass either board or entries, not both")
+        record = copy.deepcopy(board) if board is not None else {}
+        if not isinstance(record, dict):
+            raise ValueError("blackboard must be a JSON object")
+        record.setdefault("task_id", task_id)
+        if record["task_id"] != task_id:
+            raise ValueError("blackboard task_id must match the registry key")
+        record.setdefault("blackboard", task_id)
+        record.setdefault("entries", copy.deepcopy(list(entries or [])))
+        record.setdefault("closed", False)
+        record.setdefault("entries_archived", 0)
+        record.setdefault("promoted_to_memory", False)
+        record = self._validated_blackboard(
+            record, f"context blackboard {task_id!r}"
+        )
+        existing = self._blackboards.get(task_id)
+        if existing is not None:
+            if existing["closed"]:
+                raise ValueError(f"context blackboard {task_id!r} is closed")
+            if existing != record:
+                raise ValueError(
+                    f"context blackboard {task_id!r} is already open "
+                    "with different entries"
+                )
+            return copy.deepcopy(existing)
+        self._blackboards[task_id] = record
+        self._write(BLACKBOARDS_SECTION, self._blackboards)
+        return copy.deepcopy(record)
+
+    def blackboard(self, task_id: str) -> dict | None:
+        """Return a blackboard, open or closed, or None when unknown."""
+
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id must be a non-empty string")
+        record = self._blackboards.get(task_id)
+        return copy.deepcopy(record) if record is not None else None
+
+    def write_blackboard(self, task_id: str, entries: list) -> dict:
+        """Replace the entries of an open blackboard and persist them."""
+
+        record = self._blackboards.get(task_id)
+        if record is None:
+            raise OsapError(
+                "CONTEXT_NOT_FOUND",
+                "context blackboard is not open",
+                details={"task_id": task_id, "reason": "not_found"},
+            )
+        if record["closed"]:
+            raise ValueError(f"context blackboard {task_id!r} is closed")
+        updated = self._validated_blackboard(
+            {**copy.deepcopy(record), "entries": copy.deepcopy(entries)},
+            f"context blackboard {task_id!r}",
+        )
+        if updated == record:
+            return copy.deepcopy(record)
+        self._blackboards[task_id] = updated
+        self._write(BLACKBOARDS_SECTION, self._blackboards)
+        return copy.deepcopy(updated)
+
+    def close_blackboard(self, task_id: str, *, task_ended: bool = True) -> dict:
+        """Close a blackboard, clear its entries, and never promote it (§9.5).
+
+        Closing is idempotent: a second call returns the recorded summary and
+        does not write again.
+        """
+
+        record = self._blackboards.get(task_id)
+        if record is None:
+            raise OsapError(
+                "CONTEXT_NOT_FOUND",
+                "context blackboard is not open",
+                details={"task_id": task_id, "reason": "not_found"},
+            )
+        if record["closed"]:
+            return {
+                "task_id": task_id,
+                "blackboard": record["blackboard"],
+                "task_ended": task_ended,
+                "cleared_or_archived": True,
+                "entries_archived": record["entries_archived"],
+                "promoted_to_memory": False,
+                "closed": True,
+            }
+        report = _close_blackboard_report(
+            {"blackboard": record["blackboard"], "entries": record["entries"]},
+            task_ended=task_ended,
+        )
+        closed = self._validated_blackboard(
+            {
+                "task_id": task_id,
+                "blackboard": record["blackboard"],
+                "entries": [],
+                "closed": True,
+                "entries_archived": report["entries_archived"],
+                "promoted_to_memory": False,
+            },
+            f"context blackboard {task_id!r}",
+        )
+        self._blackboards[task_id] = closed
+        self._write(BLACKBOARDS_SECTION, self._blackboards)
+        return {**report, "task_id": task_id, "closed": True}
+
+    # --- object metadata and tombstones -----------------------------------
+
+    def register_object(
+        self,
+        uri: str,
+        *,
+        label: str | None = None,
+        reference_count: int = 0,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Record object metadata, including a label and reference count (§9.6)."""
+
+        record = {
+            "uri": uri,
+            "reference_count": reference_count,
+            "deleted": False,
+            "tombstoned": False,
+        }
+        if label is not None:
+            record["label"] = label
+        if metadata is not None:
+            record["metadata"] = metadata
+        state = self._validated_object(record, f"context object {uri!r}")
+        existing = self._objects.get(uri)
+        if existing is not None:
+            if existing != state:
+                raise ValueError(
+                    f"context object {uri!r} is already registered "
+                    "with a different body"
+                )
+            return copy.deepcopy(existing)
+        self._objects[uri] = state
+        self._write(OBJECTS_SECTION, self._objects)
+        return copy.deepcopy(state)
+
+    def object_state(self, uri: str) -> dict | None:
+        """Return object metadata, including deletion and tombstone flags."""
+
+        if not isinstance(uri, str) or not uri:
+            raise ValueError("object uri must be a non-empty string")
+        state = self._objects.get(uri)
+        return copy.deepcopy(state) if state is not None else None
+
+    def retain_object(self, uri: str) -> dict:
+        """Increment an object's reference count and persist it."""
+
+        state = self._objects.get(uri)
+        if state is None or state["deleted"]:
+            raise OsapError(
+                "CONTEXT_NOT_FOUND",
+                "context object is not registered",
+                details={"object": uri, "reason": "not_found"},
+            )
+        updated = copy.deepcopy(state)
+        updated["reference_count"] += 1
+        self._objects[uri] = updated
+        self._write(OBJECTS_SECTION, self._objects)
+        return copy.deepcopy(updated)
+
+    def release_object(self, uri: str) -> dict:
+        """Decrement an object's reference count without auto-deleting it."""
+
+        state = self._objects.get(uri)
+        if state is None or state["deleted"]:
+            raise OsapError(
+                "CONTEXT_NOT_FOUND",
+                "context object is not registered",
+                details={"object": uri, "reason": "not_found"},
+            )
+        updated = copy.deepcopy(state)
+        updated["reference_count"] = max(0, updated["reference_count"] - 1)
+        if updated == state:
+            return copy.deepcopy(state)
+        self._objects[uri] = updated
+        self._write(OBJECTS_SECTION, self._objects)
+        return copy.deepcopy(updated)
+
+    def delete_object(self, uri: str, *, hard_delete: bool = False) -> dict:
+        """Delete or tombstone an object using its stored reference count (§9.6)."""
+
+        state = self._objects.get(uri)
+        if state is None or state["deleted"]:
+            raise OsapError(
+                "CONTEXT_NOT_FOUND",
+                "context object is not registered",
+                details={"object": uri, "reason": "not_found"},
+            )
+        report = _delete_object_report(
+            uri,
+            reference_count=state["reference_count"],
+            hard_delete=hard_delete,
+        )
+        if report["deleted"] or report["tombstoned"]:
+            updated = copy.deepcopy(state)
+            updated["deleted"] = report["deleted"]
+            updated["tombstoned"] = report["tombstoned"]
+            self._objects[uri] = self._validated_object(
+                updated, f"context object {uri!r}"
+            )
+            self._write(OBJECTS_SECTION, self._objects)
+        return {**report, "uri": uri}
+
 
 def close_blackboard(board: dict, *, task_ended: bool) -> dict:
     """Archive a task blackboard when its task ends; never promote it (§9.5)."""
@@ -327,6 +824,12 @@ def delete_object(uri: str, *, reference_count: int, hard_delete: bool) -> dict:
         "tombstoned": not deleted,
         "conforming": True,
     }
+
+
+# The ContextFabric methods of the same name call these pure helpers through
+# module aliases so a method name cannot shadow the helper it wraps.
+_close_blackboard_report = close_blackboard
+_delete_object_report = delete_object
 
 
 def cache_window(handle: dict, *, requested_ttl: int, elapsed_seconds: int) -> dict:

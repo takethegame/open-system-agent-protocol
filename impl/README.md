@@ -50,6 +50,7 @@
 | 句柄解析 | §9.2 | `resolve` 授权、`audience`/`allowed_agents`、每次解析写 `context.resolve` 审计 |
 | 句柄 TTL | §9.3 | `expires_at` 或 `created_at + ttl`；过期即拒绝，不自动续期 |
 | 解析审计持久化 | §9.2 | `ContextFabric(store=...)` 把 `context.resolve` 事件写入 `context.events`；重开逐条校验；`limit` 只保留最新 N 条 |
+| 上下文对象持久化 | §9.2、§9.5、§9.6 | `context.handles` / `context.blackboards` / `context.objects` 分节落盘；句柄可按标识解析，黑板关闭即清空且不晋升记忆，对象引用计数与墓碑跨重启；每次变更一次原子写入 |
 | 长期记忆 | §9.3 | 记忆句柄必须单独持有 `memory.read`，任务能力不隐含 |
 | 信息流标签 | §9.4 | `public < personal < sensitive < secret`；派生对象不得降低标签 |
 | 任务黑板 | §9.5 | 任务结束即清理/归档，不自动晋升为长期记忆 |
@@ -87,7 +88,7 @@ impl/
     clock.py            单调时钟 deadline
     consent.py          §5.8 同意回执与能力范围校验
     consent_flow.py     §10.2、§10.3 同意请求、预约、授权/拒绝、激活、撤销、可选注册表验签
-    context.py          §9 句柄、标签、黑板、对象、缓存、存储声明、解析事件持久化
+    context.py          §9 句柄、标签、黑板、对象、缓存、存储声明、解析事件与上下文对象持久化
     crypto.py           Ed25519 签名与规范化 JSON
     envelope.py         §7.1 校验（版本 → 类型 → schema）
     errors.py           §7.7 错误码与 OsapError
@@ -426,11 +427,11 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
 8. **撤销可持久化但未分发**：`CapabilityAuthority.revoked` 可落盘并在重启后重建，但没有跨进程广播或重试；§5.5 要求的“通知受影响 Agent”尚未实现。
 9. **委派未校验能力链**：`delegate` 只检查任务预算与深度，没有把 `delegated_capability` 与父能力凭证做完整衰减比对（夹具里没有父凭证）。
-10. **上下文只持久化解析事件**：`ContextFabric(store=...)` 可跨重启保留 `context.resolve` 事件，但句柄本身、黑板状态、对象墓碑与缓存窗口都不落盘，也没有句柄撤销；“谁在何时解析了哪个句柄”可跨重启，但无法从存储重建一个仍在使用的句柄。
+10. **上下文持久化仍不是完整存储层**：`ContextFabric(store=...)` 可跨重启保留解析事件、句柄注册表、任务黑板与对象元数据/墓碑，但缓存窗口仍是纯计算，没有句柄撤销，也没有按用户分区；黑板关闭后只保留条目数与 `promoted_to_memory=false`，不保留条目内容。
 11. **没有真实对象存储**：`delete_object` 只返回判定结果，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
 12. **联邦只做投影**：没有监听原生注册表变化，也没有按 TTL 自动刷新；C6-08 仍是 manual。MCP/A2A/OpenAPI 的外部签名未验证，因此统一降为 `unverified`。
 13. **`verify_chain` 不重算正文哈希**：对夹具链只验证事件 schema、trace、`audit_id` 与 `prev_hash` 链接；夹具的 hash 是占位串，规范也未固定编码。`AuditLedger` 对自己写入的事件使用统一的规范编码并在重启时重算正文哈希，但它不是完整 RFC 8785。
-14. **没有上下文存储层**：`ContextFabric` 不持有句柄注册表，句柄由调用方传入；黑板归档、对象墓碑与缓存窗口仍是纯函数。跨进程恢复与真实回放需要专门的上下文存储，C7-01 仍是 manual。
+14. **缓存窗口未持久化**：`cache_window` 只按句柄 TTL 与已用时间计算窗口，不记录具体缓存条目；重启后无法判断某个缓存值是否仍可命中，只能重新解析句柄。
 15. **64 个 pass 覆盖全部 automated 用例**，但不覆盖 4 条 manual 的跨 App、原生注册表 TTL 与跨进程撤销语义。
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，注册表验签与分库都是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。传 `key_store` 后私钥移出回执 store；不传时私钥与回执仍同处一个 0600 JSON 文件。默认后端仍是明文 JSON，密钥环只是可选后端。
