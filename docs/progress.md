@@ -1222,6 +1222,16 @@ python3 tools/check_docs.py
 
 完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §20 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
+打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
+
+```
+validate (3.11)  success
+validate (3.12)  success
+drafts           success   # xml2rfc 安装 + check_drafts.py --compile
+```
+
+这证明的是“文档可编译、仓库检查通过”，不是 IETF 采用或外部评审通过。
+
 ### 17.4 已知边界
 
 1. **未提交 IETF**：`draft-osap-*` 是本地文档名；提交前必须取得贡献者同意、完成 BCP 79 IPR 披露、替换 `OSAP Editors` 占位作者，并确认 `agentproto`/OAuth WG 的采用意向。
@@ -1295,4 +1305,4 @@ python3 tools/check_docs.py
 | 2026-11-18 | **上下文事件持久化**（`7274a27`）：`ContextFabric(store=...)` 写 `context.events`；重开校验与 `limit` 保留；新增 19 条测试，累计 582 |
 | 2026-11-18 | **审计保留与归档**（`1a8394d`）：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；锚点校验与 `history()`；新增 20 条测试，累计 602 |
 | 2026-11-19 | **任务与副作用恢复**（`c7e990c`）：`TaskBoard` 持久化 `task.effects`；`recover()` 失败/重调度非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；新增 37 条测试，累计 639 |
-| 2026-11-19 | **M4 本地打包**：两个 xml2rfc v3 individual draft（能力 token、同意回执）、逐节来源映射、`tools/check_drafts.py` + `requirements-drafts.txt`、Linux binding（D-Bus/portal/systemd/3 序列图）、14 条 ADR、`GOVERNANCE.md` §9.1 联络状态；CI 新增 `drafts` job；未提交 IETF |
+| 2026-11-19 | **M4 本地打包**（`f98a6b3`）：两个 xml2rfc v3 individual draft（能力 token、同意回执）、逐节来源映射、`tools/check_drafts.py` + `requirements-drafts.txt`、Linux binding（D-Bus/portal/systemd/3 序列图）、14 条 ADR、`GOVERNANCE.md` §9.1 联络状态；CI 新增 `drafts` job 并通过（run 44461943418）；未提交 IETF |

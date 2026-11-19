@@ -76,7 +76,7 @@ Entries are written in English to match commit messages; the Chinese text in
 - `TaskBoard` accepts a `JsonStore` and writes one atomic `task.tasks` section after `add`, `transition`, `cancel`, `delegate`, or an accepted `handoff`; a no-op transition and a rejected handoff do not write, cancellation flushes once for the whole subtree, and the audit list stays in memory.
 - CI now runs `python3 demo/run_demo.py` after the unit tests and the conformance suite.
 - `tools/check_docs.py` now also checks structural parity for the Linux binding profile (`bindings/linux/profile.md` and `profile.en.md`).
-- `docs/roadmap.md` marks the M4 packaging tasks complete and records that the drafts are local individual submissions, not IETF submissions; `docs/progress.md` adds Section 17 with the deliverables, evidence, and boundaries.
+- `docs/roadmap.md` marks the M4 packaging tasks complete and records that the drafts are local individual submissions, not IETF submissions; `docs/progress.md` adds Section 17 with the deliverables, evidence, and boundaries; both READMEs now list `drafts/`, `bindings/`, `decisions/`, and `requirements-drafts.txt`.
 
 ### Planned
 

@@ -70,6 +70,9 @@ OSAP 的目标不是“再发明一个 Agent 协议”，而是定义 **本地�
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献流程、DCO、内容规范 |
 | [`docs/roadmap.md`](docs/roadmap.md) | 0.1 → 0.2 里程碑、退出标准、风险登记与决策闸门（工作文档） |
 | [`docs/progress.md`](docs/progress.md) | 已完成里程碑、验证证据、剩余用例逐条拆分（工作记录） |
+| [`drafts/README.md`](drafts/README.md) | 两个 IETF individual draft 的来源映射、构建与发布前置条件（工作文档） |
+| [`bindings/linux/profile.md`](bindings/linux/profile.md) | Linux D-Bus/portal/`systemd --user` 绑定 profile（0.1 Draft） |
+| [`decisions/README.md`](decisions/README.md) | §15 开放问题的 ADR 索引（非规范性，暂定结论） |
 | [`spec/formal/README.md`](spec/formal/README.md) | TLA+ 不变量模型、TLC 结果、模型边界（M3 工作记录） |
 | [`SECURITY.md`](SECURITY.md) | 漏洞披露渠道、时限、安全评审触发条件 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
@@ -80,16 +83,20 @@ OSAP 的目标不是“再发明一个 Agent 协议”，而是定义 **本地�
 
 ```
 docs/                 规范、一致性、先行工作、设计说明、路线图
+drafts/               IETF xml2rfc v3 individual drafts 与来源映射
+bindings/             平台绑定 profile（Linux D-Bus/portal/systemd）
+decisions/            §15 开放问题的 ADR
 schemas/              JSON Schema（信封、能力、任务、清单、能力记录、回执、审计、payload）
 conformance/          机器可读一致性用例、用例 schema、运行报告 schema
 examples/             示例消息与对象
-tools/                校验脚本（示例、schema、文档、一致性）
+tools/                校验脚本（示例、schema、文档、draft、一致性）
 .github/workflows/    CI
 GOVERNANCE.md         治理草案
 CONTRIBUTING.md       贡献流程与 DCO
 SECURITY.md           安全披露
 CHANGELOG.md          版本变更记录
 requirements.txt      Python 依赖
+requirements-drafts.txt  IETF draft 工具链（xml2rfc）
 LICENSE               Apache-2.0
 NOTICE                版权与商标说明
 README.md             本文件

@@ -277,7 +277,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 - [x] 写 §15 的 14 条 ADR
 - [x] 在 `GOVERNANCE.md` §9 更新联络状态
 
-**当前状态（2026-11-19）**：本地打包已完成。`drafts/` 含两个 `xml2rfc` v3 individual draft、来源映射与静态检查工具；Linux binding 含 D-Bus 接口、portal 映射、`systemd --user` 单元与 3 个序列图；`decisions/` 含 14 条 ADR；`GOVERNANCE.md` §9.1 记录真实联络状态。`xml2rfc` 编译与 `tools/check_drafts.py --compile` 已通过。**未提交 IETF，未做 IPR 披露**；对外提交前仍须按 §10.4 取得贡献者同意。
+**当前状态（2026-11-19）**：本地打包已完成并推送（`f98a6b3`），CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的 `validate` 3.11/3.12 与 `drafts` job 全部通过。`drafts/` 含两个 `xml2rfc` v3 individual draft、来源映射与静态检查工具；Linux binding 含 D-Bus 接口、portal 映射、`systemd --user` 单元与 3 个序列图；`decisions/` 含 14 条 ADR；`GOVERNANCE.md` §9.1 记录真实联络状态。**未提交 IETF，未做 IPR 披露**；对外提交前仍须按 §10.4 取得贡献者同意。
 
 **退出标准**
 
