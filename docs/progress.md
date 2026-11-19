@@ -28,6 +28,7 @@
 | 任务与副作用恢复（M4 前置） | ✅ 完成 | `TaskBoard.effects` 持久化 intent/outcome；`recover()` 原子失败/重调度非终态任务并把 intent-only effect 标为 unknown；重放闸门与对账；639 tests | 2026-11-19 |
 | 上下文对象持久化（M4 前置） | ✅ 完成 | `ContextFabric` 增加 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；685 tests | 2026-11-19 |
 | 审计按用户分区与跨 trace 顺序（M4 前置） | ✅ 完成 | `AuditJournal` 写 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开拒绝缺口/重复/时间戳不符/孤儿条目；706 tests | 2026-11-19 |
+| Windows 密钥环与迁移工具（M4 前置） | ✅ 完成 | `KeyringKeyStore` 增加 Windows `PasswordVault`（PowerShell，密钥走 stdin）；后端失败细分 `KeyringError.reason`；`migrate_key_store` + `tools/migrate_pcs_key.py` 验证后迁移并在确认目标后删源；720 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -41,7 +42,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（7828 行）+ 706 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（8047 行）+ 720 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 9 对 |
@@ -100,6 +101,7 @@
 | `fca8fe4` | 2026-11-19 | M4 输出接入 README / roadmap / progress，记录 CI run 44462099197 |
 | `3d251a6` | 2026-11-19 | **上下文对象持久化**：`context.handles` / `context.blackboards` / `context.objects` 分节落盘；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；46 条新测试，累计 685 |
 | `a2c6853` | 2026-11-19 | **审计按用户分区与跨 trace 顺序**：`AuditJournal` 写入 `audit.user.<user>.*` 与 `audit.order.<user>`；链、归档与序号一次 `put_many`；重开交叉校验；21 条新测试，累计 706 |
+| `adba047` | 2026-11-19 | **Windows 密钥环与迁移工具**：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分 `backend_missing`/`lookup_failed`/`store_failed`；`migrate_key_store` 与 `tools/migrate_pcs_key.py`；14 条新测试，累计 720 |
 
 ---
 
@@ -1226,7 +1228,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §22 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §23 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1358,7 +1360,64 @@ python3 demo/run_demo.py
 
 ---
 
-## 20. 待确认的规范问题
+## 20. Windows 密钥环与迁移工具（M4 前置，已完成）
+
+### 20.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/keystore.py` | `KeyringKeyStore` 新增 Windows 后端：PowerShell 调用 `PasswordVault`（Windows Credential Manager），保存时密钥经 stdin 传入；`MISSING_CODES` 统一“条目不存在”的退出码；`KeyringError(reason, backend, returncode, stderr, platform)`；`migrate_key_store(source, target, *, delete_source=True)` |
+| `tools/migrate_pcs_key.py` | 一次性 CLI：`--json <store>` → `--to keyring` 或 `--to json:<path>`；输出 JSON 报告；`backend_missing`/迁移失败退出码 1 |
+| `impl/tests/test_keystore.py` | 14 条新测试：Windows 平台映射与三条命令构造、stdin 传密、缺失条目、失败原因细分、缺失 CLI、迁移的七种结果 |
+
+### 20.2 语义
+
+- **Windows 后端**：`backend_for("win32") = "powershell"`。命令是 `powershell -NoProfile -NonInteractive -Command <script>`，脚本用 WinRT 投影 `[Windows.Security.Credentials.PasswordVault,...]` 完成 `Retrieve`/`Add`/`Remove`；`service`/`account` 映射为 vault 的 resource/user。保存前先尝试移除旧条目，等价于 macOS `-U` 的“更新语义”。密钥通过 stdin 进入脚本（`[Console]::In`），不在命令行参数里。
+- **条目不存在统一判定**：`MISSING_CODES = {security: 44, secret-tool: 1, powershell: 44}`；Windows 脚本在 catch 里 `exit 44`，所以 `load()` 返回 `None`、`delete()` 返回 `False` 的行为与既有后端一致。
+- **错误细分**：后端失败抛 `KeyringError`（`RuntimeError` 子类），`reason` 为 `backend_missing`（构造时 CLI 缺失）、`lookup_failed`、`store_failed`；`returncode`/`stderr` 保留原始输出。旧的 `except RuntimeError` 代码不受影响。记录损坏仍抛 `ValueError`。
+- **迁移安全序**：`migrate_key_store` 先用 `signer_of` 校验源记录（损坏即拒绝且目标不动）；目标已被不同 `kid`/公钥占用时返回 `target_occupied` 不写不删；目标为同一记录时幂等返回 `already_migrated`；写入后回读比对，不一致返回 `target_verify_failed`；只有目标确认后才 `delete_source`（后端不支持 `delete` 时报告 `deleted_from_source=false` 并保留源）。
+- **报告可序列化**：迁移结果是纯 JSON（`migrated`、`reason`、`kid`、`source`、`target`、`deleted_from_source`、`target_kid`），CLI 直接打印。
+- **默认不变**：不传 `key_store` 的 `ConsentFlow` 仍用 0600 JSON；`--keep-source` 保留原分节；`JsonKeyStore`/`MemoryKeyStore` 行为不变。
+
+### 20.3 验证证据
+
+2026-11-19，提交 `adba047`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl -p 'test_keystore.py'
+→ Ran 61 tests ... OK
+
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 720 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 195 checks passed across 42 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+CLI 冒烟（本机，`--to json:` 模式，不触碰真实密钥环）：先有密钥 → 报告 `migrated=true, reason=copied, deleted_from_source=true`；再次运行 → `no_key_in_source`，退出码 0；目标文件中的 `kid` 与源一致。
+
+新增的 14 条测试覆盖：`win32 → powershell` 映射与不支持平台；构造时 CLI 缺失报 `backend_missing`（含 `platform` 字段且仍是 `RuntimeError`）；Windows load 的命令形状、脚本含 `PasswordVault`/引号化的 service/account/`RetrievePassword`/`exit 44`；缺失条目返回 `None`；save 经 stdin 传密且脚本含 `PasswordCredential`、先 `Remove` 再 `Add`、`exit 1`；delete 成功/缺失两种返回；`lookup_failed` 与 `store_failed` 携带 `returncode`/`stderr`；迁移的缺失源、成功复制、保留源、损坏源拒绝、不同目标密钥中止、损坏目标记录中止、同记录幂等、不可删除源保留记录与报告可序列化。
+
+### 20.4 已知边界
+
+1. **Windows 路径未在真实 Windows 上验证**：脚本依赖 Windows PowerShell 5.1 的 WinRT 投影；PowerShell 7（pwsh）默认不可用，且 `PasswordVault` 的行为因应用容器而异。CI 只有静态命令构造测试。
+2. **单条记录迁移**：`migrate_key_store` 只迁移一个 signer；多 PCS 账号、多用户或批量迁移不在范围内，迁移后也不会自动重建 `ConsentFlow`。
+3. **迁移不是原子事务**：目标写入与源删除是两步；进程在两步之间中断会留下两边都有记录的状态，下次迁移会因目标相同而幂等收敛。
+4. **错误分类仍以 CLI 为界**：`KeyringError` 区分“CLI 缺失/失败”，但无法区分密钥环锁定的具体原因（如 macOS 钥匙串授权弹窗被拒），这需要原生绑定。
+5. **macOS argv 泄露仍在**：`security add-generic-password` 没有 stdin 形式，macOS 路径依旧是文档化的开发便利；Windows/Linux 路径走 stdin。
+6. **`--to json:` 复制而非轮换**：该模式只是搬记录，不生成新 `kid`；密钥轮换仍须走 `KeyRegistry` 的新 `kid` 流程。
+
+---
+
+## 21. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1374,19 +1433,18 @@ python3 demo/run_demo.py
 
 ---
 
-## 21. 下一步（按顺序）
+## 22. 下一步（按顺序）
 
-1. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
-2. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
-3. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
-4. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
-5. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
-6. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
-7. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
+1. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
+2. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
+3. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
+4. 为审计归档补压缩与按用户导出；跨用户/跨设备总序不在 0.1 范围；
+5. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
+6. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 22. 变更记录
+## 23. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1422,3 +1480,4 @@ python3 demo/run_demo.py
 | 2026-11-19 | **M4 本地打包**（`f98a6b3`）：两个 xml2rfc v3 individual draft（能力 token、同意回执）、逐节来源映射、`tools/check_drafts.py` + `requirements-drafts.txt`、Linux binding（D-Bus/portal/systemd/3 序列图）、14 条 ADR、`GOVERNANCE.md` §9.1 联络状态；CI 新增 `drafts` job 并通过（run 44461943418）；未提交 IETF |
 | 2026-11-19 | **上下文对象持久化**（`3d251a6`）：`ContextFabric` 新增 `context.handles` / `context.blackboards` / `context.objects`；句柄按标识解析且未知即 `CONTEXT_NOT_FOUND`、黑板关闭清空且不晋升记忆、对象引用计数与墓碑跨重启；新增 46 条测试，累计 685 |
 | 2026-11-19 | **审计按用户分区与跨 trace 顺序**（`a2c6853`）：`AuditJournal` 写 `audit.user.<user>.chain/archive.<trace>` 与 `audit.order.<user>`；链、归档与连续序号一次 `put_many`；重开交叉校验并拒绝缺口/重复/时间戳不符/孤儿条目；新增 21 条测试，累计 706 |
+| 2026-11-19 | **Windows 密钥环与迁移工具**（`adba047`）：`PasswordVault` 后端（密钥走 stdin）；`KeyringError` 细分失败原因；`migrate_key_store` + `tools/migrate_pcs_key.py`；新增 14 条测试，累计 720 |

@@ -21,8 +21,8 @@ Three backends ship with the reference implementation:
   instead of silently falling back to a file.
 
 Backend failures raise `KeyringError`, a `RuntimeError` subclass carrying a
-`reason` (`backend_missing`, `lookup_failed`, `store_failed`,
-`delete_failed`), the backend name, and the CLI `returncode`/`stderr`, so a
+`reason` (`backend_missing`, `lookup_failed`, `store_failed`), the backend
+name, and the CLI `returncode`/`stderr`, so a
 caller can tell "the keyring is locked" from "the tool is absent" without
 parsing messages.
 
@@ -86,7 +86,7 @@ class KeyringError(RuntimeError):
 
     It subclasses `RuntimeError` so existing handlers keep working, while
     `reason` separates "the CLI is absent" (`backend_missing`) from "the CLI
-    ran and failed" (`lookup_failed`, `store_failed`, `delete_failed`), and
+    ran and failed" (`lookup_failed`, `store_failed`), and
     `returncode`/`stderr` keep the raw backend output for diagnostics.
     """
 
