@@ -22,9 +22,12 @@ Covered so far:
 - M2.6: audit-chain verification, redacted export, replay, and recovery
   (§10.5–§10.7, §8.11);
 - persistence: a sectioned, atomic `JsonStore` that backs the idempotency
-  index, capability issuance/revocation state, consent flow, task tree, and
-  audit ledger so a restart replays instead of re-executing and a corrupt
-  audit chain fails closed (§7.8, §5.5, §10.5);
+  index, capability issuance/revocation state, consent flow, task tree,
+  effect journal, and audit ledger so a restart replays instead of
+  re-executing and a corrupt audit chain fails closed (§7.8, §5.5, §10.5);
+- recovery: `TaskBoard.recover()` fails or reschedules non-terminal tasks,
+  marks intent-only effects `unknown`, gates replay until reconciliation,
+  and returns audit-ready events (§3.7, §8.11);
 - flow control: per-Agent connection, in-flight, queue, and token-bucket rate
   limits with explicit `RATE_LIMIT` backpressure (§7.11, §11.7).
 """

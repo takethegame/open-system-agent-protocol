@@ -25,6 +25,7 @@
 | 私钥存储后端（M4 前置） | ✅ 完成 | `KeyStore` 契约；JSON / 内存 / OS 密钥环（macOS `security`、Linux `secret-tool`）三种后端；统一记录校验；563 tests | 2026-11-18 |
 | 上下文事件持久化（M4 前置） | ✅ 完成 | `ContextFabric(store=...)` 把 `context.resolve` 写入 `context.events`；重开逐条校验；`limit` 保留最新 N 条；582 tests | 2026-11-18 |
 | 审计保留与归档（M4 前置） | ✅ 完成 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 与归档原子双写；锚点校验与 `history()`；602 tests | 2026-11-18 |
+| 任务与副作用恢复（M4 前置） | ✅ 完成 | `TaskBoard.effects` 持久化 intent/outcome；`recover()` 原子失败/重调度非终态任务并把 intent-only effect 标为 unknown；重放闸门与对账；639 tests | 2026-11-19 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -38,7 +39,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 23 个模块 + 适配器（6585 行）+ 602 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（7004 行）+ 639 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -92,6 +93,7 @@
 | `b0068ab` | 2026-11-18 | **私钥存储后端**：`keystore.py` 的 `KeyStore` 契约；JSON / 内存 / OS 密钥环后端；`as_key_store` 兼容裸 `JsonStore`；47 条新测试，累计 563 |
 | `7274a27` | 2026-11-18 | **上下文事件持久化**：`ContextFabric(store=...)` 写 `context.events`；重开逐条校验；`limit` 保留最新 N 条；19 条新测试，累计 582 |
 | `1a8394d` | 2026-11-18 | **审计保留与归档**：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；live 首条锚定归档尾；`history()` 导出完整链；20 条新测试，累计 602 |
+| `c7e990c` | 2026-11-19 | **任务与副作用恢复**：`TaskBoard` 持久化 `task.effects`；`recover()` 失败非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；37 条新测试，累计 639 |
 
 ---
 
@@ -241,11 +243,11 @@ M1 收尾时的负向验证（均在临时目录，不随仓库发布）：
 | 维度 | 数量 | 说明 |
 |---|---|---|
 | 总数 | 68 | C0 7 + C1 6 + C2 6 + C3 12 + C4 11 + C5 11 + C6 8 + C7 7 |
-| automated | 60 | 其中 7 条为 `observe` |
-| manual | 6 | C2-05、C4-01、C4-08、C4-09、C6-08、C7-01 |
-| `observe` | 14 | 7 条 automated + 7 条 manual |
+| automated | 64 | 其中 8 条为 `observe`；C4-08/C4-09 已转为自动断言 |
+| manual | 4 | C2-05、C4-01、C6-08、C7-01 |
+| `observe` | 12 | 8 条 automated + 4 条 manual |
 
-手动用例集中在三类：传输/时钟运行时（C0）、TTL 与生命周期（C2、C6）、崩溃与跨 App 集成（C4、C7）。`observe` 用例不产生自动判定，报告只记录实现的实际行为。
+手动用例集中在三类：TTL 与原生注册表生命周期（C2-05、C6-08）、任务取消传播（C4-01）与跨 App 全链路（C7-01）。`observe` 用例不产生自动判定，报告只记录实现的实际行为。
 
 ### 4.7 夹具缺口
 
@@ -530,13 +532,13 @@ python3 tools/benchmark_revocation.py
 4. 对端认证覆盖 uid/gid/pid/可执行文件（Linux `SO_PEERCRED`，macOS `getpeereid` + `LOCAL_PEERPID`），没有 audit token、package identity 或代码签名；同 uid 的其他进程只有在设置可执行文件策略后才被排除。
 5. 撤销集合只在内存，重启即丢，也没有广播；§5.5 要求写入审计账本并通知受影响 Agent，尚未实现。
 6. `max_uses` 未计数，`rate` 未限流；衰减只比较声明值。
-7. 任务树在 M2 时只在内存；M4 前置已把整棵树接入 `JsonStore`（见第 10 节）。`TaskBoard` 仍不产生 `effect.intent`，`audit.recover_effects` 只读已有事件，C4-08/C4-09 仍是 manual。
+7. 任务树在 M2 时只在内存；M4 前置已把整棵树接入 `JsonStore`，并在第 16 节补上 `task.effects` 与重启恢复。`audit.recover_effects` 仍只读已有事件，恢复事件需要调用方写入 `AuditLedger`。
 8. 上下文审计与黑板状态只在内存，没有真正撤销句柄；§9.7 的“谁在何时解析了哪个句柄”只能读进程内列表。
 9. 没有真实对象存储：`delete_object` 只返回判定，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
 10. 联邦只做投影：没有监听原生注册表变化，也没有按 TTL 自动刷新，C6-08 仍是 manual；MCP/A2A/OpenAPI 的签名未验证。
 11. `verify_chain` 对夹具链仍只验证 schema、trace、`audit_id` 与 `prev_hash` 链接；新增的 `AuditLedger` 对自己的事件重算正文哈希，因此损坏的持久链会在重启时 fail closed。
-12. 上下文只在内存；任务树与审计账本已持久化（见第 10、11 节），但跨进程回放与 C7-01 仍未实现。
-13. 62 个 pass 覆盖全部 automated 用例；6 条 manual 仍依赖崩溃恢复与跨 App 集成。
+12. 上下文只在内存；任务树、effect 日志与审计账本已持久化（见第 10、11、16 节），但跨进程回放与 C7-01 仍未实现。
+13. 64 个 pass 覆盖全部 automated 用例；4 条 manual 仍依赖跨 App 集成、原生注册表 TTL 与跨进程撤销。
 14. 演示是进程内单进程：它证明模块能串起来，不证明真实传输、真实 OS 句柄或持久账本。
 15. `ConsentFlow` 的请求、回执与预约都只在内存；重启即丢，也没有把同一请求广播给多个 Bus。
 16. 同意回执的 `proof` 是占位串，没有 PCS 用户密钥的分发与验签。
@@ -840,7 +842,7 @@ python3 demo/run_demo.py
 
 1. **整节重写**：任务数量很大时每次变更都序列化整棵树；没有增量更新或分片。
 2. **单进程单写者**：没有跨进程文件锁；两个 store 实例会互相覆盖。
-3. **过程状态未落盘**：`TaskBoard.audit` 与 `effect.intent` 仍未持久化，C4-08/C4-09 仍是 manual。
+3. **过程状态只部分落盘**：`TaskBoard.effects` 与任务树已持久化，`TaskBoard.audit` 仍是内存列表；恢复事件要由调用方写入 `AuditLedger`，两个写入不在同一事务内。
 4. **不做引用完整性检查**：加载不要求父任务存在于同一 section（夹具允许父链在外部），也不检测父子环。
 5. **不清理历史**：已终态任务永久留在文件中；长期运行需要归档或 TTL 清理。
 
@@ -1120,7 +1122,60 @@ python3 demo/run_demo.py
 
 ---
 
-## 16. 待确认的规范问题
+## 16. 任务与副作用恢复（M4 前置，已完成）
+
+### 16.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/task.py` | `TaskBoard.effects` 与 `task.effects` 分节；`record_effect_intent` / `record_effect_outcome` / `reconcile_effect` / `require_replay_allowed`；`recover(policy="fail"\|"reschedule")` 一次原子写入任务树与 effect 日志并返回审计事件 |
+| `impl/adapter.py` | C4-08 `restart` 与 C4-09 `replay`：持久化 board → 丢弃内存实例 → 重开恢复 → 重开审计链验证 |
+| `conformance/cases/C4-collaboration.json` | C4-08/C4-09 从 manual 改为 automated，断言任务失败、effect unknown、重放被拒与审计可验证 |
+| `impl/tests/test_task.py` | 37 条新测试：恢复策略、detached/嵌套任务、幂等恢复、原子写、effect 持久化、损坏拒绝、重放闸门、对账与审计事件形状 |
+
+### 16.2 语义
+
+- **先 intent，后副作用**：`record_effect_intent` 在副作用前写 `task.effects`，状态 `pending`；`record_effect_outcome` 写 `executed`；同一 intent 的重复 outcome 幂等。
+- **恢复不静默 running**：`recover()` 把非终态任务改为 `failed`，或 `policy="reschedule"` 时改回 `created`。这是重启策略覆盖，不是 §8.10 的普通转换：普通 `transition("created"→"failed")` 仍被拒绝。
+- **只有 intent 就是 unknown**：所有 `pending` effect 在恢复时改为 `unknown`，报告 `effect_state=unknown`、`pending_intents` 与 `requires_reconciliation`；第二次恢复仍报告这些 unknown，但不会重复写审计。
+- **原子快照**：任务树与 effect 日志通过一次 `put_many` 写入；没有变化时不写。
+- **重放闸门**：`require_replay_allowed` 对 `pending`/`unknown` 抛 `POLICY_DENIED` 且 `details.reason=reconciliation_required`；对已确认 `executed` 的对账结果抛 `already_executed`；只有 `executed`（幂等路径）与 `reconciled: not_executed`（确认未执行）允许继续。
+- **对账写回**：`reconcile_effect(intent_ref, outcome=...)` 只接受 `unknown`，`outcome` 只能是 `executed` 或 `not_executed`；写入 `reconciled_outcome` 并持久化，对账不是自动重放。
+- **审计**：`recover()` 返回可直接追加到 `AuditLedger` 的完整事件（`task.failed`/`task.created` 与 `error` 告警）；`TaskBoard.audit` 仍是内存列表，调用方负责把事件写入持久账本。
+
+### 16.3 验证证据
+
+2026-11-19，提交 `c7e990c`：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 639 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 64 pass, 0 fail, 4 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+`C4-08` 与 `C4-09` 现在都是 automated；剩余 4 条 manual 是 C2-05、C4-01、C6-08、C7-01。
+
+### 16.4 已知边界
+
+1. **审计不在同一原子写内**：任务树与 effect 日志一次 `put_many`，但恢复事件写入 `AuditLedger` 是另一次写；崩溃仍可能留下“已恢复但未审计”的窗口。
+2. **重放闸门不是强制隔离**：只有调用 `require_replay_allowed()` 的路径会被拒绝；实现仍可能绕过该 API 直接执行副作用。
+3. **没有自动重调度器**：`policy="reschedule"` 只把状态改回 `created`，不会重新排队、分配 owner 或重发 `delegate`。
+4. **对账不自动改任务**：`reconcile_effect()` 只写 effect 状态；任务是否转 `succeeded` 或重新执行仍由调用方决定。
+5. **effect 日志只增不减**：没有 TTL、归档或按任务清理，长期运行需要 compaction。
+
+---
+
+## 17. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1136,17 +1191,18 @@ python3 demo/run_demo.py
 
 ---
 
-## 17. 下一步（按顺序）
+## 18. 下一步（按顺序）
 
 1. 为上下文句柄、黑板与对象元数据补存储层，并为审计账本补按用户分区与跨 trace 的全局顺序；
 2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
-5. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
+5. 把恢复事件与任务/effect 快照纳入同一事务，并为 `task.effects` 增加 TTL/归档；
+6. 进入 M4 标准打包：把规范拆成可独立提交的材料，并保持每个 PR 只对应一个清晰的不变量或用例。
 
 ---
 
-## 18. 变更记录
+## 19. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1178,3 +1234,4 @@ python3 demo/run_demo.py
 | 2026-11-18 | **私钥存储后端**（`b0068ab`）：`KeyStore` 契约与 JSON / 内存 / OS 密钥环后端；统一 `signer_of` 校验；新增 47 条测试，累计 563 |
 | 2026-11-18 | **上下文事件持久化**（`7274a27`）：`ContextFabric(store=...)` 写 `context.events`；重开校验与 `limit` 保留；新增 19 条测试，累计 582 |
 | 2026-11-18 | **审计保留与归档**（`1a8394d`）：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；锚点校验与 `history()`；新增 20 条测试，累计 602 |
+| 2026-11-19 | **任务与副作用恢复**（`c7e990c`）：`TaskBoard` 持久化 `task.effects`；`recover()` 失败/重调度非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；新增 37 条测试，累计 639 |
