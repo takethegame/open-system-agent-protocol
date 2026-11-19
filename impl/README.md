@@ -30,7 +30,7 @@
 | 衰减 | §5.3 | 10 条规则逐项检查，返回全部违例维度 |
 | 绑定 | §5.4 | `audience` / `task_id` / `subject` 三项无状态校验 |
 | 撤销 | §5.5 | 父能力撤销级联到全部后代，撤销可跨“仅持有子凭证”的场景生效；每个新撤销 token 写入 `capability.revocations` 日志（`{seq, cap_id, ts}`）并与撤销集一次 `put_many` 落盘 |
-| 撤销分发 | §5.5 | 副本用 `apply_revocations(entries, source=...)` 按来源游标应用批次：重复投递幂等、缺口报领域扩展码 `REVOCATION_GAP`、批内必须连续、写失败回滚后可原样重试；`RevocationWatcher` 按间隔轮询源 store 并自动应用（拉模式，无推送通道、无协议消息） |
+| 撤销分发 | §5.5 | 副本用 `apply_revocations(entries, source=...)` 按来源游标应用批次：重复投递幂等、缺口报领域扩展码 `REVOCATION_GAP`、批内必须连续、写失败回滚后可原样重试；`RevocationWatcher` 按间隔轮询源 store 自动应用；`RevocationFeedServer/Client` 走专用 AF_UNIX sidecar socket 推送批次（catch-up + 增量，非 Bus 流量、无 OSAP 信封） |
 | 风险分级 | §5.7 | L3/L4 必须有 `consent_receipt_id`，否则 `POLICY_CONSENT_REQUIRED` |
 | 同意回执 | §5.8 | 决策 → 过期 → `cap_id`/`task_id`/`audience` → `actions`/`resources` 的顺序校验 |
 | 同意请求 | §10.2 | `consent.request` payload 校验、TTL（`intent_preview.ttl`，缺省 10 分钟）、重复 `request_id` 拒绝 |
@@ -108,7 +108,7 @@ impl/
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
     task.py             §8 任务树、预算、取消、结果、handoff、整树持久化、恢复同事务审计与 effect 归档
-    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、线程池/selector/asyncio 三种并发模式
+    transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、三种并发模式、撤销推送通道
   tests/                单元测试（unittest）
 ```
 
@@ -434,7 +434,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 5. **恢复审计事务要求同库**：`TaskBoard(ledger=...)` 可以把任务树、effect 日志与审计链放进同一次 `put_many`，但前提是 `AuditLedger` 与 board 共享同一个 `JsonStore` 实例（构造时校验）；ledger 用独立文件时事务无从谈起。`require_replay_allowed()` 仍只是闸门，绕过该 API 的直接副作用不受保护。
 6. **能力凭证只做结构校验**：能力 `proof.sig` 仍未验签，`cap_id` 也未由 CA 密钥覆盖；PCS 回执的签名、登记、轮换与撤销已由 `pcs.py` 覆盖，能力凭证本身仍待补。
 7. **`max_uses` 未计数**：衰减时比较上限，但使用次数没有落账，重放同一凭证不会被扣减。
-8. **撤销分发是拉模式**：`revoke` 把新撤销写入 `capability.revocations` 日志并原子落盘；另一进程可用 `apply_revocations(entries, source=...)` 拉取，或用 `RevocationWatcher` 按间隔轮询源 store 自动应用（失败下一轮重试，源文件永不写入）。没有推送通道、订阅协议或平台通知，§5.5 的“通知受影响 Agent”延迟受轮询间隔支配；`tools/benchmark_revocation.py --cross-process` 给出 revoke → 副本 `is_revoked()` 的端到端数字（含一个轮询间隔），与进程内 P95 不可比。
+8. **撤销分发默认仍是拉模式**：`revoke` 把新撤销写入 `capability.revocations` 日志并原子落盘；`RevocationWatcher` 轮询、`apply_revocations` 拉取、`RevocationFeedServer/Client` 推送三条路径都已实现，但推送要求签发方在每次 `revoke` 后显式调用 `server.notify()`（没有自动钩子），跨进程测量仍用轮询口径。`--cross-process` 数字含一个轮询间隔，与进程内 P95 不可比。
 9. **委派未校验能力链**：`delegate` 只检查任务预算与深度，没有把 `delegated_capability` 与父能力凭证做完整衰减比对（夹具里没有父凭证）。
 10. **上下文持久化仍不是完整存储层**：`ContextFabric(store=...)` 可跨重启保留解析事件、句柄注册表、任务黑板与对象元数据/墓碑，但缓存窗口仍是纯计算，没有句柄撤销，也没有按用户分区；黑板关闭后只保留条目数与 `promoted_to_memory=false`，不保留条目内容。
 11. **没有真实对象存储**：`delete_object` 只返回判定结果，不触碰文件系统；`storage_declaration` 只核对声明，不实现配额、GC 或加密。
@@ -447,7 +447,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。
 19. **三种服务模式，平台异步绑定仍缺**：`concurrency=N` 线程池高连接数时成本线性增长；`mode="selector"` 消掉了每连接线程但半帧停滞可阻塞循环；`mode="asyncio"` 有双工读缓冲但分发仍是同步的，慢处理串行化 loop，也没有按 Agent 的加权调度。XPC/Binder/named pipe 平台传输不在本阶段。`max_messages` 在后两种模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
-21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
+21. **撤销传播 P95 仍以进程内为准**：进程内基准测 `revoke` 标记到 `is_revoked` 观察；`--cross-process` 模式给出 revoke → 副本 `is_revoked()` 的端到端数字（含轮询间隔与调度），但样本是独立短链/小树，且推送通道要求显式 `notify()`，不是自动钩子；跨设备传播需要 0.2。
 22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_archive` 压缩归档后，被丢弃的最旧事件不再参与重复 `audit_id` 检查，也不再能从创世验证。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随保留的归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 24. **密钥环绑定仍是 CLI 包装**：Windows 路径经 PowerShell 的 `PasswordVault`（需 Windows PowerShell 5.1 的 WinRT 投影），未在真实 Windows 上端到端验证；macOS 路径仍把密钥放在 `security` 的命令行参数里。`migrate_key_store` 与 `tools/migrate_pcs_key.py` 覆盖单条记录迁移，但没有跨密钥环条目/多账号迁移，也不会自动在迁移后重建 `ConsentFlow`。
