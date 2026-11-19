@@ -1,6 +1,6 @@
 # OSAP 进展记录
 
-> 更新时间：2026-11-18
+> 更新时间：2026-11-19
 > 关联规划：[`roadmap.md`](roadmap.md)
 > 性质：工作记录（非规范性）。规范性内容以 [`standard.md`](standard.md) 为准。
 
@@ -24,6 +24,7 @@
 | PCS 公钥登记（M4 前置） | ✅ 完成 | 按 `kid` 登记/轮换/撤销/过期；`KeyRegistry` + `pcs.keys` 持久化；`ConsentFlow` 可选注册表验签；私钥可独立 `key_store`；516 tests | 2026-11-18 |
 | 私钥存储后端（M4 前置） | ✅ 完成 | `KeyStore` 契约；JSON / 内存 / OS 密钥环（macOS `security`、Linux `secret-tool`）三种后端；统一记录校验；563 tests | 2026-11-18 |
 | 上下文事件持久化（M4 前置） | ✅ 完成 | `ContextFabric(store=...)` 把 `context.resolve` 写入 `context.events`；重开逐条校验；`limit` 保留最新 N 条；582 tests | 2026-11-18 |
+| 审计保留与归档（M4 前置） | ✅ 完成 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 与归档原子双写；锚点校验与 `history()`；602 tests | 2026-11-18 |
 | M4 标准打包 | ⬜ 未开始 | 0/4 产出 | — |
 | M5 生态与采用 | ⬜ 未开始 | — | — |
 
@@ -37,7 +38,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 23 |
-| 参考实现 | 23 个模块 + 适配器（6427 行）+ 582 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（6585 行）+ 602 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
 | 中英平行文档 | 8 对 |
@@ -90,6 +91,7 @@
 | `5419b00` | 2026-11-18 | **私钥与回执分库**：`key_store=` 把 `consent.pcs_key` 移出回执 store；`ConsentFlow.verifier()` 用临时 signer 验证；7 条新测试，累计 516 |
 | `b0068ab` | 2026-11-18 | **私钥存储后端**：`keystore.py` 的 `KeyStore` 契约；JSON / 内存 / OS 密钥环后端；`as_key_store` 兼容裸 `JsonStore`；47 条新测试，累计 563 |
 | `7274a27` | 2026-11-18 | **上下文事件持久化**：`ContextFabric(store=...)` 写 `context.events`；重开逐条校验；`limit` 保留最新 N 条；19 条新测试，累计 582 |
+| `1a8394d` | 2026-11-18 | **审计保留与归档**：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；live 首条锚定归档尾；`history()` 导出完整链；20 条新测试，累计 602 |
 
 ---
 
@@ -1067,7 +1069,58 @@ python3 demo/run_demo.py
 
 ---
 
-## 15. 待确认的规范问题
+## 15. 审计保留与归档（M4 前置，已完成）
+
+### 15.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `impl/osap/audit.py` | `AuditLedger(max_events=..., archive_section=...)`；超限时把最旧事件移入 `audit.archive.<trace_id>`，live 与归档一次 `put_many` 原子写入；`verify()` 校验锚点并重验归档；`history()` / `archived_events` / `archive_section` |
+| `impl/tests/test_audit.py` | 20 条新测试：裁剪、跨段链接、带/不带上限重开、内存裁剪、重复 `audit_id`、篡改与畸形归档、自定义分节、非法上限 |
+
+### 15.2 语义
+
+- **只裁剪不丢链**：每次 `append` 后若超过 `max_events`，把最旧的 `len - max_events` 条移入归档；live 首条事件的 `prev_hash` 仍指向上一条归档事件的 `hash`，因此从 `GENESIS_HASH` 到最新一条仍是一条可验证的链。
+- **原子双写**：发生裁剪时用 `put_many` 同时写 live 与 archive，避免“live 已截断、archive 未写入”的崩溃窗口；不裁剪时仍只写 live 一节。
+- **锚点校验**：`verify()` 检查 live 首条 `prev_hash` 是否等于归档尾 `hash`（无归档时为 `GENESIS_HASH`），并重新校验归档的 schema、链接、正文哈希与“归档必须从 genesis 开始”。
+- **跨段唯一**：`append` 同时检查 live 与归档中的 `audit_id`，归档过的 id 不能再次写入。
+- **导出**：`history()` 返回归档 + live 的时间顺序单链，可直接交给 `redact_chain`；`archived_events` 返回分离副本。
+- **重开 fail closed**：先校验归档再校验 live；非对象、异 trace、非 genesis、篡改正文、`chain_id` 不一致、只有归档没有 live、被重新生根的 live 都会拒绝，不会返回缩短的历史。
+- **上限语义**：`max_events` 必须是正整数；`max_events=1` 时 live 只留最新一条；不传时行为与之前完全一致。重开时是否继续裁剪由新实例的 `max_events` 决定，已有归档不会被丢弃。
+
+### 15.3 验证证据
+
+2026-11-18，提交 `1a8394d`（上下文事件 `7274a27`）：
+
+```
+python3 -m unittest discover -s impl/tests -t impl
+→ Ran 602 tests ... OK
+
+python3 tools/check_schemas.py
+→ OK: 45 checks passed across 15 schemas
+python3 tools/validate_examples.py
+→ OK: 24 checks passed
+python3 tools/check_docs.py
+→ OK: 116 checks passed across 23 Markdown files
+python3 tools/conformance_run.py --impl impl/adapter.py
+→ 68 cases: 62 pass, 0 fail, 6 skip
+python3 demo/run_demo.py
+→ registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified
+```
+
+新增的 20 条测试覆盖：超限后最旧事件进入归档且顺序不变、恰好在上限时不写归档、live 首条锚定归档尾、`history()` 时间顺序与分离副本、带/不带 `max_events` 的重开、`max_events=1` 只留最新、纯内存账本裁剪、返回事件分离、已归档 `audit_id` 重复拒绝、归档正文篡改、归档未从 genesis 开始、归档被删除后的 live 重生根、只有归档没有 live、非对象归档、异 trace 归档、非数组 `events`、`chain_id` 不一致、自定义归档分节与非法上限。
+
+### 15.4 已知边界
+
+1. **归档只增不减**：`max_events` 限制的是 live 链，归档仍会无限增长，没有二级分层、压缩或删除策略。
+2. **整节重写**：每次追加仍重写 live 整节；裁剪时额外重写整个归档，长归档会线性变慢。
+3. **校验成本随归档增长**：`verify()` 每次都会重验归档，适合恢复或导出前使用，不适合每条事件都调用。
+4. **没有按用户分区**：分区仍靠 `trace_id` 或自定义 `section`；§3.7 的多实例 leader election 未实现。
+5. **不自动采集**：`Bus`、`TaskBoard` 与 `ContextFabric` 仍不会自动向账本追加事件。
+
+---
+
+## 16. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1083,9 +1136,9 @@ python3 demo/run_demo.py
 
 ---
 
-## 16. 下一步（按顺序）
+## 17. 下一步（按顺序）
 
-1. 为上下文句柄、黑板与对象元数据补存储层，并为审计账本补归档与按用户分区；
+1. 为上下文句柄、黑板与对象元数据补存储层，并为审计账本补按用户分区与跨 trace 的全局顺序；
 2. 补 Windows Credential Manager 后端与 JSON→密钥环迁移工具，并把密钥环错误细分为可诊断的原因；
 3. 为并发服务补事件循环或平台原生异步绑定，并加入 XPC/Binder/named pipe 等平台传输；
 4. 为撤销增加跨进程分发与重试，把 P95 口径从进程内扩展到跨进程；
@@ -1093,7 +1146,7 @@ python3 demo/run_demo.py
 
 ---
 
-## 17. 变更记录
+## 18. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1124,3 +1177,4 @@ python3 demo/run_demo.py
 | 2026-11-18 | **私钥与回执分库**（`5419b00`）：`key_store=` 移出 `consent.pcs_key`；`ConsentFlow.verifier()` 临时 signer 不落盘；新增 7 条测试，累计 516 |
 | 2026-11-18 | **私钥存储后端**（`b0068ab`）：`KeyStore` 契约与 JSON / 内存 / OS 密钥环后端；统一 `signer_of` 校验；新增 47 条测试，累计 563 |
 | 2026-11-18 | **上下文事件持久化**（`7274a27`）：`ContextFabric(store=...)` 写 `context.events`；重开校验与 `limit` 保留；新增 19 条测试，累计 582 |
+| 2026-11-18 | **审计保留与归档**（`1a8394d`）：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；锚点校验与 `history()`；新增 20 条测试，累计 602 |

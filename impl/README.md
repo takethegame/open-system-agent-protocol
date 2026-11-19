@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / OS 密钥环）、上下文解析事件持久化、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / OS 密钥环）、上下文解析事件持久化、审计保留与归档、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -63,13 +63,14 @@
 | 命名空间映射 | §6.8 | 由 `registry + native_id` 生成确定性的 `cap://federation/...` 名称 |
 | 外部信任 | §6.4 | 外部协议内容标 `origin=external`；未验签时不得保持 `system`，归一为 `unverified` |
 | 审计链验证 | §10.5、§10.6 | 事件 schema、phase 规则、trace 一致、`audit_id` 唯一、`prev_hash` 链接；`AuditLedger` 追加时生成哈希并在重启时重算 |
+| 审计保留与归档 | §10.5 | `AuditLedger(max_events=...)` 把最旧事件移入 `audit.archive.<trace_id>`；live 首条 `prev_hash` 指向归档尾；`history()` 导出完整链 |
 | 脱敏导出 | §10.6 | 目标、策略、回执、上下文引用替换为每次导出唯一的盐值承诺；链仍可验证 |
 | 回放 | §10.6 | 同一幂等键重复请求只执行一次副作用 |
 | 恢复对账 | §8.11、§10.5 | 只有 `effect.intent` 没有 outcome 时标记 `unknown` 并要求对账 |
 | 跨用户 | §11.2 | 默认拒绝；显式开启且双方同意才放行 |
 | 被攻破的 Bus | §3.6、§11.1 | 0.1 不声称 P0 防护；声明了即判不合约 |
 
-**不在本阶段**：持久审计账本、跨进程撤销分发、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
+**不在本阶段**：跨进程撤销分发、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
 
 ## 2. 目录
 
@@ -79,7 +80,7 @@ impl/
   osap/
     __init__.py         公共导出
     bus.py              握手、校验、路由、幂等、错误回执
-    audit.py            §8.11、§10.5、§10.6 审计链、持久账本、脱敏导出、回放、恢复
+    audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留与归档、脱敏导出、回放、恢复
     capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销
     clock.py            单调时钟 deadline
     consent.py          §5.8 同意回执与能力范围校验
@@ -392,6 +393,14 @@ macOS 的 `security add-generic-password` 没有 stdin 形式，密钥只能作�
 
 写入前会拒绝没有 `handle` 标识的解析请求，因为这种事件无法通过重开校验；这是一处刻意的 fail closed，避免一次畸形调用把整个分节写成不可恢复状态。
 
+### 5.46 审计保留通过归档段保持可验证
+
+`AuditLedger(max_events=N)` 不直接截断链。超过上限时，最旧的 `len - N` 条事件被移入 `audit.archive.<trace_id>`，live 与归档通过一次 `put_many` 原子写入；live 首条事件的 `prev_hash` 仍指向上一条归档事件的 `hash`，所以从 `GENESIS_HASH` 到最新一条仍是一条完整可验证的链。
+
+`verify()` 因此多了一步锚点检查：live 首条 `prev_hash` 必须等于归档尾 `hash`，没有归档时等于 `GENESIS_HASH`；归档自身还要满足从 genesis 开始、schema 合法、链接正确与正文哈希可重算。被“重新生根”的 live 链（例如归档被删除或替换）会立刻失败，而不是被当成一条更短的新链。
+
+`history()` 返回归档 + live 的时间顺序单链，可直接交给 `redact_chain`；`archived_events` 返回分离副本。`append` 的重复 `audit_id` 检查同时覆盖 live 与归档，避免已归档的 id 被重新写入。重开时是否继续裁剪由新实例的 `max_events` 决定，已有归档不会被丢弃。
+
 ## 6. 已知限制
 
 1. **部分内存态**：幂等索引、能力签发/撤销、同意流程、任务树、审计账本与 PCS 公钥可通过 `JsonStore` 跨重启，但清单/能力注册表、注册表轮换状态与上下文仍在进程内；持久化也没有 TTL 清理、压缩或多写者协调。
@@ -415,7 +424,7 @@ macOS 的 `security add-generic-password` 没有 stdin 形式，密钥只能作�
 19. **并发上限由线程池决定**：`serve_forever(concurrency=N)` 每连接一个线程，连接数很高时线程与内存成本线性增长；没有事件循环、异步 I/O 或按 Agent 的加权调度。`max_messages` 在并发模式下是 best-effort 停止条件，不是严格的协议配额。
 20. **同 uid 不等于同一 App**：未设置 `PeerPolicy.executable` 时，同一用户的其他进程也能通过；生产绑定应同时固定可执行文件或平台代码签名。
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
-22. **审计账本按 trace 单链**：没有跨 trace 的全局顺序、归档/截断/TTL、按用户分区或 leader election；`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。长链仍是整节重写。
+22. **审计账本按 trace 单链**：`max_events` 只裁剪 live 链，归档仍只增不减，没有跨 trace 全局顺序、归档压缩或按用户分区；`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 24. **密钥环只覆盖 macOS/Linux**：`KeyringKeyStore` 没有 Windows Credential Manager 后端；macOS 路径把密钥放在 `security` 的命令行参数里；也没有从既有 `consent.pcs_key` 自动迁移到密钥环的工具，迁移需要调用方先 `load()` 再 `save()`。
 
