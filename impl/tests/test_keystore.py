@@ -5,6 +5,7 @@
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from osap import JsonStore, consent_flow, keystore, pcs
@@ -217,14 +218,22 @@ class KeyringKeyStoreTests(unittest.TestCase):
         self.assertEqual(
             keystore.KeyringKeyStore.backend_for("linux2"), "secret-tool"
         )
-        self.assertIsNone(keystore.KeyringKeyStore.backend_for("win32"))
+        self.assertEqual(keystore.KeyringKeyStore.backend_for("win32"), "powershell")
+        self.assertIsNone(keystore.KeyringKeyStore.backend_for("sunos"))
 
     def test_an_unsupported_platform_is_rejected(self):
         with self.assertRaises(ValueError):
-            keystore.KeyringKeyStore(platform="win32", runner=FakeRunner())
+            keystore.KeyringKeyStore(platform="sunos", runner=FakeRunner())
+        self.assertFalse(keystore.KeyringKeyStore.available(platform="sunos"))
 
-    def test_availability_follows_the_backend(self):
-        self.assertFalse(keystore.KeyringKeyStore.available(platform="win32"))
+    def test_a_missing_backend_cli_is_backend_missing(self):
+        with unittest.mock.patch("osap.keystore.shutil.which", return_value=None):
+            with self.assertRaises(keystore.KeyringError) as caught:
+                keystore.KeyringKeyStore(platform="darwin")
+        self.assertEqual(caught.exception.reason, "backend_missing")
+        self.assertEqual(caught.exception.backend, "security")
+        self.assertEqual(caught.exception.platform, "darwin")
+        self.assertIsInstance(caught.exception, RuntimeError)
 
     def test_macos_load_parses_the_stored_record(self):
         signer = pcs.ConsentSigner.generate(kid="pcs-keyring")
@@ -252,8 +261,12 @@ class KeyringKeyStoreTests(unittest.TestCase):
     def test_a_lookup_failure_raises(self):
         runner = FakeRunner(FakeResult(2, stderr="denied"))
         store = keystore.KeyringKeyStore(platform="darwin", runner=runner)
-        with self.assertRaises(RuntimeError) as caught:
+        with self.assertRaises(keystore.KeyringError) as caught:
             store.load()
+        self.assertEqual(caught.exception.reason, "lookup_failed")
+        self.assertEqual(caught.exception.backend, "security")
+        self.assertEqual(caught.exception.returncode, 2)
+        self.assertEqual(caught.exception.stderr, "denied")
         self.assertIn("denied", str(caught.exception))
 
     def test_invalid_json_raises_value_error(self):
@@ -293,9 +306,56 @@ class KeyringKeyStoreTests(unittest.TestCase):
     def test_a_store_failure_raises(self):
         runner = FakeRunner(FakeResult(1, stderr="locked"))
         store = keystore.KeyringKeyStore(platform="linux", runner=runner)
-        with self.assertRaises(RuntimeError) as caught:
+        with self.assertRaises(keystore.KeyringError) as caught:
             store.save(keystore.record_of(pcs.ConsentSigner.generate()))
+        self.assertEqual(caught.exception.reason, "store_failed")
+        self.assertEqual(caught.exception.backend, "secret-tool")
         self.assertIn("locked", str(caught.exception))
+
+    def test_windows_load_parses_the_stored_record(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-vault")
+        runner = FakeRunner(FakeResult(0, json.dumps(keystore.record_of(signer))))
+        store = keystore.KeyringKeyStore(platform="win32", runner=runner)
+        self.assertEqual(store.load(), keystore.record_of(signer))
+        command, secret = runner.calls[0]
+        self.assertEqual(command[:4], ["powershell", "-NoProfile", "-NonInteractive", "-Command"])
+        self.assertIsNone(secret)
+        script = command[-1]
+        self.assertIn("PasswordVault", script)
+        self.assertIn("'osap-consent'", script)
+        self.assertIn("'pcs'", script)
+        self.assertIn("RetrievePassword", script)
+        self.assertIn("exit 44", script)
+
+    def test_windows_load_of_a_missing_entry_is_none(self):
+        runner = FakeRunner(FakeResult(44))
+        store = keystore.KeyringKeyStore(platform="win32", runner=runner)
+        self.assertIsNone(store.load())
+
+    def test_windows_save_sends_the_secret_on_stdin(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-vault")
+        record = keystore.record_of(signer)
+        runner = FakeRunner(FakeResult(0))
+        store = keystore.KeyringKeyStore(platform="win32", runner=runner)
+        store.save(record)
+        command, secret = runner.calls[0]
+        self.assertEqual(command[0], "powershell")
+        self.assertIn("PasswordCredential", command[-1])
+        self.assertIn("Remove(", command[-1])
+        self.assertIn("exit 1", command[-1])
+        self.assertEqual(secret, json.dumps(record, sort_keys=True))
+        self.assertNotIn(json.dumps(record, sort_keys=True), command[-1])
+
+    def test_windows_delete_uses_the_vault(self):
+        runner = FakeRunner(FakeResult(0))
+        store = keystore.KeyringKeyStore(platform="win32", runner=runner)
+        self.assertTrue(store.delete())
+        self.assertIn("PasswordVault", runner.calls[0][0][-1])
+
+    def test_windows_delete_of_a_missing_entry_is_false(self):
+        runner = FakeRunner(FakeResult(44))
+        store = keystore.KeyringKeyStore(platform="win32", runner=runner)
+        self.assertFalse(store.delete())
 
     def test_save_rejects_a_non_object(self):
         store = keystore.KeyringKeyStore(platform="darwin", runner=FakeRunner())
@@ -393,6 +453,114 @@ class FlowIsolationTests(unittest.TestCase):
         )
         self.assertIs(flow.signer, signer)
         self.assertIsNone(keys.load())
+
+
+class MigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "keys.json"
+
+    def json_source(self):
+        return keystore.JsonKeyStore(JsonStore(self.path))
+
+    def test_a_missing_source_key_is_reported(self):
+        report = keystore.migrate_key_store(self.json_source(), keystore.MemoryKeyStore())
+        self.assertFalse(report["migrated"])
+        self.assertEqual(report["reason"], "no_key_in_source")
+        self.assertFalse(report["deleted_from_source"])
+
+    def test_a_json_key_moves_to_the_keyring(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-migrate")
+        record = keystore.record_of(signer)
+        self.json_source().save(record)
+        target = keystore.MemoryKeyStore()
+        report = keystore.migrate_key_store(self.json_source(), target)
+        self.assertTrue(report["migrated"])
+        self.assertEqual(report["reason"], "copied")
+        self.assertEqual(report["kid"], "pcs-migrate")
+        self.assertEqual(report["source"], "JsonKeyStore")
+        self.assertEqual(report["target"], "MemoryKeyStore")
+        self.assertTrue(report["deleted_from_source"])
+        self.assertIsNone(self.json_source().load())
+        self.assertEqual(target.load(), record)
+
+    def test_keep_source_keeps_the_json_section(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-migrate")
+        self.json_source().save(keystore.record_of(signer))
+        report = keystore.migrate_key_store(
+            self.json_source(), keystore.MemoryKeyStore(), delete_source=False
+        )
+        self.assertTrue(report["migrated"])
+        self.assertFalse(report["deleted_from_source"])
+        self.assertIsNotNone(self.json_source().load())
+
+    def test_a_corrupt_source_record_fails(self):
+        JsonStore(self.path).put(keystore.SIGNING_KEY_SECTION, {"kid": "pcs-broken"})
+        target = keystore.MemoryKeyStore()
+        with self.assertRaises(ValueError):
+            keystore.migrate_key_store(self.json_source(), target)
+        self.assertIsNone(target.load())
+
+    def test_a_different_target_key_blocks_the_migration(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-source")
+        record = keystore.record_of(signer)
+        self.json_source().save(record)
+        other = keystore.record_of(pcs.ConsentSigner.generate(kid="pcs-other"))
+        target = keystore.MemoryKeyStore(other)
+        report = keystore.migrate_key_store(self.json_source(), target)
+        self.assertFalse(report["migrated"])
+        self.assertEqual(report["reason"], "target_occupied")
+        self.assertEqual(report["target_kid"], "pcs-other")
+        self.assertFalse(report["deleted_from_source"])
+        self.assertIsNotNone(self.json_source().load())
+        self.assertEqual(target.load(), other)
+
+    def test_a_corrupt_target_record_blocks_the_migration(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-source")
+        self.json_source().save(keystore.record_of(signer))
+        target = keystore.MemoryKeyStore({"kid": "pcs-broken"})
+        report = keystore.migrate_key_store(self.json_source(), target)
+        self.assertFalse(report["migrated"])
+        self.assertEqual(report["reason"], "target_occupied")
+        self.assertIsNotNone(self.json_source().load())
+
+    def test_an_identical_target_is_idempotent(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-source")
+        record = keystore.record_of(signer)
+        self.json_source().save(record)
+        target = keystore.MemoryKeyStore(record)
+        report = keystore.migrate_key_store(self.json_source(), target)
+        self.assertTrue(report["migrated"])
+        self.assertEqual(report["reason"], "already_migrated")
+        self.assertTrue(report["deleted_from_source"])
+        self.assertEqual(target.load(), record)
+
+    def test_a_source_without_delete_keeps_the_record(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-source")
+        record = keystore.record_of(signer)
+
+        class NoDeleteStore(keystore.KeyStore):
+            def __init__(self, seed):
+                self._record = seed
+
+            def load(self):
+                return self._record
+
+            def save(self, value):
+                self._record = value
+
+        source = NoDeleteStore(record)
+        report = keystore.migrate_key_store(source, keystore.MemoryKeyStore())
+        self.assertTrue(report["migrated"])
+        self.assertFalse(report["deleted_from_source"])
+        self.assertEqual(source.load(), record)
+
+    def test_the_report_is_json_serialisable(self):
+        signer = pcs.ConsentSigner.generate(kid="pcs-source")
+        self.json_source().save(keystore.record_of(signer))
+        report = keystore.migrate_key_store(self.json_source(), keystore.MemoryKeyStore())
+        json.dumps(report)
 
 
 if __name__ == "__main__":

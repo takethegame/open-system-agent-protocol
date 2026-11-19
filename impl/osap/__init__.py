@@ -60,7 +60,14 @@ from .errors import STANDARD_CODES, OsapError
 from .flowcontrol import Admission, AdmissionController, DEFAULT_QUOTA, Quota
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
-from .keystore import JsonKeyStore, KeyringKeyStore, KeyStore, MemoryKeyStore
+from .keystore import (
+    JsonKeyStore,
+    KeyringError,
+    KeyringKeyStore,
+    KeyStore,
+    MemoryKeyStore,
+    migrate_key_store,
+)
 from .pcs import ConsentSigner, KeyRegistry
 from .store import JsonStore
 
@@ -79,6 +86,7 @@ __all__ = [
     "JsonStore",
     "KeyRegistry",
     "KeyStore",
+    "KeyringError",
     "KeyringKeyStore",
     "MemoryKeyStore",
     "KNOWN_TYPES",
@@ -97,6 +105,7 @@ __all__ = [
     "flowcontrol",
     "identity",
     "keystore",
+    "migrate_key_store",
     "pcs",
     "registry",
     "schema",

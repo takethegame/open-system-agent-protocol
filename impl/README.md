@@ -1,6 +1,6 @@
 # 参考实现（M2.1 – M2.7 + 持久化 / PCS / 流控 / 恢复）
 
-本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / OS 密钥环）、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
+本目录是 OSAP 0.1 的最小参考实现。已完成路线图的 **M2.1a（信封 + 分帧 + 错误模型）**、**M2.1b（UDS stream 与消息型绑定 + 对端认证）**、**M2.2（身份 + 签名 + 注册表）**、**M2.3（能力模型）**、**M2.4a（同意回执）**、**M2.4b（同意消息流）**、**M2.5a（任务模型）**、**M2.5b（上下文织构）**、**M2.5c（联邦适配器）**、**M2.6（审计链）** 与 **M2.7（三 Agent 演示）**，并补上跨重启的幂等/能力状态、同意流程、任务树与审计账本持久化、PCS 回执签名、公钥登记/轮换/撤销、私钥与回执分库、可插拔私钥存储（JSON / 内存 / macOS・Linux・Windows 密钥环）与 JSON→密钥环迁移工具、上下文解析事件持久化、审计保留与归档、按用户分区的跨 trace 审计顺序、任务与副作用重启恢复、同意流程可选注册表验签与离线验签、逐 Agent 的 admission control 与速率限制（均为 M4 前置）；端到端串接见 [`../demo/`](../demo/README.md)。
 
 规范性内容以 [`../docs/standard.md`](../docs/standard.md) 为准；本目录只回答“这段文字如何落成代码”。
 
@@ -40,7 +40,8 @@
 | 回执签名 | §10.4 | Ed25519 覆盖去掉 `proof` 的规范化 JSON；`activate` 先验签再查预约，Agent 不能自签 |
 | 离线验签 | §10.4 | `pcs.verify_receipt` / `ConsentSigner.verify` 只依赖声明的 PCS 公钥 |
 | PCS 公钥登记 | §4.5、§10.4 | 按 `kid` 登记、轮换（带退役宽限）、撤销与有效期；`pcs.keys` 跨重启；`ConsentFlow` 可选按 `proof.kid` 验签；`key_store` 分离私钥；验签失败细分 `AUTH_DENIED` 原因 |
-| 私钥存储 | §10.4 | `KeyStore` 契约：`JsonKeyStore` 分节写入、`MemoryKeyStore` 仅内存、`KeyringKeyStore` 走 macOS `security` / Linux `secret-tool`；记录校验统一在 `signer_of` |
+| 私钥存储 | §10.4 | `KeyStore` 契约：`JsonKeyStore` 分节写入、`MemoryKeyStore` 仅内存、`KeyringKeyStore` 走 macOS `security` / Linux `secret-tool` / Windows `PasswordVault`（PowerShell）；后端失败细分 `KeyringError.reason`；记录校验统一在 `signer_of`；`migrate_key_store` 在验证后迁移并在目标确认后删源 |
+| 密钥迁移 | §10.4 | `keystore.migrate_key_store(source, target)` 与 `tools/migrate_pcs_key.py`：损坏记录拒绝迁移、目标已占用不同密钥即中止、同记录幂等、删除源之前先验证目标 |
 | 任务树 | §8.2、§8.10 | 父/子索引、状态机与非法转换拒绝；可注入 `JsonStore` 持久化整棵树 |
 | 委派 | §8.3、§8.5 | 子任务预算 ≤ 父剩余、深度 = 父 + 1、重复 `task_id` 拒绝 |
 | 预算 | §8.6 | 逐维比较；运行期超支报 `TASK_BUDGET_EXCEEDED` |
@@ -98,7 +99,7 @@ impl/
     framing.py          §7.9 两种分帧绑定
     identity.py         注册、保留命名空间、App/公钥绑定
     idempotency.py      §7.8 幂等索引
-    keystore.py         §10.4 PCS 私钥存储契约与 JSON / 内存 / OS 密钥环后端
+    keystore.py         §10.4 PCS 私钥存储契约与 JSON / 内存 / 三平台密钥环后端、迁移
     pcs.py              §4.5、§10.4 PCS 回执签名、离线验签、公钥登记/轮换/撤销
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
@@ -383,7 +384,7 @@ Linux 用 `SO_PEERCRED` 取 pid/uid/gid，并从 `/proc/<pid>/exe` 解析可执�
 
 - `JsonKeyStore` 复用 `JsonStore` 的原子写入，仍是文件系统权限保护，不是加密存储；
 - `MemoryKeyStore` 只活在进程内，适合不需要签发的验证方与测试，重启后密钥消失；
-- `KeyringKeyStore` 调用 macOS `security` 或 Linux `secret-tool`，`platform` 与 `runner` 可注入，所以测试不碰真实密钥环；缺少对应 CLI 时构造即失败，不会悄悄退回文件。
+- `KeyringKeyStore` 调用 macOS `security`、Linux `secret-tool` 或 Windows `PasswordVault`（经 PowerShell），`platform` 与 `runner` 可注入，所以测试不碰真实密钥环；缺少对应 CLI 时构造即 `KeyringError(backend_missing)`，不会悄悄退回文件。查找/写入失败也细分 `lookup_failed` / `store_failed`，并保留 `returncode` 与 `stderr`。
 
 记录校验集中在 `signer_of`：必须是对象、`kid` 非空、`private_key` 能构造 Ed25519、`public_key` 若存在必须与私钥推导出的公钥一致。三个后端因此对同一种损坏输入给出一致的 `ValueError`，不会出现“JSON 后端拒绝、密钥环后端接受”的差异。
 
@@ -442,7 +443,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 21. **撤销传播 P95 只覆盖进程内**：基准测量 `revoke` 标记与 `is_revoked` 观察，不含跨进程通知、持久账本写入或重试；跨设备传播需要 0.2 的撤销分发机制。
 22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_events` 只裁剪 live 链，归档仍只增不减，没有压缩。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
-24. **密钥环只覆盖 macOS/Linux**：`KeyringKeyStore` 没有 Windows Credential Manager 后端；macOS 路径把密钥放在 `security` 的命令行参数里；也没有从既有 `consent.pcs_key` 自动迁移到密钥环的工具，迁移需要调用方先 `load()` 再 `save()`。
+24. **密钥环绑定仍是 CLI 包装**：Windows 路径经 PowerShell 的 `PasswordVault`（需 Windows PowerShell 5.1 的 WinRT 投影），未在真实 Windows 上端到端验证；macOS 路径仍把密钥放在 `security` 的命令行参数里。`migrate_key_store` 与 `tools/migrate_pcs_key.py` 覆盖单条记录迁移，但没有跨密钥环条目/多账号迁移，也不会自动在迁移后重建 `ConsentFlow`。
 
 ## 7. 与规范的偏差登记
 
