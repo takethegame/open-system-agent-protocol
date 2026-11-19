@@ -405,7 +405,7 @@ macOS 的 `security add-generic-password` 没有 stdin 形式，密钥只能作�
 
 ### 5.47 重启恢复先落 intent，再把未知副作用挡在重放之外
 
-`TaskBoard` 把 §8.11 的副作用过程写进 `task.effects`：`record_effect_intent()` 在副作用前落 `pending`，`record_effect_outcome()` 落 `executed`，同一 intent 的重复 outcome 幂等。`recover(policy=...)` 把所有非终态任务改为 `failed`（或 `reschedule` 时改回 `created`），把所有 `pending` effect 改为 `unknown`，并用一次 `put_many` 同时写 `task.tasks` 与 `task.effects`；没有变化时不写。
+`TaskBoard` 把 §8.11 的副作用过程写进 `task.effects`：`record_effect_intent()` 在副作用前落 `pending`，`record_effect_outcome()` 落 `executed`，同一 intent 的重复 outcome 幂等。`recover(policy=...)` 把所有非终态任务改为 `failed`（或 `reschedule` 时改回 `created`），把所有 `pending` effect 改为 `unknown`，并用一次 `put_many` 同时写 `task.tasks` 与 `task.effects`；没有变化时不写。任务状态没有 `unknown` 枚举，因此按 §3.7 转为 `failed`；`unknown` 描述的是副作用结果，不是任务状态。
 
 恢复是策略覆盖，不是 §8.10 的普通转换：普通 `transition("created" → "failed")` 仍被拒绝，只有重启恢复可以把非终态任务直接推进到 `failed`。第一次恢复后，`fail` 策略下所有任务已终态（`reschedule` 策略下留在 `created`）；再次恢复不会重复写审计，但仍会报告尚未对账的 `unknown` effect。
 

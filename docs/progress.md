@@ -1137,7 +1137,7 @@ python3 demo/run_demo.py
 
 - **先 intent，后副作用**：`record_effect_intent` 在副作用前写 `task.effects`，状态 `pending`；`record_effect_outcome` 写 `executed`；同一 intent 的重复 outcome 幂等。
 - **恢复不静默 running**：`recover()` 把非终态任务改为 `failed`，或 `policy="reschedule"` 时改回 `created`。这是重启策略覆盖，不是 §8.10 的普通转换：普通 `transition("created"→"failed")` 仍被拒绝。
-- **只有 intent 就是 unknown**：所有 `pending` effect 在恢复时改为 `unknown`，报告 `effect_state=unknown`、`pending_intents` 与 `requires_reconciliation`；第二次恢复仍报告这些 unknown，但不会重复写审计。
+- **只有 intent 就是 unknown**：所有 `pending` effect 在恢复时改为 `unknown`，报告 `effect_state=unknown`、`pending_intents` 与 `requires_reconciliation`；第二次恢复仍报告这些 unknown，但不会重复写审计。任务状态没有 `unknown` 枚举，所以任务按 §3.7 转为 `failed`，`unknown` 只描述副作用结果。
 - **原子快照**：任务树与 effect 日志通过一次 `put_many` 写入；没有变化时不写。
 - **重放闸门**：`require_replay_allowed` 对 `pending`/`unknown` 抛 `POLICY_DENIED` 且 `details.reason=reconciliation_required`；对已确认 `executed` 的对账结果抛 `already_executed`；只有 `executed`（幂等路径）与 `reconciled: not_executed`（确认未执行）允许继续。
 - **对账写回**：`reconcile_effect(intent_ref, outcome=...)` 只接受 `unknown`，`outcome` 只能是 `executed` 或 `not_executed`；写入 `reconciled_outcome` 并持久化，对账不是自动重放。
