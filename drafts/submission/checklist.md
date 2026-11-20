@@ -11,8 +11,8 @@
 | # | 事项 | 状态 | 机械检查 | 负责人 |
 |---|---|---|---|---|
 | 0 | 贡献者名单确认 | ✅ 完成(2026-11-20):初始模板提交与全部 104 条 commit 均为本人 | `git log --all --format='%an <%ae>'` | Zeng Zhiyong |
-| 1 | 贡献者同意(§10.4) | 🟡 模板已填好本人信息,待本人邮件确认(唯一贡献者=作者本人) | 人工:同意邮件回复并存档 | Zeng Zhiyong |
-| 2 | BCP 79 IPR 披露 | 🟡 待确认:是否存在已知专利/申请(若无则无需披露,只需据实说明) | 人工:Datatracker 披露页(有义务时) | Zeng Zhiyong |
+| 1 | 贡献者同意(§10.4) | 🟡 唯一贡献者=署名者;四条声明与登记表已就绪([consent-record.md](consent-record.md)),待署名者以邮件或 DCO 提交确认 | `consent-record.md` 登记表填毕 | Zeng Zhiyong |
+| 2 | BCP 79 IPR 披露 | 🟡 领域态势与自查三问已备([ipr-landscape.md](ipr-landscape.md));待署名者逐条确认,全"否"则无需披露 | `ipr-landscape.md` §3 结论模板填毕 | Zeng Zhiyong |
 | 3 | 替换占位作者 | ✅ 完成(2026-11-20):Author/Editor = Zeng Zhiyong(ZZHY),email 已公开可见 | `python3 tools/check_drafts.py --submission` ✅ | Zeng Zhiyong |
 | 4 | 文档名(draft-\<author\>-…) | ✅ 完成(2026-11-20):`draft-zeng-osap-capability-tokens-00` / `draft-zeng-osap-consent-receipts-00` | `DOCNAME_RE` + `--submission` ✅ | Zeng Zhiyong |
 | 5 | WG 归属意向 | ⬜ 未启动:联络信已署名,待发送并归档回复 | 人工:chairs 回复存档 | Zeng Zhiyong |
@@ -34,9 +34,10 @@
 
 ## 3. BCP 79 IPR 披露
 
-- 模板:[ipr-disclosure-template.md](ipr-disclosure-template.md)。Datatracker 表单地址:https://datatracker.ietf.org/ipr/about/
-- 原则:据实披露。本项目当前**没有已知专利声明**;若贡献者持有涉及两个 draft 内容的专利/申请,MUST 在提交前披露(BCP 79 / RFC 3979 + 4879 语义)。
-- 完成标志:披露页 URL 写入 `drafts/README.md` §6 第 2 项;`ipr="trust200902"` 属性届时已与披露核对一致(该值本身是模板默认,不是披露)。
+- 模板:[ipr-disclosure-template.md](ipr-disclosure-template.md);检索记录:[ipr-landscape.md](ipr-landscape.md)。Datatracker 表单地址:https://datatracker.ietf.org/ipr/about/
+- **检索结论(2026-11-20,非法律意见)**:领域态势已梳理——agentproto 已获章程并有 PACE/权限转移回执等 draft;第三方专利家族(consent receipt 信任根、macaroon-caveats 委派、WO2026154461A2)与 OSAP 概念相邻但机制不同;衰减式委派有充分的公开在先技术(Macaroons 2014 等)。**RFC 8179 的披露义务只针对署名者自己持有的权利**——待署名者按 [ipr-landscape.md](ipr-landscape.md) §1 的三问逐条确认;全部为"否"则无需提交披露。
+- 原则:据实披露。若披露,类型(RAND/RF)是署名者的事实决定。
+- 完成标志:确认结论写入本表第 2 行;披露(如有)页 URL 写入 `drafts/README.md` §6 第 2 项。
 
 ---
 

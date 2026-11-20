@@ -1875,3 +1875,4 @@ python3 tools/check_docs.py
 | 2026-11-20 | **闸门 0/3/4 完成**：贡献者名单确认为署名者本人；两份 draft 的作者替换为 Zeng Zhiyong（ZZHY, Independent, 272577337@qq.com），文档名改名为 `draft-zeng-osap-*`；`--submission` 转绿并接入 CI `drafts` job；剩余闸门 1（同意邮件确认）、2（IPR 自查）、5（chairs 联络）为真人动作 |
 | 2026-11-20 | **demo 崩溃恢复与单一审计编码**（`d04c907`）：demo 第 7 节持久化运行时 + 重放闸门/对账/幂等重放/黑板不晋升；第 6 节 16 事件改由 `AuditLedger` 生成 |
 | 2026-11-20 | **README 限制清单**（`fcf0485`）：根 README 中英同步更新当前状态并列出六条采用相关限制 |
+| 2026-11-20 | **闸门 1/2 辅助材料**：`consent-record.md`（四条声明待署名者确认）与 `ipr-landscape.md`（领域态势：agentproto 已获章程并有 PACE 等委派 draft；第三方专利家族梳理；Macaroons 等公开在先技术）；agentproto 联络信按已获批章程的现实重写 |
