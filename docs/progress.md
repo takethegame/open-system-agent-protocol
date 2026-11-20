@@ -51,7 +51,7 @@
 | Markdown 文件 | 42 |
 | 参考实现 | 23 个模块 + 适配器（9118 行）+ 790 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
-| 端到端演示 | `demo/run_demo.py`（575 行）+ 演示说明（67 行） |
+| 端到端演示 | `demo/run_demo.py`（672 行，含崩溃恢复第 7 节）+ 演示说明 |
 | 中英平行文档 | 9 对 |
 | CI 工作流 | 1（Python 3.11 / 3.12） |
 
@@ -116,6 +116,8 @@
 | `1b477f6` | 2026-11-19 | **撤销订阅与跨进程测量**：`RevocationWatcher` 轮询订阅；`--cross-process` 基准；8 条新测试，累计 778 |
 | `c32fc97` | 2026-11-19 | **asyncio 绑定**：缓冲分帧协议，半帧停滞不阻塞他人；跨线程 fd 关闭挂死的修复；8 条新测试，累计 782 |
 | `c2b3f39` | 2026-11-19 | **撤销推送通道**：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量）；`--cross-process --tree` 整树 cascade 测量；8 条新测试，累计 790 |
+| `d04c907` | 2026-11-20 | **demo 崩溃恢复**：第 7 节持久化运行时（任务树/审计链/幂等索引/黑板共库）；重放闸门拒绝 → 对账 → 显式重试；幂等重放；链条改由 `AuditLedger` 生成（单一编码） |
+| `fcf0485` | 2026-11-20 | **README 限制清单**：根 README（中英）更新当前状态并列出六条采用决策相关的限制 |
 
 ---
 
@@ -1871,3 +1873,5 @@ python3 tools/check_docs.py
 | 2026-11-20 | **M5 一致性登记表**:新建 `conformance/registry.md`(可复现闸门、条目格式、登记流程)与 `conformance/reports/osap-reference-2026-11-20.json`;`docs/conformance.md` §6 与 roadmap M5 同步;参考实现自证登记(64 pass / 4 manual skip) |
 | 2026-11-20 | **IETF 提交前置材料包**：`drafts/submission/`（闸门检查单、§10.4 同意书模板、BCP 79 披露模板、agentproto/OAuth 联络 信草稿）；`check_drafts.py --submission` 机械闸门（占位作者强制，未入 CI） |
 | 2026-11-20 | **闸门 0/3/4 完成**：贡献者名单确认为署名者本人；两份 draft 的作者替换为 Zeng Zhiyong（ZZHY, Independent, 272577337@qq.com），文档名改名为 `draft-zeng-osap-*`；`--submission` 转绿并接入 CI `drafts` job；剩余闸门 1（同意邮件确认）、2（IPR 自查）、5（chairs 联络）为真人动作 |
+| 2026-11-20 | **demo 崩溃恢复与单一审计编码**（`d04c907`）：demo 第 7 节持久化运行时 + 重放闸门/对账/幂等重放/黑板不晋升；第 6 节 16 事件改由 `AuditLedger` 生成 |
+| 2026-11-20 | **README 限制清单**（`fcf0485`）：根 README 中英同步更新当前状态并列出六条采用相关限制 |
