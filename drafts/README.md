@@ -15,8 +15,8 @@
 
 | 文件 | 内容 | IETF 状态 |
 |---|---|---|
-| `draft-osap-capability-tokens-00.xml` | Draft A：`Capability Tokens for Local Agent Delegation` | individual draft，未提交 |
-| `draft-osap-consent-receipts-00.xml` | Draft B：`Consent Receipt Binding for Task-Scoped Authorization` | individual draft，未提交 |
+| `draft-zeng-osap-capability-tokens-00.xml` | Draft A：`Capability Tokens for Local Agent Delegation` | individual draft，未提交；作者 Zeng Zhiyong |
+| `draft-zeng-osap-consent-receipts-00.xml` | Draft B：`Consent Receipt Binding for Task-Scoped Authorization` | individual draft，未提交；作者 Zeng Zhiyong |
 | `README.md` | 本文件：来源映射、构建、边界与发布检查 | 非规范性 |
 
 两个 draft 都是英文，正文不引用 `standard.md`、本仓库路径或未发布文档；外部读者只看单个 draft 即可理解其范围。中文原文仍是规范性的最终来源；draft 与 `standard.md` 冲突时以 `standard.md` 为准。
@@ -132,22 +132,22 @@ Linux 绑定单独写在 [`bindings/linux/profile.md`](../bindings/linux/profile
 
 1. **贡献者同意**：按 `GOVERNANCE.md` §10.4 取得所有贡献者对 IETF Trust 版权条款的同意；
 2. **IPR 披露**：按 BCP 79 完成专利与知识产权披露；
-3. **提交人**：指定 Author/Editor，替换当前的 `OSAP Editors` 占位作者；
-4. **文档名**：向 Datatracker 申请 `draft-<author>-...` 或目标 WG 的命名，不能直接沿用 `draft-osap-...`；
+3. **提交人**：✅ 已完成(2026-11-20)——Author/Editor 为 Zeng Zhiyong(ZZHY Zeng)，`tools/check_drafts.py --submission` 已转绿；
+4. **文档名**：✅ 已完成(2026-11-20)——individual submission 按第一作者姓氏命名为 `draft-zeng-osap-capability-tokens-00` / `draft-zeng-osap-consent-receipts-00`；被 WG 采用后由 WG 重命名；
 5. **WG 归属**：确认 `agentproto` 或 OAuth WG 的采用意向；未被采用时保持 individual draft；
 6. **外部引用**：把当前内联的 RFC 引用替换为 `xml2rfc` 的 bibxml 或确认内联引用仍可编译；
 7. **一致性**：重新跑 `tools/check_drafts.py --compile`、`tools/check_docs.py` 与全量测试。
 
-其中第 3 项有机械闸门:`python3 tools/check_drafts.py --submission`(占位作者、作者联系方式检查)。它**当前如预期失败**——占位作者还在；闸门 1–5 完成前不要把它接入 CI，替换真实作者后它应当转绿。
+其中第 3、4 项有机械闸门：`python3 tools/check_drafts.py --submission`（占位作者、作者联系方式检查）。它已在作者替换与改名后转绿，并接入 CI 的 `drafts` job；后续若再出现占位作者会直接红。
 
-当前 `ipr="trust200902"` 是 IETF 文档模板的默认值，不代表已经完成上述同意或披露。
+`ipr="trust200902"` 仍是 IETF 文档模板的默认值；BCP 79 披露义务取决于署名者的专利事实（见 `submission/ipr-disclosure-template.md`），与该属性无关。
 
 ---
 
 ## 7. 已知边界
 
 - 两个 draft 是 **individual** 文档，不是 WG 采用稿，也不代表 IETF 背书。
-- `OSAP Editors` / `editors@osap.example` 是占位作者与保留域名；提交前必须替换。
+- 作者信息是真实的（Zeng Zhiyong / 272577337@qq.com）；邮箱会随 draft 公开发布。
 - Draft A 不定义 token 的传输编码；它假设调用方已经有一个经过认证的本地通道。
 - Draft B 不定义同意 UI；它只定义请求、回执与审计的数据形状。
 - 27560 映射是信息性的，未做逐字段的 ISO 符合性测试。

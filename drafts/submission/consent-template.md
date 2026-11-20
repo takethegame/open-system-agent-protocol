@@ -6,12 +6,12 @@
 
 主题:OSAP IETF 提交 — IETF Trust 版权条款同意确认
 
-<贡献者姓名>:
+Zeng Zhiyong:
 
 您好。我们计划将以下两份 Internet-Draft 提交到 IETF(以 individual submission 形式,或经相关工作组采用后提交):
 
-- `draft-osap-capability-tokens`(能力 token 格式、衰减、绑定、撤销、同意前置)
-- `draft-osap-consent-receipts`(同意请求、回执、预约顺序、审计、ISO/IEC 27560 信息性映射)
+- `draft-zeng-osap-capability-tokens`(能力 token 格式、衰减、绑定、撤销、同意前置)
+- `draft-zeng-osap-consent-receipts`(同意请求、回执、预约顺序、审计、ISO/IEC 27560 信息性映射)
 
 若您曾以任何形式为上述内容贡献过代码、文字或设计(参见本仓库 `git log`),按 `GOVERNANCE.md` §10.4 与 BCP 78(RFC 5378,IETF Trust 的版权许可政策),提交前必须取得您对以下各条的明确同意:
 
@@ -22,7 +22,7 @@
 
 请回复本邮件确认以下声明:
 
-> 我,<贡献者姓名>,确认我理解并同意上述 1–4 条;本同意覆盖我截至 <日期> 对仓库
+> 我,Zeng Zhiyong,确认我理解并同意上述 1–4 条;本同意覆盖我截至 <日期> 对仓库
 > https://github.com/takethegame/open-system-agent-protocol 中与这两份 draft 相关的
 > 全部贡献。若我日后持有相关专利或申请,我将按 BCP 79 披露。
 
@@ -34,4 +34,4 @@
 
 | 贡献者 | 同意方式(邮件/Issue/签名) | 日期 | 覆盖的 draft | 备案位置 |
 |---|---|---|---|---|
-|  |  |  |  |  |
+| takethegame `<272577337@qq.com>`(Zeng Zhiyong,含初始模板提交的 `Your Name <you@example.com>`) | 待填:确认邮件回复 | 待填 | 两份 draft | 待填:邮箱存档 |

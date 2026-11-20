@@ -5,7 +5,7 @@
 <rfc xmlns:xi="http://www.w3.org/2001/XInclude"
      ipr="trust200902"
      category="info"
-     docName="draft-osap-consent-receipts-00"
+     docName="draft-zeng-osap-consent-receipts-00"
      submissionType="IETF"
      consensus="false"
      tocInclude="true"
@@ -15,11 +15,11 @@
 
   <front>
     <title abbrev="OSAP Consent Receipts">Consent Receipt Binding for Task-Scoped Authorization</title>
-    <seriesInfo name="Internet-Draft" value="draft-osap-consent-receipts-00"/>
-    <author fullname="OSAP Editors" initials="O." surname="Editors">
-      <organization>OSAP Project</organization>
+    <seriesInfo name="Internet-Draft" value="draft-zeng-osap-consent-receipts-00"/>
+    <author fullname="Zeng Zhiyong" initials="ZZHY" surname="Zeng">
+      <organization>Independent</organization>
       <address>
-        <email>editors@osap.example</email>
+        <email>272577337@qq.com</email>
       </address>
     </author>
     <date year="2026" month="November" day="19"/>

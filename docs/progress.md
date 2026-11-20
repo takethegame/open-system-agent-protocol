@@ -1755,7 +1755,7 @@ python3 tools/check_docs.py
 
 ---
 
-## 29. IETF 提交前置准备材料包(待人工决策)
+## 29. IETF 提交前置准备材料包(闸门 0/3/4 已完成)
 
 ### 29.1 交付物
 
@@ -1765,14 +1765,14 @@ python3 tools/check_docs.py
 | `drafts/submission/consent-template.md` | §10.4 贡献者同意书模板:BCP 78(RFC 5378)+ Simplified BSD License 四条确认,签署件存仓库外,仓库内只登记表格 |
 | `drafts/submission/ipr-disclosure-template.md` | BCP 79 披露草稿模板:Datatracker 表单逐字段对应;据实披露原则;Apache-2.0 与 IETF Trust 版权的关系说明 |
 | `drafts/submission/liaison-agentproto.md` / `liaison-oauth.md` | 两封信草稿(英文,发送对象为 chairs):范围询问 + 审阅请求,不含任何自动发送机制 |
-| `tools/check_drafts.py --submission` | 机械闸门:占位作者(`OSAP Editors` / `editors@osap.example`)必须替换、front 下的每个 author 必须有联系方式;**当前如预期失败**,闸门 1–5 完成前不接入 CI |
+| `tools/check_drafts.py --submission` | 机械闸门:✅ 已转绿(2026-11-20)——作者替换与文档名改名完成后,占位作者检查与作者联系方式检查通过,并接入 CI `drafts` job(`--submission --compile`) |
 
 ### 29.2 语义
 
 - **材料包不是提交**:`drafts/submission/` 的全部文件只供人工填写与审阅;仓库与 Datatracker 之间没有任何管道,`git push` 不会触发任何对外动作。
-- **闸门次序不可跳过**:§10.4 同意 → BCP 79 披露 → 占位作者/文档名 → WG 联络,全部完成前 `--submission` 保持红色是预期状态;它不接入 CI,替换真实作者后应转绿。
-- **占位作者清点**:两份 draft 的 front `<author>` 块(`OSAP Editors` / `editors@osap.example`)是仅有的占位;`check_drafts.py --submission` 逐文件强制。贡献者名单从 `git log --all` 逐人确认。
-- **联络信只问三件事**:是否在 charter 范围内、是否愿意接收 individual submission 评审、还是应归属其他组;明确声明"不请求采用",且提交前置完成后才能附上链接。
+- **闸门进度(2026-11-20)**:0(贡献者名单=署名者本人)✅、3(作者替换)✅、4(文档名 `draft-zeng-*`)✅;1(同意邮件确认)🟡、2(IPR 专利自查)🟡、5(chairs 联络)⬜。`--submission` 已转绿并接入 CI `drafts` job(`--submission --compile`)。
+- **作者落点**:两份 draft 的 front `<author>` 块改为 Zeng Zhiyong(`ZZHY`,Independent,272577337@qq.com);`docName`/文件名/`seriesInfo` 改为 `draft-zeng-osap-*`;`drafts/README.md` 的映射表与占位说明同步;邮箱会随 draft 公开发布,是署名者本人确认的选择。
+- **联络信只问三件事**:是否在 charter 范围内、是否愿意接收 individual submission 评审、还是应归属其他组;明确声明"不请求采用",署名已填,发送前按 wgchairs 页核对收件人。
 - **Apache-2.0 与 IETF Trust 的边界**:实现许可不变;draft 文本提交后版权按 IETF Trust 政策处理——这是提交的前提,不是新增授权;Apache-2.0 的专利授权不替代 BCP 79 披露。
 
 ### 29.3 验证证据
@@ -1792,10 +1792,11 @@ python3 tools/check_docs.py
 
 ### 29.4 已知边界
 
-1. **需要真人**:同意书签署、BCP 79 披露、Datatracker 上传、chairs 信件都必须由署名者本人完成;维护者不能代签。
-2. **`--submission` 未入 CI**:占位作者未替换前它会一直失败,这是设计;替换后可考虑接入。
+1. **需要真人**:同意邮件确认、IPR 自查决策、Datatracker 上传、chairs 信件发送都必须由署名者本人完成;维护者不能代签。
+2. **`--submission` 已入 CI**:作者替换后常绿,`drafts` job 改用 `--submission --compile`;若再出现占位作者会直接红。
 3. **联络对象以发送时为准**:`agentproto`/OAuth 的 chairs 列表会变;发送前以 wgchairs 页核对。
 4. **模板不是法律意见**:IPR 披露的许可类型选择(RAND/RF)是贡献者的事实决定,必要时咨询法律意见。
+5. **initials 渲染**:xml2rfc 把 `initials="ZZHY"` 渲染为 "ZZHY. Zeng"(自动加点);若希望 "Z. Z. Zeng" 风格,把 initials 改为 `Z.` 即可——保持署名者当前选择。
 
 ---
 
@@ -1817,7 +1818,7 @@ python3 tools/check_docs.py
 
 ## 31. 下一步（按顺序）
 
-1. **IETF 提交前置**（材料包已备好，§29）：贡献者同意（逐人发 consent-template）、BCP 79 披露（ipr-disclosure-template）、替换占位作者（`check_drafts.py --submission` 转绿）、联络 `agentproto` / OAuth WG（liaison 信稿）——全部需要真人决策与签署；
+1. **IETF 提交前置**（材料包已备好，§29）：闸门 0/3/4 已完成（作者与文档名就绪，`--submission` 常绿入 CI）；剩余三步真人动作——回复确认同意书（consent-template 已填好本人信息）、IPR 自查决策（无已知专利则据实说明）、发送已署名的 agentproto / OAuth 联络 信；
 2. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
 3. **M5**：一致性登记表已建立并机械化（§28）；剩余——找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
@@ -1869,3 +1870,4 @@ python3 tools/check_docs.py
 | 2026-11-19 | **撤销推送通道**（`c2b3f39`）：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 整树 cascade 测量；新增 8 条测试，累计 790 |
 | 2026-11-20 | **M5 一致性登记表**:新建 `conformance/registry.md`(可复现闸门、条目格式、登记流程)与 `conformance/reports/osap-reference-2026-11-20.json`;`docs/conformance.md` §6 与 roadmap M5 同步;参考实现自证登记(64 pass / 4 manual skip) |
 | 2026-11-20 | **IETF 提交前置材料包**：`drafts/submission/`（闸门检查单、§10.4 同意书模板、BCP 79 披露模板、agentproto/OAuth 联络 信草稿）；`check_drafts.py --submission` 机械闸门（占位作者强制，未入 CI） |
+| 2026-11-20 | **闸门 0/3/4 完成**：贡献者名单确认为署名者本人；两份 draft 的作者替换为 Zeng Zhiyong（ZZHY, Independent, 272577337@qq.com），文档名改名为 `draft-zeng-osap-*`；`--submission` 转绿并接入 CI `drafts` job；剩余闸门 1（同意邮件确认）、2（IPR 自查）、5（chairs 联络）为真人动作 |

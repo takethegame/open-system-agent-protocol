@@ -76,4 +76,4 @@ jobs:
           python -m pip install -r requirements-drafts.txt
 
       - name: Check and compile IETF drafts
-        run: python tools/check_drafts.py --compile
+        run: python tools/check_drafts.py --submission --compile

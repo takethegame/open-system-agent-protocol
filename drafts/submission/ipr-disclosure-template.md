@@ -13,7 +13,7 @@
 | Patent / Patent application | <专利号或申请号、受理局、申请日> |
 | Holder(s) of patent | <姓名/公司> |
 | Holder's contact | <邮箱;若不愿公开则注明"do not publish",Datatracker 仍需联系方式> |
-| IETF document(s) | `draft-osap-capability-tokens`、`draft-osap-consent-receipts`(按改名后文档名) |
+| IETF document(s) | `draft-zeng-osap-capability-tokens`、`draft-zeng-osap-consent-receipts` |
 | IETF working group | <agentproto / OAuth / independent> |
 | Disclosure type | Generic(不限于特定实现)/ Specific(特定实现)——按事实选择 |
 | Nature of rights | <许可类型:RAND / RF 免费许可 / 其他,据实> |

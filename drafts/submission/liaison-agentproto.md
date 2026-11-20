@@ -17,12 +17,12 @@ log. I am not asking the group to adopt them — I am asking whether the
 topic and the framing belong here, and whether the group would be willing
 to review them.
 
-- `draft-osap-capability-tokens` defines a signed capability token for
+- `draft-zeng-osap-capability-tokens` defines a signed capability token for
   delegating authority between agents on a single local system: ten
   attenuation rules, stateless audience/task/subject binding, revocation
   with cascade, and consent prerequisites for high-risk actions. It does
   not define transport or discovery.
-- `draft-osap-consent-receipts` defines the consent request/receipt pair
+- `draft-zeng-osap-consent-receipts` defines the consent request/receipt pair
   with reservation ordering, a linkage to capability issuance, and an
   informative mapping to ISO/IEC 27560. It does not define the UI.
 
@@ -46,5 +46,5 @@ disclosure, per BCP 78/79) are complete.
 
 Thanks,
 
-<真实姓名>
-<邮箱>
+Zeng Zhiyong
+272577337@qq.com

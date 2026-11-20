@@ -10,24 +10,25 @@
 
 | # | 事项 | 状态 | 机械检查 | 负责人 |
 |---|---|---|---|---|
-| 1 | 贡献者同意(§10.4) | ⬜ 未启动 | 人工:已签署同意书归档 | 仓库所有者 |
-| 2 | BCP 79 IPR 披露 | ⬜ 未启动 | 人工:Datatracker 披露页 | 实际提交人 |
-| 3 | 替换占位作者 | ⬜ 未启动 | `python3 tools/check_drafts.py --submission`(当前如预期失败,替换后转绿) | 实际提交人 |
-| 4 | 文档名(draft-\<author\>-…) | ⬜ 未启动 | `check_drafts` 的 `DOCNAME_RE` 在改名后自动适配 | 实际提交人 |
-| 5 | WG 归属意向 | ⬜ 未启动 | 人工:chairs 回复存档 | 联络人 |
-| 6 | 外部引用改 bibxml | ⬜ 未启动 | `tools/check_drafts.py --compile` | 提交人 |
+| 0 | 贡献者名单确认 | ✅ 完成(2026-11-20):初始模板提交与全部 104 条 commit 均为本人 | `git log --all --format='%an <%ae>'` | Zeng Zhiyong |
+| 1 | 贡献者同意(§10.4) | 🟡 模板已填好本人信息,待本人邮件确认(唯一贡献者=作者本人) | 人工:同意邮件回复并存档 | Zeng Zhiyong |
+| 2 | BCP 79 IPR 披露 | 🟡 待确认:是否存在已知专利/申请(若无则无需披露,只需据实说明) | 人工:Datatracker 披露页(有义务时) | Zeng Zhiyong |
+| 3 | 替换占位作者 | ✅ 完成(2026-11-20):Author/Editor = Zeng Zhiyong(ZZHY),email 已公开可见 | `python3 tools/check_drafts.py --submission` ✅ | Zeng Zhiyong |
+| 4 | 文档名(draft-\<author\>-…) | ✅ 完成(2026-11-20):`draft-zeng-osap-capability-tokens-00` / `draft-zeng-osap-consent-receipts-00` | `DOCNAME_RE` + `--submission` ✅ | Zeng Zhiyong |
+| 5 | WG 归属意向 | ⬜ 未启动:联络信已署名,待发送并归档回复 | 人工:chairs 回复存档 | Zeng Zhiyong |
+| 6 | 外部引用改 bibxml | ⬜ 未启动(当前内联引用可编译) | `tools/check_drafts.py --compile` ✅ | Zeng Zhiyong |
 | 7 | 复核(compile + docs + tests) | ✅ 本地常绿 | CI | 任何维护者 |
 
-**当前阻断项只有 1–5,全部需要真实身份与人工决策;模板见本目录。**
+**剩余阻断项只有 1(邮件确认)与 2(专利自查决策),均为署名者本人动作。**
 
 ---
 
 ## 2. 贡献者同意(§10.4)
 
 - 闸门:MUST 取得**所有**贡献者对 IETF Trust 版权条款(RFC 5378 / BCP 78)与 Simplified BSD License(RFC 8179 / BCP 79 涉及的部分)的同意,并在新版本中说明。
-- 名单来源:`git log --all --format='%an <%ae>' | sort -u` 逐人确认;每个贡献者一份 [consent-template.md](consent-template.md)。
-- 归档:签署件放**仓库外**(邮件存档或私有目录);仓库内只登记"谁、何时、以何种方式同意",不存放含个人邮箱的签署件。
-- 完成后:在 `drafts/README.md` §6 把第 1 项从"未启动"改为已完成并注明日期。
+- ✅ 名单已确认(2026-11-20):全部 104 条 commit 均为 Zeng Zhiyong 本人(含初始模板提交 `Your Name <you@example.com>`),因此**唯一贡献者 = 署名者本人**;[consent-template.md](consent-template.md) 已填好本人信息,待其邮件回复确认四条声明。
+- 归档:确认邮件放**仓库外**(邮箱存档);仓库内只登记"谁、何时、以何种方式同意"。
+- 完成后:在 `drafts/README.md` §6 把第 1 项改为已完成并注明日期。
 
 ---
 
@@ -41,21 +42,19 @@
 
 ## 4. 占位作者与文档名
 
-当前占位(两份 draft 相同):
+✅ 两项均已完成(2026-11-20),落点如下:
 
 ```xml
-<author fullname="OSAP Editors" initials="O." surname="Editors">
-  <organization>OSAP Project</organization>
-  <address><email>editors@osap.example</email></address>
+<author fullname="Zeng Zhiyong" initials="ZZHY" surname="Zeng">
+  <organization>Independent</organization>
+  <address><email>272577337@qq.com</email></address>
 </author>
 ```
 
-替换清单:
-
-1. 每份 draft 的 front `<author>` 块改为真实姓名/缩写/邮箱;多作者时各自一块。
-2. `editors@osap.example` 与 `drafts/README.md` 中的占位说明同步更新。
-3. `docName` 与文件名:individual submission 必须是 `draft-<第一作者姓氏>-<标题>-<nn>`;例如改名为 `draft-<surname>-osap-capability-tokens-00`。`tools/check_drafts.py` 的 `DOCNAME_RE` 只校验格式,改名后同步 `seriesInfo`、文件名与 `drafts/README.md` 的映射表。
-4. 机械闸门:`python3 tools/check_drafts.py --submission`(占位符与作者联系方式检查;在占位替换完成前如预期失败,不要把它接入 CI)。
+1. 两份 draft 的 front `<author>` 块已替换为真实姓名/缩写/邮箱;`editors@osap.example` 与 `drafts/README.md` 的占位说明同步移除。
+2. `docName` 与文件名:按第一作者姓氏命名为 `draft-zeng-osap-capability-tokens-00` 与 `draft-zeng-osap-consent-receipts-00`,同步 `seriesInfo`、文件名与 `drafts/README.md` 的映射表;被 WG 采用后由 WG 重命名。
+3. 机械闸门:`python3 tools/check_drafts.py --submission` ✅ 转绿(38 checks);注意 `272577337@qq.com` 会随 draft 公开发布,这是署名者本人确认的选择。
+4. `<date year month day>` 仍是模板日期,在实际上传当日更新(闸门 6 的提交动作里执行)。
 
 ---
 
@@ -79,5 +78,5 @@
 ## 7. 明确不做的事
 
 1. 本目录任何文件**不构成提交**,也不会被自动发送;`git push` 与 Datatracker 之间没有管道。
-2. 未经闸门 1–5,不把 `--submission` 接入 CI(它会一直红,且那是预期)。
+2. ~~未经闸门 1–5,不把 `--submission` 接入 CI~~ 已接入(2026-11-20):闸门 3/4 完成后 `--submission` 常绿,CI `drafts` job 改用 `--submission --compile`;闸门 1(邮件确认)与 2(IPR 决策)仍是上传前的真人动作。
 3. 不代替任何真实作者签署同意书或提交披露——这些动作只能由署名者本人完成。

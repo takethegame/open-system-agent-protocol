@@ -10,7 +10,7 @@ Dear OAuth WG chairs,
 
 I am one of the authors of two individual submissions about local agent
 authorization. The one closest to this group's scope is
-`draft-osap-consent-receipts`: a consent request/receipt pair for
+`draft-zeng-osap-consent-receipts`: a consent request/receipt pair for
 user-delegated authority between agents running on a single system, with
 
 - a reservation ordering that keeps capability issuance strictly behind the
@@ -20,7 +20,7 @@ user-delegated authority between agents running on a single system, with
   registry keyed by `kid` with rotation/revocation semantics, and
 - an informative mapping to ISO/IEC 27560.
 
-The token side (`draft-osap-capability-tokens`, attenuation-only signed
+The token side (`draft-zeng-osap-capability-tokens`, attenuation-only signed
 capabilities) is deliberately separate, so each document can be reviewed on
 its own. Both are backed by an Apache-2.0 reference implementation and an
 executable conformance suite; the drafts contain no transport and no UI.
@@ -42,5 +42,5 @@ Questions for the chairs:
 
 Thanks,
 
-<真实姓名>
-<邮箱>
+Zeng Zhiyong
+272577337@qq.com
