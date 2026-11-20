@@ -37,6 +37,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DRAFTS = ROOT / "drafts"
 FORBIDDEN = ["zengyunhao", "macbook-pro", "zhangsan", "张三", "/Users/"]
 PLACEHOLDERS = ("{{", "}}", "TODO", "TBD", "FIXME", "XXX")
+#: Authors that may stand in while drafting but block an actual submission.
+SUBMISSION_PLACEHOLDERS = ("OSAP Editors", "editors@osap.example")
 DOCNAME_RE = re.compile(r"^draft-[a-z0-9-]+-\d{2}$")
 CATEGORIES = {"info", "std", "exp", "bcp", "historic"}
 SUBMISSION_TYPES = {"IETF", "IRTF", "IAB", "independent"}
@@ -48,7 +50,7 @@ def text_of(element: ET.Element | None) -> str:
     return "".join(element.itertext()).strip()
 
 
-def check_draft(path: Path) -> tuple[int, list[str]]:
+def check_draft(path: Path, *, submission_mode: bool = False) -> tuple[int, list[str]]:
     failures: list[str] = []
     checks = 0
     rel = path.relative_to(ROOT)
@@ -204,6 +206,25 @@ def check_draft(path: Path) -> tuple[int, list[str]]:
     for needle in PLACEHOLDERS:
         if needle in raw:
             failures.append(f"{rel}: contains unresolved placeholder {needle!r}")
+    if submission_mode:
+        for needle in SUBMISSION_PLACEHOLDERS:
+            if needle in raw:
+                failures.append(
+                    f"{rel}: placeholder author {needle!r} must be replaced "
+                    "with a real named author before submission (--submission)"
+                )
+        authors = root.findall("./front/author")
+        checks += 1
+        if not authors:
+            failures.append(f"{rel}: --submission requires a named front author")
+        for author in authors:
+            if author.find("./address/email") is None and author.find(
+                "./address/postal"
+            ) is None:
+                failures.append(
+                    f"{rel}: author {author.get('fullname')!r} has no contact "
+                    "address (--submission)"
+                )
     for needle in ("standard.md", "docs/", "examples/", "schemas/"):
         if needle in raw:
             failures.append(
@@ -257,6 +278,12 @@ def main() -> int:
         default=ROOT / "build" / "drafts",
         help="output directory for --compile (default: build/drafts)",
     )
+    parser.add_argument(
+        "--submission",
+        action="store_true",
+        help="enforce pre-submission gates: no placeholder authors, "
+        "every author has an email",
+    )
     args = parser.parse_args()
 
     drafts = sorted(DRAFTS.glob("*.xml"))
@@ -267,7 +294,7 @@ def main() -> int:
     total_checks = 0
     failures: list[str] = []
     for path in drafts:
-        checks, problems = check_draft(path)
+        checks, problems = check_draft(path, submission_mode=args.submission)
         total_checks += checks
         failures.extend(problems)
 

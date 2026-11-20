@@ -128,6 +128,8 @@ Linux 绑定单独写在 [`bindings/linux/profile.md`](../bindings/linux/profile
 
 在把任一 draft 提交到 IETF 之前，必须完成：
 
+> 逐项的操作指引、同意书 / IPR 披露 / 联络信模板见 [`submission/checklist.md`](submission/checklist.md)——那是准备材料包，不构成本仓库的任何提交动作。
+
 1. **贡献者同意**：按 `GOVERNANCE.md` §10.4 取得所有贡献者对 IETF Trust 版权条款的同意；
 2. **IPR 披露**：按 BCP 79 完成专利与知识产权披露；
 3. **提交人**：指定 Author/Editor，替换当前的 `OSAP Editors` 占位作者；
@@ -135,6 +137,8 @@ Linux 绑定单独写在 [`bindings/linux/profile.md`](../bindings/linux/profile
 5. **WG 归属**：确认 `agentproto` 或 OAuth WG 的采用意向；未被采用时保持 individual draft；
 6. **外部引用**：把当前内联的 RFC 引用替换为 `xml2rfc` 的 bibxml 或确认内联引用仍可编译；
 7. **一致性**：重新跑 `tools/check_drafts.py --compile`、`tools/check_docs.py` 与全量测试。
+
+其中第 3 项有机械闸门:`python3 tools/check_drafts.py --submission`(占位作者、作者联系方式检查)。它**当前如预期失败**——占位作者还在；闸门 1–5 完成前不要把它接入 CI，替换真实作者后它应当转绿。
 
 当前 `ipr="trust200902"` 是 IETF 文档模板的默认值，不代表已经完成上述同意或披露。
 

@@ -1205,6 +1205,7 @@ python3 demo/run_demo.py
 |---|---|
 | `drafts/draft-osap-capability-tokens-00.xml` | Draft A：能力 token、衰减、绑定、撤销、同意前置；xml2rfc v3 |
 | `drafts/draft-osap-consent-receipts-00.xml` | Draft B：同意请求、回执、预约顺序、审计、ISO/IEC 27560 信息性映射；xml2rfc v3 |
+| `drafts/submission/checklist.md` 等 | IETF 提交前置的**准备材料包**：闸门检查单、§10.4 贡献者同意书模板、BCP 79 披露草稿模板、agentproto / OAuth 联络 信草稿；全部待人工填写,不构成本仓库的提交动作 |
 | `drafts/README.md` | 两个 draft 的逐节来源映射、构建命令、发布前置条件与边界 |
 | `tools/check_drafts.py` | XML 良构、v3 根元素、front matter、anchor/xref、引用、JSON 代码块、占位符与本地引用检查；`--compile` 调用 `xml2rfc` |
 | `requirements-drafts.txt` | 独立的 `xml2rfc` 工具链，避免所有 CI job 都安装文档依赖 |
@@ -1242,7 +1243,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §31 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §32 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1754,7 +1755,51 @@ python3 tools/check_docs.py
 
 ---
 
-## 29. 待确认的规范问题
+## 29. IETF 提交前置准备材料包(待人工决策)
+
+### 29.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `drafts/submission/checklist.md` | 七项闸门的检查单:同意/IPR/占位作者/文档名/WG 归属/外部引用/复核;逐项标注状态、机械检查命令与负责人;明确"不构成提交、不会被自动发送" |
+| `drafts/submission/consent-template.md` | §10.4 贡献者同意书模板:BCP 78(RFC 5378)+ Simplified BSD License 四条确认,签署件存仓库外,仓库内只登记表格 |
+| `drafts/submission/ipr-disclosure-template.md` | BCP 79 披露草稿模板:Datatracker 表单逐字段对应;据实披露原则;Apache-2.0 与 IETF Trust 版权的关系说明 |
+| `drafts/submission/liaison-agentproto.md` / `liaison-oauth.md` | 两封信草稿(英文,发送对象为 chairs):范围询问 + 审阅请求,不含任何自动发送机制 |
+| `tools/check_drafts.py --submission` | 机械闸门:占位作者(`OSAP Editors` / `editors@osap.example`)必须替换、front 下的每个 author 必须有联系方式;**当前如预期失败**,闸门 1–5 完成前不接入 CI |
+
+### 29.2 语义
+
+- **材料包不是提交**:`drafts/submission/` 的全部文件只供人工填写与审阅;仓库与 Datatracker 之间没有任何管道,`git push` 不会触发任何对外动作。
+- **闸门次序不可跳过**:§10.4 同意 → BCP 79 披露 → 占位作者/文档名 → WG 联络,全部完成前 `--submission` 保持红色是预期状态;它不接入 CI,替换真实作者后应转绿。
+- **占位作者清点**:两份 draft 的 front `<author>` 块(`OSAP Editors` / `editors@osap.example`)是仅有的占位;`check_drafts.py --submission` 逐文件强制。贡献者名单从 `git log --all` 逐人确认。
+- **联络信只问三件事**:是否在 charter 范围内、是否愿意接收 individual submission 评审、还是应归属其他组;明确声明"不请求采用",且提交前置完成后才能附上链接。
+- **Apache-2.0 与 IETF Trust 的边界**:实现许可不变;draft 文本提交后版权按 IETF Trust 政策处理——这是提交的前提,不是新增授权;Apache-2.0 的专利授权不替代 BCP 79 披露。
+
+### 29.3 验证证据
+
+2026-11-20:
+
+```
+python3 tools/check_drafts.py
+→ OK: 36 checks passed across 2 drafts
+python3 tools/check_drafts.py --submission
+→ FAIL:placeholder author 'OSAP Editors' / 'editors@osap.example' 逐文件列出(如预期)
+python3 tools/check_drafts.py --compile(在 drafts venv 内)
+→ OK: 36 checks passed across 2 drafts and compiled
+python3 tools/check_docs.py
+→ OK: 219 checks passed across 48 Markdown files
+```
+
+### 29.4 已知边界
+
+1. **需要真人**:同意书签署、BCP 79 披露、Datatracker 上传、chairs 信件都必须由署名者本人完成;维护者不能代签。
+2. **`--submission` 未入 CI**:占位作者未替换前它会一直失败,这是设计;替换后可考虑接入。
+3. **联络对象以发送时为准**:`agentproto`/OAuth 的 chairs 列表会变;发送前以 wgchairs 页核对。
+4. **模板不是法律意见**:IPR 披露的许可类型选择(RAND/RF)是贡献者的事实决定,必要时咨询法律意见。
+
+---
+
+## 30. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1770,15 +1815,15 @@ python3 tools/check_docs.py
 
 ---
 
-## 30. 下一步（按顺序）
+## 31. 下一步（按顺序）
 
-1. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
-2. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
-3. **M5**：一致性登记表已建立（§28，参考实现已自证登记）；剩余——找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
+1. **IETF 提交前置**（材料包已备好，§29）：贡献者同意（逐人发 consent-template）、BCP 79 披露（ipr-disclosure-template）、替换占位作者（`check_drafts.py --submission` 转绿）、联络 `agentproto` / OAuth WG（liaison 信稿）——全部需要真人决策与签署；
+2. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
+3. **M5**：一致性登记表已建立并机械化（§28）；剩余——找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 31. 变更记录
+## 32. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1823,3 +1868,4 @@ python3 tools/check_docs.py
 | 2026-11-19 | **asyncio 绑定**（`c32fc97`）：`serve_forever(mode="asyncio")` 缓冲分帧，半帧停滞 peer 不阻塞他人；跨线程 kqueue fd 关闭挂死修复；新增 8 条测试，累计 782 |
 | 2026-11-19 | **撤销推送通道**（`c2b3f39`）：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 整树 cascade 测量；新增 8 条测试，累计 790 |
 | 2026-11-20 | **M5 一致性登记表**:新建 `conformance/registry.md`(可复现闸门、条目格式、登记流程)与 `conformance/reports/osap-reference-2026-11-20.json`;`docs/conformance.md` §6 与 roadmap M5 同步;参考实现自证登记(64 pass / 4 manual skip) |
+| 2026-11-20 | **IETF 提交前置材料包**：`drafts/submission/`（闸门检查单、§10.4 同意书模板、BCP 79 披露模板、agentproto/OAuth 联络 信草稿）；`check_drafts.py --submission` 机械闸门（占位作者强制，未入 CI） |
