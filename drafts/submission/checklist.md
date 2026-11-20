@@ -45,7 +45,7 @@
 ✅ 两项均已完成(2026-11-20),落点如下:
 
 ```xml
-<author fullname="Zeng Zhiyong" initials="ZZHY" surname="Zeng">
+<author fullname="Zeng Zhiyong" initials="ZY" surname="Zeng">
   <organization>Independent</organization>
   <address><email>272577337@qq.com</email></address>
 </author>

@@ -16,7 +16,7 @@
   <front>
     <title abbrev="OSAP Consent Receipts">Consent Receipt Binding for Task-Scoped Authorization</title>
     <seriesInfo name="Internet-Draft" value="draft-zeng-osap-consent-receipts-00"/>
-    <author fullname="Zeng Zhiyong" initials="ZZHY" surname="Zeng">
+    <author fullname="Zeng Zhiyong" initials="ZY" surname="Zeng">
       <organization>Independent</organization>
       <address>
         <email>272577337@qq.com</email>

@@ -1796,7 +1796,7 @@ python3 tools/check_docs.py
 2. **`--submission` 已入 CI**:作者替换后常绿,`drafts` job 改用 `--submission --compile`;若再出现占位作者会直接红。
 3. **联络对象以发送时为准**:`agentproto`/OAuth 的 chairs 列表会变;发送前以 wgchairs 页核对。
 4. **模板不是法律意见**:IPR 披露的许可类型选择(RAND/RF)是贡献者的事实决定,必要时咨询法律意见。
-5. **initials 渲染**:xml2rfc 把 `initials="ZZHY"` 渲染为 "ZZHY. Zeng"(自动加点);若希望 "Z. Z. Zeng" 风格,把 initials 改为 `Z.` 即可——保持署名者当前选择。
+5. **initials 渲染**:xml2rfc 把 `initials="ZY"` 渲染为 "ZY. Zeng"(自动加点),是署名者确认的选择。
 
 ---
 
