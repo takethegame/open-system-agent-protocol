@@ -11,7 +11,7 @@
 | # | 事项 | 状态 | 机械检查 | 负责人 |
 |---|---|---|---|---|
 | 0 | 贡献者名单确认 | ✅ 完成(2026-11-20):初始模板提交与全部 104 条 commit 均为本人 | `git log --all --format='%an <%ae>'` | Zeng Zhiyong |
-| 1 | 贡献者同意(§10.4) | 🟡 唯一贡献者=署名者;四条声明与登记表已就绪([consent-record.md](consent-record.md)),待署名者以邮件或 DCO 提交确认 | `consent-record.md` 登记表填毕 | Zeng Zhiyong |
+| 1 | 贡献者同意(§10.4) | ✅ 完成(2026-11-20):署名者确认四条声明;记录见 [consent-record.md](consent-record.md) 登记表,DCO 签名提交固化 | `consent-record.md` 登记表填毕 | Zeng Zhiyong |
 | 2 | BCP 79 IPR 披露 | 🟡 领域态势与自查三问已备([ipr-landscape.md](ipr-landscape.md));待署名者逐条确认,全"否"则无需披露 | `ipr-landscape.md` §3 结论模板填毕 | Zeng Zhiyong |
 | 3 | 替换占位作者 | ✅ 完成(2026-11-20):Author/Editor = Zeng Zhiyong(ZZHY),email 已公开可见 | `python3 tools/check_drafts.py --submission` ✅ | Zeng Zhiyong |
 | 4 | 文档名(draft-\<author\>-…) | ✅ 完成(2026-11-20):`draft-zeng-osap-capability-tokens-00` / `draft-zeng-osap-consent-receipts-00` | `DOCNAME_RE` + `--submission` ✅ | Zeng Zhiyong |
