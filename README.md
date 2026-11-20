@@ -127,10 +127,21 @@ python3 tools/benchmark_revocation.py  # 撤销传播 P95（本地基准，不�
 - **规范**：0.1 讨论稿，核心机制已定义，开放问题见规范第 15 节。
 - **信任边界**：Bus Core 是最小 TCB；RFS/CA/PCS/CF/AL 为独立服务。0.1 的 Bus 可读取 payload，这是显式信任假设；不信任 Bus 的 P1 加密 profile 列入 0.2。
 - **状态语义**：任务树、幂等索引、撤销列表、审计链头必须持久化并支持崩溃恢复。Bus 状态不是记忆：长期语义记忆由 Agent 或独立 memory 服务持有，必须单独授权（见 `docs/standard.md` §3.7、§9.3）。
-- **实现**：Python 参考实现位于 `impl/`，完成 M2 并通过全部 62 条 automated 一致性用例；`demo/` 提供三 Agent 端到端演示。
-- **一致性**：C0–C7 等级已定义，测试用例已列出。
+- **实现**：Python 参考实现位于 `impl/`（M0–M4 完成，790 个单元测试，撤销 P95 1.23 ms）；`demo/` 提供三 Agent 演示，含崩溃恢复（第 7 节）。
+- **一致性**：C0–C7 等级与 68 条用例全部可执行；`conformance/registry.md` 登记已复核的报告，参考实现自证 64 pass / 4 manual skip。
 - **标准归属**：未定；建议作为本地 profile 与 IETF `agentproto` 相关讨论、OAuth WIMSE、AAIF/LF 生态对齐（是否成立工作组以 IETF 官方为准）。
 - **许可**：Apache-2.0（规范、schema、示例、工具统一）；贡献使用 DCO 1.1。
+
+## 当前限制(发布前须知)
+
+完整的 22 条限制清单见 [`impl/README.md`](impl/README.md) 第 6 节；直接影响采用决策的有：
+
+1. **能力凭证 `proof` 未验签**：token 做结构校验与签名占位，CA 密钥分发未定——凭证的密码学完整性仍待补(PCS 回执已验签，不受影响)。
+2. **`max_uses` 未计数**：衰减时比较上限，但使用次数不落账，同一凭证可重复使用。
+3. **持久层是单写者 JSON**：一个 store 文件一个进程写；无多写者协调、TTL 清理或压缩。
+4. **撤销分发需显式接线**：日志/拉订阅/推送通道已实现，但签发方必须显式 `notify()`,跨设备传播不在 0.1。
+5. **C2-05、C4-01、C6-08、C7-01 仍是 manual**:跨 App 同意 UI、原生注册表 TTL、跨进程恢复的真实集成未自动化。
+6. **两份 IETF draft 未提交**：闸门 1–3(贡献者同意确认、IPR 自查、WG 联络)待办，见 `drafts/submission/checklist.md`。
 
 ---
 

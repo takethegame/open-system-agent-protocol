@@ -127,10 +127,21 @@ All of these except the benchmark run in CI; dependencies are in `requirements.t
 - **Specification**: 0.1 discussion draft; core mechanisms are defined; open questions are in Section 15 of the specification.
 - **Trust boundary**: the Bus Core is the minimal TCB; RFS/CA/PCS/CF/AL are independent services. The 0.1 Bus can read payloads, which is an explicit trust assumption; a P1 encrypted profile that does not trust the Bus is planned for 0.2.
 - **State semantics**: task trees, idempotency indexes, revocation lists, and audit chain heads must be persisted and support crash recovery. Bus state is not memory: long-term semantic memory is held by agents or a separate memory service and must be authorized separately (see [`docs/standard.md`](docs/standard.en.md) §3.7, §9.3).
-- **Implementation**: a Python reference implementation lives in `impl/`, completes M2, and passes all 62 automated conformance cases; `demo/` provides a three-agent end-to-end demo.
-- **Conformance**: C0–C7 levels are defined, and test cases are listed.
+- **Implementation**: a Python reference implementation lives in `impl/` (M0–M4 complete, 790 unit tests, revocation p95 1.23 ms); `demo/` provides a three-agent demo including crash recovery (Section 7).
+- **Conformance**: C0–C7 levels and all 68 cases are executable; `conformance/registry.md` indexes verified reports — the reference implementation self-attests 64 pass / 4 manual skip.
 - **Standards home**: undetermined; recommended to align as a local profile with IETF `agentproto`-related discussions, OAuth WIMSE, and the AAIF/LF ecosystem (whether a working group is formed is subject to the IETF's official position).
 - **License**: Apache-2.0 (uniform across specification, schemas, examples, and tools); contributions use DCO 1.1.
+
+## Current Limitations (Read Before Adopting)
+
+The full 22-item list lives in [`impl/README.md`](impl/README.md) Section 6; the ones that directly affect adoption decisions:
+
+1. **Capability token `proof` is not signature-verified**: tokens are structurally validated with a signature placeholder, and CA key distribution is undefined — the cryptographic integrity of tokens is still pending (PCS receipts are verified and unaffected).
+2. **`max_uses` is not counted**: attenuation compares the limits, but use counts are not recorded, so the same token can be reused.
+3. **The persistence layer is single-writer JSON**: one process writes each store file; no multi-writer coordination, TTL cleanup, or compaction.
+4. **Revocation distribution must be wired explicitly**: journal, pull subscription, and push channel exist, but the issuer must call `notify()`; cross-device propagation is out of 0.1.
+5. **C2-05, C4-01, C6-08, C7-01 remain manual**: real cross-App consent UI, native registry TTL, and cross-process recovery are not automated.
+6. **Both IETF drafts are unsubmitted**: gates 1–3 (consent confirmation, IPR self-check, WG liaison) are pending — see `drafts/submission/checklist.md`.
 
 ---
 
