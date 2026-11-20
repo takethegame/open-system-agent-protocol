@@ -10,6 +10,13 @@ audit chain with a redacted export. The task crosses two delegation
 boundaries, so it covers the C7-01 precondition ("three Apps, at least two
 delegation or handoff boundaries") and can be replayed by hand.
 
+Section 7 makes the runtime durable: the task tree, effect journal, audit
+chain, context fabric, and idempotency index share one 0600 JSON store, a
+simulated crash drops every in-memory object, and the restart shows the
+§3.7/§8.11 guarantees — intent-only effects refuse replay until reconciled,
+duplicate message ids replay instead of re-executing, and task blackboards
+are cleared on close and never promoted to memory.
+
 Run from anywhere:
 
     python3 demo/run_demo.py
@@ -18,9 +25,11 @@ Run from anywhere:
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -33,11 +42,14 @@ from osap import (  # noqa: E402
     context,
     crypto,
     identity,
+    idempotency,
     pcs,
     registry,
     task,
 )
 from osap.clock import parse_timestamp  # noqa: E402
+from osap.errors import OsapError  # noqa: E402
+from osap.store import JsonStore  # noqa: E402
 
 EXAMPLES = REPO / "examples"
 NOW_TEXT = "2026-11-10T10:14:45Z"
@@ -129,52 +141,13 @@ def build_hello(agent: str, app: str, public: str, nonce: str) -> dict:
     }
 
 
-def event_chain(events: list) -> dict:
-    """Link the recorded audit events into a verifiable chain (§10.5)."""
-
-    previous = "sha256:0000000000000000"
-    chained = []
-    for index, event in enumerate(events, start=1):
-        body = {
-            "audit_id": f"audit_demo_{index:02d}",
-            "trace_id": TRACE,
-            "actor": event["actor"],
-            "action": event["action"],
-            "target": event["target"],
-            "decision": event.get("decision", "allow"),
-            "ts": NOW_TEXT,
-            "prev_hash": previous,
-        }
-        for key in (
-            "task_id",
-            "session_id",
-            "policy",
-            "phase",
-            "intent_ref",
-            "consent_receipt_id",
-            "context_refs",
-        ):
-            if key in event:
-                body[key] = event[key]
-
-        digest = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        body["hash"] = f"sha256:{digest}"
-        previous = body["hash"]
-        chained.append(body)
-
-    return {
-        "chain_id": "audit_chain_demo",
-        "trace_id": TRACE,
-        "created_at": NOW_TEXT,
-        "events": chained,
-    }
-
-
 def main() -> int:
     print("OSAP 0.1 reference demo: notes + calendar behind one supervisor")
     print(f"simulated now: {NOW_TEXT}")
+    state_dir = tempfile.mkdtemp(prefix="osap-demo-")
+    state_path = os.path.join(state_dir, "bus_state.json")
+    store = JsonStore(state_path)
+    print(f"bus state: {state_path} (0600 JSON, one store, five sections)")
 
     # --- 1. signed manifests, trust, registration -------------------------
     section("1. manifests and registration (§4.1–§4.5, §7.1)")
@@ -326,7 +299,7 @@ def main() -> int:
 
     # --- 4. two delegations, two results ----------------------------------
     section("4. delegated tasks and results (§8.3–§8.8)")
-    board = task.TaskBoard()
+    board = task.TaskBoard(store=store)
     parent = board.add(task.Task.from_document(load("task.json")))
     print(f"parent {parent.task_id} budget wall_ms={parent.budget['wall_ms']}")
 
@@ -515,48 +488,59 @@ def main() -> int:
         },
     ]
 
-    intent_position = len(events) + 1
-    events.append(
+    ledger = audit.AuditLedger(trace_id=TRACE, store=store, clock=lambda: NOW)
+    for event in events:
+        # The ledger owns audit_id/ts/prev_hash/hash; the demo only supplies
+        # the semantic fields, exactly as a Bus service would.
+        ledger.append({**event, "decision": event.get("decision", "allow")})
+
+    # The effect pair keeps its §8.11 linkage: the outcome's `intent_ref` is
+    # the intent event's ledger-assigned audit_id.
+    intent_record = ledger.append(
         {
             "actor": CALENDAR,
             "action": "effect.intent",
             "target": "calendar:primary",
+            "decision": "allow",
             "phase": "intent",
             "policy": "calendar_per_task",
             "consent_receipt_id": RECEIPT_ID,
         }
     )
-    events.append(
+    ledger.append(
         {
             "actor": CALENDAR,
             "action": "effect.executed",
             "target": "calendar:primary",
+            "decision": "allow",
             "phase": "outcome",
             "policy": "calendar_per_task",
             "consent_receipt_id": RECEIPT_ID,
-            "intent_ref": f"audit_demo_{intent_position:02d}",
+            "intent_ref": intent_record["audit_id"],
         }
     )
-    events.append(
+    ledger.append(
         {
             "actor": CALENDAR,
             "action": "task.completed",
             "target": calendar_child.task_id,
+            "decision": "allow",
             "task_id": calendar_child.task_id,
         }
     )
-    events.append(
+    ledger.append(
         {
             "actor": SUPERVISOR,
             "action": "task.completed",
             "target": parent.task_id,
+            "decision": "allow",
             "task_id": parent.task_id,
         }
     )
-
-    chain = event_chain(events)
+    chain = ledger.history()
     audit.verify_chain(chain)
-    print(f"verified {len(chain['events'])} events under {chain['trace_id']}")
+    require(ledger.verify(), "the ledger must verify its own chain")
+    print(f"recorded {len(chain['events'])} events under {chain['trace_id']} via AuditLedger")
 
     redacted = audit.redact_chain(chain, salt="demo-export-salt")
     require(redacted["chain_verified"], "the redacted export must stay verifiable")
@@ -580,9 +564,107 @@ def main() -> int:
         f"missing_causation={trace['missing_causation']} complete={trace['complete']}"
     )
 
+    # --- 7. crash and restart ---------------------------------------------
+    section("7. crash and restart (§3.7, §8.11)")
+
+    recovery_doc = copy.deepcopy(load("task.json"))
+    recovery_doc["task_id"] = "task_demo_recovery"
+    recovery_doc["session_id"] = sessions[SUPERVISOR]
+    recovery_task = board.add(task.Task.from_document(recovery_doc))
+    board.transition(recovery_task, "accepted")
+    board.transition(recovery_task, "running")
+
+    intent_ref = "intent_recovery_write"
+    board.record_effect_intent(
+        recovery_task.task_id, intent_ref=intent_ref, target="calendar:primary"
+    )
+    print(f"effect intent {intent_ref} persisted before the side effect (§8.11)")
+
+    fabric = context.ContextFabric(store=store)
+    fabric.open_blackboard(
+        recovery_task.task_id,
+        entries=[{"key": "proposal", "value": {"slot": "10:00-11:00"}}],
+    )
+
+    index = idempotency.IdempotencyIndex(store=store)
+
+    def write_calendar():
+        print("  side effect executes (calendar:primary)")
+        return {"written": True}
+
+    _, replayed = index.execute_once("msg_demo_recovery_write", write_calendar)
+    require(not replayed, "the first delivery must execute the side effect")
+
+    print("crash: dropping every in-memory object, reopening the store")
+    store = JsonStore(state_path)
+    board = task.TaskBoard(store=store)
+    ledger = audit.AuditLedger(trace_id=TRACE, store=store, clock=lambda: NOW)
+    fabric = context.ContextFabric(store=store)
+    index = idempotency.IdempotencyIndex(store=store)
+    require(ledger.verify(), "the audit chain must verify after the restart")
+    require(
+        len(fabric.blackboard(recovery_task.task_id)["entries"]) == 1,
+        "an open blackboard survives the restart with its entries",
+    )
+    print("reopened: task tree, effects, audit chain, blackboard, idempotency index")
+
+    try:
+        board.require_replay_allowed(intent_ref)
+        raise AssertionError("the replay gate must refuse an unknown effect")
+    except OsapError as error:
+        require(error.code == "POLICY_DENIED", "unknown effects fail closed")
+        print(f"replay blocked: {error.details['reason']} (§8.11)")
+
+    recovered = board.recover()
+    require(
+        recovered["effects"]["effect_state"] == "unknown",
+        "intent-only effects must be marked unknown",
+    )
+    require(
+        board.require(recovery_task.task_id).status == "failed",
+        "the running task must be recovered to failed",
+    )
+    print(
+        f"recovered {len(recovered['recovered_tasks'])} task to failed; "
+        "effect intent marked unknown"
+    )
+
+    _, replayed = index.execute_once("msg_demo_recovery_write", write_calendar)
+    require(
+        replayed,
+        "the restarted Bus must replay the cached result, not re-execute",
+    )
+    print("duplicate delivery replayed from the idempotency index (§7.3)")
+
+    board.reconcile_effect(intent_ref, outcome="not_executed")
+    board.require_replay_allowed(intent_ref)
+    print(
+        "reconciled: outcome=not_executed; an explicit retry is now an "
+        "operator decision, not a silent replay"
+    )
+
+    report = fabric.close_blackboard(recovery_task.task_id)
+    require(report["promoted_to_memory"] is False, "blackboards are never promoted")
+    require(
+        fabric.blackboard(recovery_task.task_id)["entries"] == [],
+        "closing the blackboard clears its entries",
+    )
+    reopened_fabric = context.ContextFabric(store=JsonStore(state_path))
+    require(
+        reopened_fabric.blackboard(recovery_task.task_id)["promoted_to_memory"]
+        is False,
+        "a closed blackboard is not promoted across restarts either",
+    )
+    print("blackboard: entries cleared on close and never promoted (§9.5)")
+
     section("demo complete")
     print("registered=3 discovery=1 consent=1 receipt=verified delegated=2 context=1 audit=verified")
     print("trace=complete redaction=verified recovery=complete")
+    print(
+        "crash=recovered replay=blocked reconcile=not_executed "
+        "idempotent=across_restart blackboard=dies_with_task"
+    )
+    shutil.rmtree(state_dir, ignore_errors=True)
     return 0
 
 
