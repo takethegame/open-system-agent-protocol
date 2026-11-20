@@ -12,6 +12,7 @@ Entries are written in English to match commit messages; the Chinese text in
 ### Added
 
 - `conformance/registry.md` and `conformance/reports/`: the conformance registry — verified, reproducible implementation reports. An entry is a schema-valid report plus a table row plus a verbatim command a maintainer can rerun to the same result; listing is not certification, self-attested entries are marked as such, and a delisting keeps the original report. The reference implementation self-attests the first entry (`osap-reference-2026-11-20.json`: 64/68 automated pass, 4 manual skip).
+- `tools/check_registry.py`: mechanically enforces the registry's admission gate — schema-valid reports, row/report consistency (claimed pass counts, manual ids, implementation-named report files, dates), ✅ entries must carry a rerun command, and `--rerun` re-executes only commands that start with `python3 tools/conformance_run.py` and compares failed/skipped case ids against the committed report; CI runs the non-rerun check.
 
 - `drafts/`: two IETF xml2rfc v3 individual-draft skeletons, `draft-osap-capability-tokens-00` (token format, attenuation, binding, revocation, consent linkage) and `draft-osap-consent-receipts-00` (consent request, receipt, reservation ordering, audit, informative ISO/IEC 27560 mapping).
 - `drafts/README.md`: section-by-section mapping back to `docs/standard.md`, build commands, publication prerequisites, and known boundaries.

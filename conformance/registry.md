@@ -49,9 +49,10 @@
 ## 3. 登记流程
 
 1. **提交**:PR 附上三样东西——`reports/<implementation>-<date>.json`、本表的表格行、逐字可复现的命令与依赖说明(例如 "Python 3.11+、`pip install -r requirements.txt`、仓库根目录执行")。
-2. **复核**(维护者执行):
+2. **复核**(维护者执行,前两项可用 `python3 tools/check_registry.py` 机械化,`--rerun` 额外执行第 3 项):
    - 报告通过 `report.schema.json` 校验;
-   - 用同一套用例重跑复现命令,`pass` / `fail` / `skip` 集合与报告一致(允许逐条比对或只比对摘要,失败用例的 `id` 必须一致);
+   - 行/报告一致性:报告摘要与自身 `cases` 数组一致、行内声称的 `N/M pass` 与 manual 用例 id 与报告相符、报告文件名以实现名开头、行日期与 `generated_at` 一致;
+   - 用同一套用例重跑复现命令,`pass` / `fail` / `skip` 集合与报告一致(失败用例的 `id` 必须一致);复核器只执行以 `python3 tools/conformance_run.py` 开头的命令,登记条目无法让它运行其他程序;
    - 报告无敏感内容;
    - 版本/提交指向可取回的代码(公开仓库、归档或发行版)。
 3. **收录**:全部通过后状态置 ✅;任何一项不通过则 PR 说明原因,不改判定。

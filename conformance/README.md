@@ -147,6 +147,7 @@ python3 tools/conformance_run.py --impl adapter.py --level C0,C3 --format md --o
 
 1. 报告 = 本目录 `reports/<implementation>-<date>.json`,须通过 [`report.schema.json`](report.schema.json);
 2. 登记 = 报告 + 表格行 + 一条维护者可原样重跑的命令;不可复现的声称不收录;
-3. 登记不是认证,也不改变等级定义;流程、条目格式与除名规则见 [`registry.md`](registry.md)。
+3. `python3 tools/check_registry.py` 机械化校验(加 `--rerun` 会实际重跑 ✅ 条目的复现命令),CI 在非 rerun 模式运行;
+4. 登记不是认证,也不改变等级定义;流程、条目格式与除名规则见 [`registry.md`](registry.md)。
 
 参考实现已自证登记:`reports/osap-reference-2026-11-20.json`(64/68 pass,4 manual skip)。

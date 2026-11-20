@@ -48,6 +48,9 @@ jobs:
       - name: Validate conformance report
         run: python tools/conformance_run.py --stub --format json --out conformance-report.json
 
+      - name: Check conformance registry
+        run: python tools/check_registry.py
+
       - name: Test the reference implementation
         run: python -m unittest discover -s impl/tests -t impl
 
