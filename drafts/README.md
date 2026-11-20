@@ -7,7 +7,7 @@
 
 本目录把 OSAP 0.1 中**可以独立成文**的两部分拆成 IETF individual draft，并用一个独立的 Linux binding profile 与一组 ADR 补齐 M4 的打包产出。
 
-**当前状态不是 IETF 提交。** 两个 XML 文件是 `xml2rfc` v3 骨架，文档名为 `-00`，用于内部评审与外部预读；在按 `GOVERNANCE.md` §10.4 取得贡献者同意、完成 IPR 披露并指定提交人之前，不得提交到 IETF Datatracker。
+**当前状态不是 IETF 提交。** 两个 XML 文件是 `xml2rfc` v3 骨架，文档名为 `-00`，用于内部评审与外部预读；在完成 WG 归属确认与实际上传之前，不得提交到 IETF Datatracker（§10.4 同意与 IPR 自查已于 2026-11-20 完成，记录见 `submission/consent-record.md` 与 `submission/ipr-landscape.md`）。
 
 ---
 
@@ -130,8 +130,8 @@ Linux 绑定单独写在 [`bindings/linux/profile.md`](../bindings/linux/profile
 
 > 逐项的操作指引、同意书 / IPR 披露 / 联络信模板见 [`submission/checklist.md`](submission/checklist.md)——那是准备材料包，不构成本仓库的任何提交动作。
 
-1. **贡献者同意**：按 `GOVERNANCE.md` §10.4 取得所有贡献者对 IETF Trust 版权条款的同意；
-2. **IPR 披露**：按 BCP 79 完成专利与知识产权披露；
+1. **贡献者同意**：✅ 已完成（2026-11-20）——唯一贡献者（即署名者本人）确认四条声明，记录见 [`submission/consent-record.md`](submission/consent-record.md)；
+2. **IPR 披露**：✅ 无披露义务（2026-11-20）——三问自查均为"否/无已知情况"，检索记录与结论见 [`submission/ipr-landscape.md`](submission/ipr-landscape.md)；
 3. **提交人**：✅ 已完成(2026-11-20)——Author/Editor 为 Zeng Zhiyong(ZZHY Zeng)，`tools/check_drafts.py --submission` 已转绿；
 4. **文档名**：✅ 已完成(2026-11-20)——individual submission 按第一作者姓氏命名为 `draft-zeng-osap-capability-tokens-00` / `draft-zeng-osap-consent-receipts-00`；被 WG 采用后由 WG 重命名；
 5. **WG 归属**：确认 `agentproto` 或 OAuth WG 的采用意向；未被采用时保持 individual draft；

@@ -1877,3 +1877,4 @@ python3 tools/check_docs.py
 | 2026-11-20 | **README 限制清单**（`fcf0485`）：根 README 中英同步更新当前状态并列出六条采用相关限制 |
 | 2026-11-20 | **闸门 1/2 辅助材料**：`consent-record.md`（四条声明待署名者确认）与 `ipr-landscape.md`（领域态势：agentproto 已获章程并有 PACE 等委派 draft；第三方专利家族梳理；Macaroons 等公开在先技术）；agentproto 联络信按已获批章程的现实重写 |
 | 2026-11-20 | **闸门 1 完成**:署名者确认 §10.4 四条声明(BCP 78 授权、Simplified BSD、IETF Trust 处分、IPR 义务知悉);记录于 `drafts/submission/consent-record.md`,DCO 签名提交固化 |
+| 2026-11-20 | **闸门 2 完成**:IPR 三问自查——个人无相关专利/申请、雇主组合与本领域无关、无已知未授权使用;**无披露义务**,结论与检索记录见 `drafts/submission/ipr-landscape.md` §1/§3 |
