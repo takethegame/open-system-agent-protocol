@@ -292,7 +292,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 ### M5 — 生态与采用（持续）
 
 - [ ] 发布 0.1 Draft + 参考实现，打 tag `v0.1.0`
-- [ ] 建立一致性登记表（`conformance/registry.md`），只登记可复现的报告
+- [x] 建立 `conformance/registry.md` 与 `conformance/reports/`,只登记可复现的报告;参考实现已自证登记(2026-11-20)
 - [ ] 找 1–2 个外部实现做互操作（哪怕只是 C1–C2）
 - [ ] 独立安全评审（重点：confused deputy、提示注入闸门、审计完整性）
 - [ ] 学术投稿（系统/安全 workshop），材料来自 M3 与 M2 的测量

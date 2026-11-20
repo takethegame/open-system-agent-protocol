@@ -271,7 +271,7 @@ An implementation SHOULD provide a machine-readable report:
 }
 ```
 
-The report MUST NOT contain user data, keys, or unredacted object contents.
+The report MUST NOT contain user data, keys, or unredacted object contents. Verified reports are indexed in [`../conformance/registry.md`](../conformance/registry.md); the admission gate is that a maintainer can rerun the given command and obtain the same result, and listing is not certification.
 
 ---
 

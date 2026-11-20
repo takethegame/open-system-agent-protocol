@@ -270,7 +270,7 @@ python3 tools/conformance_run.py --impl path/to/adapter.py --format md
 }
 ```
 
-报告 MUST 不包含用户数据、密钥或未脱敏的对象内容。
+报告 MUST 不包含用户数据、密钥或未脱敏的对象内容。已复核的报告收录在 [`../conformance/registry.md`](../conformance/registry.md) 登记表;收录的闸门是"维护者可按给定命令原样重跑出相同结果",登记不是认证。
 
 ---
 

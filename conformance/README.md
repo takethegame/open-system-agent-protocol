@@ -9,13 +9,17 @@
 ```
 conformance/
   README.md            本文件
+  registry.md          一致性登记表:已复核、可复现的实现报告索引(非规范性)
   case.schema.json     单个用例的 schema
-  suite.schema.json    用例文件（按 level 分组）的 schema
-  report.schema.json   运行报告的 schema（对应 standard.md §12.4）
+  suite.schema.json    用例文件(按 level 分组)的 schema
+  report.schema.json   运行报告的 schema(对应 standard.md §12.4)
   cases/
     C0-transport.json
     C3-authorization.json
     ...                每个 level 一个文件
+  reports/
+    osap-reference-2026-11-20.json
+    ...                每个登记一条,按 <implementation>-<date> 命名
 ```
 
 用例文件形如：
@@ -134,3 +138,15 @@ python3 tools/conformance_run.py --impl adapter.py --level C0,C3 --format md --o
 2. 在 `conformance/cases/C<n>-*.json` 添加用例，`title` 用英文；
 3. 本地跑 `--stub` 确认格式合法；
 4. 若该用例改变了规范性行为，同时更新 `docs/standard.md` 与英文译本。
+
+---
+
+## 8. 登记
+
+实现声称通过某些等级后,把机器可读报告提交到 [`registry.md`](registry.md) 的登记表:
+
+1. 报告 = 本目录 `reports/<implementation>-<date>.json`,须通过 [`report.schema.json`](report.schema.json);
+2. 登记 = 报告 + 表格行 + 一条维护者可原样重跑的命令;不可复现的声称不收录;
+3. 登记不是认证,也不改变等级定义;流程、条目格式与除名规则见 [`registry.md`](registry.md)。
+
+参考实现已自证登记:`reports/osap-reference-2026-11-20.json`(64/68 pass,4 manual skip)。

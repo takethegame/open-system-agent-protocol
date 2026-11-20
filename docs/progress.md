@@ -37,7 +37,7 @@
 | asyncio 绑定（M4 前置） | ✅ 完成 | `serve_forever(mode="asyncio")` 缓冲分帧协议，半帧停滞 peer 不再阻塞他人；`close()` 经 `call_soon_threadsafe` 通知 loop（kqueue fd 跨线程关闭会挂死）；782 tests | 2026-11-19 |
 | 撤销推送通道（M4 前置） | ✅ 完成 | `RevocationFeedServer/Client` 专用 AF_UNIX sidecar socket 推送撤销批次（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 支持整树 cascade 跨进程测量；790 tests | 2026-11-19 |
 | M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
-| M5 生态与采用 | ⬜ 未开始 | — | — |
+| M5 生态与采用 | 🟢 进行中 | 一致性登记表已建立(`conformance/registry.md` + `reports/`),参考实现自证登记;剩余:外部实现互操作、安全评审、发布 | 2026-11-20 |
 
 仓库规模：
 
@@ -1242,7 +1242,7 @@ python3 tools/check_docs.py
 → OK: 195 checks passed across 42 Markdown files
 ```
 
-完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §30 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
+完整的 schema / examples / 一致性 / 单元测试 / 演示结果见 §31 的对应提交记录。CI 的 `drafts` job 会在 Python 3.12 上安装 `xml2rfc` 并重新编译两个 draft；`validate` job 仍覆盖 Python 3.11/3.12 的 schema、文档、一致性与参考实现。
 
 打包提交 `f98a6b3` 已推送，CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的三个 job 全部通过：
 
@@ -1712,7 +1712,49 @@ python3 demo/run_demo.py
 
 ---
 
-## 28. 待确认的规范问题
+## 28. M5 一致性登记表(进行中)
+
+### 28.1 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `conformance/registry.md` | 登记表本体:目的与原则(可复现闸门、登记非认证、自证标注、报告卫生)、条目格式、登记流程(提交 → 复核 → 收录/除名)、登记表、边界 |
+| `conformance/reports/osap-reference-2026-11-20.json` | 参考实现的首条报告:68 用例,64 pass / 0 fail / 4 manual skip,已通过 `report.schema.json` 校验 |
+| `conformance/README.md` §8 | 目录结构新增 `registry.md` 与 `reports/`;登记流程入口 |
+| `docs/conformance.md` §6 / `.en.md` | 指向登记表与复核闸门(中英同步) |
+| `docs/roadmap.md` M5 | "建立一致性登记表"标记完成 |
+
+### 28.2 语义
+
+- **可复现闸门**:登记 = 报告 JSON(通过 `report.schema.json`)+ 表格行 + 一条维护者可原样重跑的命令;复核时 `pass`/`fail`/`skip` 集合必须与报告一致,失败用例的 `id` 必须一致。不可复现的声称不收录;已收录但无法复现的移入 ❌ 除名并保留原报告。
+- **登记不是认证**:✅ 只表示"复核者按给定命令重跑出过一次相同结果",不担保实现正确性、安全性或持续一致性,也不授予任何品牌/商标权利。
+- **自证标注**:`self-attested`(实现方自跑)与 `verified`(维护者/第三方独立重跑)是登记表内的两种状态;参考实现首条为 `self-attested`。
+- **manual 用例如实列出**:C2-05、C4-01、C6-08、C7-01 是 manual,不计入 pass/fail,登记行必须写明。
+- **边界**:本表不改变 `docs/conformance.md` 的等级、编号或判定;除名记录与原因永久保留,不做静默改写。
+
+### 28.3 验证证据
+
+2026-11-20:
+
+```
+python3 tools/conformance_run.py --impl impl/adapter.py --format json \
+  --out conformance/reports/osap-reference-2026-11-20.json
+→ report written;68 cases,64 pass / 0 fail / 4 skip
+报告经 report.schema.json(Draft 2020-12 + FormatChecker)校验通过
+python3 tools/check_docs.py
+→ OK: 199 checks passed across 43 Markdown files(含 registry.md 与新增链接)
+```
+
+### 28.4 已知边界
+
+1. **只有一条登记,且是自证**:参考实现的 ✅ 是维护者自跑;没有外部实现的 `verified` 条目,M5 的互操作目标仍依赖外部参与。
+2. **复核闸门靠人工**:没有脚本强制"重跑结果与报告一致"(摘要比对很快,但流程是文档约定);登记数量起来后可加一个 `tools/check_registry.py`。
+3. **报告日期是快照**:`generated_at` 含具体时刻,重跑会因时间不同而不逐字节相等;比对口径是 pass/fail/skip 集合与失败 `id`,不是文件哈希。
+4. **登记表不担保持续一致**:实现后续版本不再复现时依赖维护者主动复核或实现方更新登记。
+
+---
+
+## 29. 待确认的规范问题
 
 迁移过程中暴露的歧义。M1 用例已按暂定处理落盘，以下条目需在 M2 冻结适配器 API 前定稿（不改编号，只补语义）：
 
@@ -1728,15 +1770,15 @@ python3 demo/run_demo.py
 
 ---
 
-## 29. 下一步（按顺序）
+## 30. 下一步（按顺序）
 
 1. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
 2. **M4 本地打包已完成**；下一步是外部预读与 IETF 提交前置：贡献者同意、BCP 79 IPR 披露、替换占位作者/文档名、联络 `agentproto` 或 OAuth WG；
-3. **M5**：建立 `conformance/registry.md`、找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
+3. **M5**：一致性登记表已建立（§28，参考实现已自证登记）；剩余——找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
-## 30. 变更记录
+## 31. 变更记录
 
 | 日期 | 变更 |
 |---|---|
@@ -1780,3 +1822,4 @@ python3 demo/run_demo.py
 | 2026-11-19 | **撤销订阅与跨进程测量**（`1b477f6`）：`RevocationWatcher` 轮询订阅自动应用；`benchmark_revocation.py --cross-process` 端到端传播测量；新增 4 条测试，累计 778 |
 | 2026-11-19 | **asyncio 绑定**（`c32fc97`）：`serve_forever(mode="asyncio")` 缓冲分帧，半帧停滞 peer 不阻塞他人；跨线程 kqueue fd 关闭挂死修复；新增 8 条测试，累计 782 |
 | 2026-11-19 | **撤销推送通道**（`c2b3f39`）：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 整树 cascade 测量；新增 8 条测试，累计 790 |
+| 2026-11-20 | **M5 一致性登记表**:新建 `conformance/registry.md`(可复现闸门、条目格式、登记流程)与 `conformance/reports/osap-reference-2026-11-20.json`;`docs/conformance.md` §6 与 roadmap M5 同步;参考实现自证登记(64 pass / 4 manual skip) |

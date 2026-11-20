@@ -87,7 +87,7 @@ drafts/               IETF xml2rfc v3 individual drafts 与来源映射
 bindings/             平台绑定 profile（Linux D-Bus/portal/systemd）
 decisions/            §15 开放问题的 ADR
 schemas/              JSON Schema（信封、能力、任务、清单、能力记录、回执、审计、payload）
-conformance/          机器可读一致性用例、用例 schema、运行报告 schema
+conformance/          机器可读一致性用例、用例 schema、运行报告 schema、登记表(registry.md)
 examples/             示例消息与对象
 tools/                校验脚本（示例、schema、文档、draft、一致性）
 .github/workflows/    CI

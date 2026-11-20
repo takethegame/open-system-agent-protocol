@@ -1,0 +1,1491 @@
+{
+  "osap": "0.1",
+  "generated_at": "2026-11-20T00:01:36+00:00",
+  "cases": [
+    {
+      "id": "C0-01",
+      "level": "C0",
+      "expected": {
+        "outcome": "reject",
+        "error": "TRANSPORT_HANDSHAKE_REQUIRED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "TRANSPORT_HANDSHAKE_REQUIRED",
+        "state": {
+          "transport": "af_unix_stream",
+          "reply_type": "error"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-02",
+      "level": "C0",
+      "expected": {
+        "outcome": "reject",
+        "error": "TRANSPORT_VERSION_UNSUPPORTED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "TRANSPORT_VERSION_UNSUPPORTED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-03",
+      "level": "C0",
+      "expected": {
+        "outcome": "reject",
+        "error": "TRANSPORT_FRAME_TOO_LARGE"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "TRANSPORT_FRAME_TOO_LARGE",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-04",
+      "level": "C0",
+      "expected": {
+        "outcome": "reject",
+        "error": "SCHEMA_UNSUPPORTED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "SCHEMA_UNSUPPORTED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-05",
+      "level": "C0",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "side_effects": 1,
+          "idempotent_replay": true
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "side_effects": 1,
+          "idempotent_replay": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-06",
+      "level": "C0",
+      "expected": {
+        "outcome": "observe",
+        "notes": "A conforming message transport accepts the frame; requiring a length prefix makes the implementation non-conforming."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "transport": "af_unix_dgram",
+          "binding": "message",
+          "native_boundary": true,
+          "length_prefix": false,
+          "reply_type": "welcome"
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C0-07",
+      "level": "C0",
+      "expected": {
+        "outcome": "reject",
+        "error": "TIMEOUT"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "TIMEOUT",
+        "state": {
+          "retryable": true,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C1-01",
+      "level": "C1",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C1-02",
+      "level": "C1",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C1-03",
+      "level": "C1",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C1-04",
+      "level": "C1",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C1-05",
+      "level": "C1",
+      "expected": {
+        "outcome": "observe",
+        "notes": "The spec requires a policy decision: reject, or accept only during a bounded transition window. The report records which one happens."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C1-06",
+      "level": "C1",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C2-01",
+      "level": "C2",
+      "expected": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C2-02",
+      "level": "C2",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "leaked_data": false
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "leaked_data": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C2-03",
+      "level": "C2",
+      "expected": {
+        "outcome": "observe",
+        "notes": "A response carrying policy_verdict or missing consent_hint makes the implementation non-conforming."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "consent_hint_present": false,
+          "policy_verdict_present": true,
+          "conforming": false
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C2-04",
+      "level": "C2",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "indexed": false
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "indexed": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C2-05",
+      "level": "C2",
+      "expected": {
+        "outcome": "observe",
+        "notes": "The record MUST stop being returned no later than TTL; both queries are recorded."
+      },
+      "status": "skip",
+      "reason": "manual case: run the steps by hand"
+    },
+    {
+      "id": "C2-06",
+      "level": "C2",
+      "expected": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-01",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_AUDIENCE_MISMATCH"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_AUDIENCE_MISMATCH",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-02",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_TASK_MISMATCH"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_TASK_MISMATCH",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-03",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_SUBJECT_MISMATCH"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_SUBJECT_MISMATCH",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-04",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-05",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-06",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-07",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_ATTENUATION_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-08",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_REVOKED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_REVOKED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-09",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_REQUIRED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_REQUIRED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-10",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_EXPIRED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_EXPIRED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-11",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_SCOPE_MISMATCH"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_SCOPE_MISMATCH",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C3-12",
+      "level": "C3",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_SCOPE_MISMATCH"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_SCOPE_MISMATCH",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-01",
+      "level": "C4",
+      "expected": {
+        "outcome": "observe",
+        "notes": "Every running child MUST receive cancel and reach cancelled; the audit trail MUST record the propagation."
+      },
+      "status": "skip",
+      "reason": "manual case: run the steps by hand"
+    },
+    {
+      "id": "C4-02",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-03",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-04",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "SCHEMA_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-05",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "CAPABILITY_SUBJECT_MISMATCH"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CAPABILITY_SUBJECT_MISMATCH",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-06",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_REQUIRED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_REQUIRED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-07",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "TASK_BUDGET_EXCEEDED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "TASK_BUDGET_EXCEEDED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-08",
+      "level": "C4",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "task_status": "failed",
+          "recovered_count": 1,
+          "audited": true,
+          "audit_verified": true
+        },
+        "notes": "The task MUST become failed or be rescheduled by policy; silent running is non-conforming and the recovery MUST be audited."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "task_status": "failed",
+          "recovered_count": 1,
+          "audited": true,
+          "audit_verified": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-09",
+      "level": "C4",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "task_status": "failed",
+          "effect_state": "unknown",
+          "requires_reconciliation": true,
+          "replay_blocked": true,
+          "audited": true,
+          "audit_verified": true
+        },
+        "notes": "The effect and task MUST be marked unknown; automatic replay is forbidden until reconciliation (§8.11)."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "task_status": "failed",
+          "effect_state": "unknown",
+          "requires_reconciliation": true,
+          "replay_blocked": true,
+          "audited": true,
+          "audit_verified": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-10",
+      "level": "C4",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C4-11",
+      "level": "C4",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "handoff_result": "rejected",
+          "owner": "agent://com.example.orchestrator/main#1a2b",
+          "budget_unchanged": true,
+          "task_status_unchanged": true
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "handoff_result": "rejected",
+          "owner": "agent://com.example.orchestrator/main#1a2b",
+          "budget_unchanged": true,
+          "task_status_unchanged": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-01",
+      "level": "C5",
+      "expected": {
+        "outcome": "reject",
+        "error": "CONTEXT_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CONTEXT_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-02",
+      "level": "C5",
+      "expected": {
+        "outcome": "reject",
+        "error": "CONTEXT_EXPIRED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CONTEXT_EXPIRED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-03",
+      "level": "C5",
+      "expected": {
+        "outcome": "observe",
+        "notes": "A derived object MUST inherit at least the source label; rejecting the derivation or raising the label to sensitive are both conforming (§9.4)."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "declared_label": "public",
+          "inherited_label": "sensitive",
+          "effective_label": "sensitive",
+          "lowered": true,
+          "conforming": false,
+          "resolved": true,
+          "audit": {
+            "action": "context.resolve",
+            "handle": "ctx://user/profile#display_name",
+            "agent": "agent://com.example.orchestrator/main#1a2b",
+            "label": "public",
+            "decision": "allow",
+            "reason": "resolved"
+          }
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C5-04",
+      "level": "C5",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_REQUIRED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_CONSENT_REQUIRED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-05",
+      "level": "C5",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "cleared_or_archived": true,
+          "promoted_to_memory": false
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "blackboard": "task://task_01J9Z6Q3V8N2K4M7P1R5T0WXAB/blackboard",
+          "task_ended": true,
+          "cleared_or_archived": true,
+          "entries_archived": 2,
+          "promoted_to_memory": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-06",
+      "level": "C5",
+      "expected": {
+        "outcome": "observe",
+        "notes": "The report MUST show a reference check and an audit event; hard-deleting a referenced object is non-conforming (§9.6, §9.7)."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "object": "obj://sha256:9f2c7b1a",
+          "references_checked": true,
+          "reference_count": 2,
+          "audit_written": true,
+          "deleted": false,
+          "tombstoned": true,
+          "conforming": true
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C5-07",
+      "level": "C5",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "cache_hit": false
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "requested_ttl": 900,
+          "handle_ttl": 600,
+          "effective_ttl": 600,
+          "clamped": true,
+          "cache_hit": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-08",
+      "level": "C5",
+      "expected": {
+        "outcome": "observe",
+        "notes": "Claiming managed_store requires quota, GC, crash recovery, encryption, and deletion duties (standard.md §9.10)."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "cf_mode": "managed_store",
+          "declares_managed_store": true,
+          "missing": [
+            "quota",
+            "garbage_collection",
+            "crash_recovery",
+            "encryption",
+            "path_safety",
+            "deletion"
+          ],
+          "conforming": false
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C5-09",
+      "level": "C5",
+      "expected": {
+        "outcome": "reject",
+        "error": "CONTEXT_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CONTEXT_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-10",
+      "level": "C5",
+      "expected": {
+        "outcome": "reject",
+        "error": "CONTEXT_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "CONTEXT_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C5-11",
+      "level": "C5",
+      "expected": {
+        "outcome": "observe",
+        "notes": "Task boards, object metadata, audit logs, and Bus state MUST NOT be promoted to long-term memory (standard.md §3.7, §9.3)."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "sources": [
+            "idempotency_index",
+            "audit_log",
+            "task_tree"
+          ],
+          "promoted_to_memory": [
+            "idempotency_index",
+            "audit_log",
+            "task_tree"
+          ],
+          "conforming": false
+        }
+      },
+      "reason": "observed"
+    },
+    {
+      "id": "C6-01",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "source_kind": "vendor_registry",
+          "registry": "android.appfunctions",
+          "native_id": "com.example.calendar.createEvent",
+          "trust": "system"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "vendor_registry",
+          "registry": "android.appfunctions",
+          "native_id": "com.example.calendar.createEvent",
+          "version": "1.0.0",
+          "origin": "local",
+          "trust": "system",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/android-appfunctions/com.example.calendar.createEvent",
+          "visibility": "discoverable"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-02",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "source_kind": "vendor_registry",
+          "registry": "apple.app_intents",
+          "native_id": "com.example.calendar.CreateEventIntent",
+          "trust": "system"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "vendor_registry",
+          "registry": "apple.app_intents",
+          "native_id": "com.example.calendar.CreateEventIntent",
+          "version": "3.2.1",
+          "origin": "local",
+          "trust": "system",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/apple-app_intents/com.example.calendar.CreateEventIntent",
+          "visibility": "discoverable"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-03",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "source_kind": "vendor_registry",
+          "registry": "windows.app_actions",
+          "native_id": "com.example.calendar.CreateEventAction",
+          "trust": "system"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "vendor_registry",
+          "registry": "windows.app_actions",
+          "native_id": "com.example.calendar.CreateEventAction",
+          "version": "1.4.0",
+          "origin": "local",
+          "trust": "system",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/windows-app_actions/com.example.calendar.CreateEventAction",
+          "visibility": "discoverable"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-04",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "source_kind": "mcp",
+          "server": "calendar-server",
+          "tool": "create_event",
+          "schema": "osap.calendar.event/v1"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "mcp",
+          "registry": "mcp",
+          "native_id": "calendar-server:create_event",
+          "version": "2026-06-01",
+          "origin": "external",
+          "trust": "unverified",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/mcp/calendar-server%3Acreate_event",
+          "visibility": "discoverable",
+          "server": "calendar-server",
+          "tool": "create_event"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-05",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "source_kind": "a2a",
+          "agent_card": "https://calendar.example/.well-known/agent.json",
+          "skill": "create_event"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "a2a",
+          "registry": "a2a",
+          "native_id": "https://calendar.example/.well-known/agent.json#create_event",
+          "version": "0.2.1",
+          "origin": "external",
+          "trust": "unverified",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/a2a/https%3A%2F%2Fcalendar.example%2F.well-known%2Fagent.json%23create_event",
+          "visibility": "discoverable",
+          "agent_card": "https://calendar.example/.well-known/agent.json",
+          "skill": "create_event"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-06",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "source_kind": "dbus",
+          "bus": "session",
+          "path": "/org/example/Calendar",
+          "interface": "org.example.Calendar",
+          "method": "CreateEvent"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "dbus",
+          "registry": "dbus",
+          "native_id": "session:org.example.Calendar:/org/example/Calendar:org.example.Calendar.CreateEvent",
+          "version": "1.0.0",
+          "origin": "local",
+          "trust": "system",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/dbus/session%3Aorg.example.Calendar%3A%2Forg%2Fexample%2FCalendar%3Aorg.example.Calendar.CreateEvent",
+          "visibility": "discoverable",
+          "bus": "session",
+          "path": "/org/example/Calendar",
+          "interface": "org.example.Calendar",
+          "method": "CreateEvent"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-07",
+      "level": "C6",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "origin": "external",
+          "trust": "unverified"
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "record_id": "cr_01J9Z6Q3V8N2K4M7P1R5T0WX03",
+          "source_kind": "mcp",
+          "registry": "mcp",
+          "native_id": "external-server:summarize",
+          "version": null,
+          "origin": "external",
+          "trust": "unverified",
+          "schema": "osap.calendar.event/v1",
+          "capability": {
+            "cap": "cap://os/calendar/events",
+            "actions": [
+              "create"
+            ],
+            "resources": [
+              "calendar:primary"
+            ],
+            "schemas": [
+              "osap.calendar.event/v1"
+            ],
+            "risk": "L2",
+            "cost": {
+              "latency_ms_p50": 300
+            }
+          },
+          "mapped_capability": "cap://federation/mcp/external-server%3Asummarize",
+          "visibility": "discoverable",
+          "server": "external-server",
+          "tool": "summarize"
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C6-08",
+      "level": "C6",
+      "expected": {
+        "outcome": "observe",
+        "notes": "The record MUST be updated or invalidated no later than TTL; a removed capability MUST NOT remain discoverable after TTL."
+      },
+      "status": "skip",
+      "reason": "manual case: run the steps by hand"
+    },
+    {
+      "id": "C7-01",
+      "level": "C7",
+      "expected": {
+        "outcome": "observe",
+        "notes": "Every hop MUST share one trace_id, each hop MUST carry causation_id, and the export MUST be both verifiable and free of plaintext secrets (§10.6)."
+      },
+      "status": "skip",
+      "reason": "manual case: run the steps by hand"
+    },
+    {
+      "id": "C7-02",
+      "level": "C7",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUDIT_CHAIN_INVALID"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUDIT_CHAIN_INVALID",
+        "state": {
+          "retryable": false,
+          "standard_code": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C7-03",
+      "level": "C7",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "redacted": true,
+          "chain_verified": true,
+          "plaintext_recoverable": false
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "redacted": true,
+          "chain_verified": true,
+          "plaintext_recoverable": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C7-04",
+      "level": "C7",
+      "expected": {
+        "outcome": "reject",
+        "error": "POLICY_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "POLICY_DENIED",
+        "state": {
+          "retryable": false,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C7-05",
+      "level": "C7",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "side_effects": 1,
+          "idempotent_replay": true
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "side_effects": 1,
+          "idempotent_replay": true,
+          "replays": 1
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C7-06",
+      "level": "C7",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "effect_state": "unknown",
+          "alerted": true
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "effect_state": "unknown",
+          "alerted": true,
+          "pending_intents": [
+            "audit_01J9Z6Q3V8N2K4M7P1R5T0WX2F"
+          ],
+          "requires_reconciliation": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C7-07",
+      "level": "C7",
+      "expected": {
+        "outcome": "observe",
+        "notes": "0.1 trusts the Bus (P0); claiming protection against a compromised Bus is non-conforming. P1 evaluates hardened transports separately (§3.6, §11.1)."
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "observe",
+        "state": {
+          "bus_compromised": true,
+          "claims_p0_protection": true,
+          "p0_protection": false,
+          "p1_required": true,
+          "conforming": false
+        }
+      },
+      "reason": "observed"
+    }
+  ],
+  "summary": {
+    "total": 68,
+    "pass": 64,
+    "fail": 0,
+    "skip": 4
+  }
+}
