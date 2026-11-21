@@ -15,8 +15,8 @@
 
 | 文件 | 内容 | IETF 状态 |
 |---|---|---|
-| `draft-zeng-osap-capability-tokens-00.xml` | Draft A：`Capability Tokens for Local Agent Delegation` | individual draft，上传日 2026-11-20；作者 Zeng Zhiyong |
-| `draft-zeng-osap-consent-receipts-00.xml` | Draft B：`Consent Receipt Binding for Task-Scoped Authorization` | individual draft，上传日 2026-11-20；作者 Zeng Zhiyong |
+| `draft-zeng-osap-capability-tokens-00.xml` | Draft A：`Capability Tokens for Local Agent Delegation` | individual draft，上传日 2026-11-21；作者 Zeng Zhiyong |
+| `draft-zeng-osap-consent-receipts-00.xml` | Draft B：`Consent Receipt Binding for Task-Scoped Authorization` | individual draft，上传日 2026-11-21；作者 Zeng Zhiyong |
 | `README.md` | 本文件：来源映射、构建、边界与发布检查 | 非规范性 |
 
 两个 draft 都是英文，正文不引用 `standard.md`、本仓库路径或未发布文档；外部读者只看单个 draft 即可理解其范围。中文原文仍是规范性的最终来源；draft 与 `standard.md` 冲突时以 `standard.md` 为准。
