@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Entries are written in English to match commit messages; the Chinese text in
 `docs/standard.md` remains the normative source.
 
-## [Unreleased]
+## [0.1.0] - 2026-11-21
+
+First tagged release: the 0.1 discussion draft (130 sections, submitted to the IETF as two individual drafts), the reference implementation (23 modules + adapter, 790 unit tests, 64/68 automated conformance passes with 4 manual skips), the three-agent demo including crash recovery, the executable conformance suite with the verified registry, four TLA+ models with two negative controls, the Linux binding profile, and 14 ADRs for the open issues.
 
 ### Added
 

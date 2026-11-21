@@ -6,7 +6,7 @@
 
 > **A local-first open standard: cross-application agent peer-to-peer collaboration, capability registry federation, and task-level authorization.**
 >
-> Version: 0.1 Draft · 2026-11-10 · Status: discussion draft, reference implementation M2 complete with a three-agent demo
+> Version: **0.1.0** (tagged 2026-11-21) · 0.1 draft submitted to the IETF (two individual drafts) · M0–M4 complete, M5 in progress
 
 ---
 
