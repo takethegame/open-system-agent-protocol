@@ -141,7 +141,7 @@ python3 tools/benchmark_revocation.py  # 撤销传播 P95（本地基准，不�
 3. **持久层是单写者 JSON**：一个 store 文件一个进程写；无多写者协调、TTL 清理或压缩。
 4. **撤销分发需显式接线**：日志/拉订阅/推送通道已实现，但签发方必须显式 `notify()`,跨设备传播不在 0.1。
 5. **C2-05、C4-01、C6-08、C7-01 仍是 manual**:跨 App 同意 UI、原生注册表 TTL、跨进程恢复的真实集成未自动化。
-6. **两份 IETF draft 未提交**：闸门 1–3(贡献者同意确认、IPR 自查、WG 联络)待办，见 `drafts/submission/checklist.md`。
+6. **两份 IETF draft 已提交（2026-11-21）**：`draft-zeng-osap-capability-tokens-00` 与 `draft-zeng-osap-consent-receipts-00` 在 [Datatracker](https://datatracker.ietf.org/drafts/current/) 公开（2027-05-25 过期）；剩余动作是两封 WG 联络 信（agentproto / OAuth，已署名待发），归属以 chairs 回复为准。
 
 ---
 

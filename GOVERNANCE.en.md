@@ -118,20 +118,21 @@ Recommended liaison directions:
 
 OSAP positions itself as a **local binding/federation layer** and does not replace the protocols above.
 
-### 9.1 Liaison Status (2026-11-19)
+### 9.1 Liaison Status (updated 2026-11-21)
 
 The table records **actions that have happened**, not intentions:
 
 | Organization/project | Status | Evidence/next step |
 |---|---|---|
-| IETF `agentproto` | No formal contact; two individual-draft skeletons are prepared | Submit to the WG mailing list after contributor consent and IPR disclosure |
-| IETF OAuth / WIMSE | No formal contact | Observe the WIMSE identity profile first; do not define a parallel PKI |
+| IETF Datatracker | ✅ Both individual drafts submitted (2026-11-21): [capability tokens](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/), [consent receipts](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/); §10.4 consent and the IPR self-check are complete (see `drafts/submission/`) | Watch the id-announce feedback; stay individual unless adopted |
+| IETF `agentproto` | No formal contact; the WG was chartered in 2026-10 and has PACE-style delegation drafts; the liaison letter is signed and ready to send | Send `drafts/submission/liaison-agentproto.md` after checking the chairs list |
+| IETF OAuth / WIMSE | No formal contact; the liaison letter is signed and ready to send | Send `drafts/submission/liaison-oauth.md`; WIMSE also has the `sadp-delegation` proposal in the same space |
 | AAIF / Linux Foundation | No formal contact | Build external interoperability before discussing a home |
 | AGNTCY | No formal contact | Evaluate directory and transport mapping |
 | OS vendors | No formal contact | Collect feedback through public issues and documents; do not promise private endorsement |
 | GNOME/KDE/freedesktop | No formal contact | The Linux binding is on disk; open an issue about portal mapping |
 
-**Note:** an individual draft is not IETF adoption; submitting one requires contributor consent under Section 10.4.
+**Note:** a submitted individual draft is not IETF adoption; the WG home is decided by the chairs' response and group consensus.
 
 ---
 

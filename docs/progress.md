@@ -36,7 +36,7 @@
 | 撤销订阅与跨进程测量（M4 前置） | ✅ 完成 | `RevocationWatcher` 轮询源 store 自动应用撤销批次；`benchmark_revocation.py --cross-process` 量化 revoke → 副本 `is_revoked()` 端到端传播；778 tests | 2026-11-19 |
 | asyncio 绑定（M4 前置） | ✅ 完成 | `serve_forever(mode="asyncio")` 缓冲分帧协议，半帧停滞 peer 不再阻塞他人；`close()` 经 `call_soon_threadsafe` 通知 loop（kqueue fd 跨线程关闭会挂死）；782 tests | 2026-11-19 |
 | 撤销推送通道（M4 前置） | ✅ 完成 | `RevocationFeedServer/Client` 专用 AF_UNIX sidecar socket 推送撤销批次（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 支持整树 cascade 跨进程测量；790 tests | 2026-11-19 |
-| M4 标准打包 | 🟢 本地完成 | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`；未提交 IETF | 2026-11-19 |
+| M4 标准打包 | ✅ 完成(已提交) | 2 个 IETF individual draft + Linux binding + 14 ADR + `check_drafts.py`;**已提交 Datatracker(2026-11-21)**,URL 见 §17 | 2026-11-21 |
 | M5 生态与采用 | 🟢 进行中 | 一致性登记表已建立(`conformance/registry.md` + `reports/`),参考实现自证登记;剩余:外部实现互操作、安全评审、发布 | 2026-11-20 |
 
 仓库规模：
@@ -1259,13 +1259,14 @@ drafts           success   # xml2rfc 安装 + check_drafts.py --compile
 
 ### 17.4 已知边界
 
-1. **未提交 IETF**：`draft-osap-*` 是本地文档名；提交前必须取得贡献者同意、完成 BCP 79 IPR 披露、替换 `OSAP Editors` 占位作者，并确认 `agentproto`/OAuth WG 的采用意向。
-2. **`ipr="trust200902"` 只是模板值**：它不代表已经完成 IETF Trust 版权同意或专利披露。
+1. ~~**未提交 IETF**~~ **已提交（2026-11-21）**：文档名按第一作者姓氏改为 `draft-zeng-osap-*`（[capability tokens](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/)、[consent receipts](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/)）；§10.4 贡献者同意（`submission/consent-record.md`）与 BCP 79 IPR 自查（`submission/ipr-landscape.md`）已完成；WG 采用意向仍待两封署名联络 信发出。
+2. **`ipr="trust200902"` 只是模板值**：实际的 IPR 义务经 `submission/ipr-landscape.md` 的三问自查结论为"无披露义务"；该属性不影响披露语义。
 3. **没有外部评审**：两个 draft 未经 WG 或独立安全评审；Linux binding 也未在真实 GNOME/KDE/Flatpak 环境中跑过端到端测试。
 4. **D-Bus 集成测试不在 CI**：本环境是 macOS；`units/` 与 `dbus/` 是示例，CI 只做静态/编译检查。Linux 集成测试应在 `dbus-run-session` 下单独运行。
 5. **27560 映射未做符合性测试**：它只是概念映射，不是 ISO 认证，也没有覆盖 notice/controller/jurisdiction 等完整记录字段。
 6. **ADR 是暂定的**：第 3、6、11、14 条尤其依赖 0.2 或平台进展；在外部实现出现前不应视为冻结。
 7. **来源映射是人工维护的**：`drafts/README.md` 的逐节表格不会被 CI 自动比对；`check_drafts.py` 只保证 draft 自包含、引用可解析与可编译。
+8. **-00 版本 2027-05-25 过期**：需要延续时发 `-01`（上传前更新 `<date>`）；未被引用或讨论也会自然过期，这属于 IETF 流程常态而非撤稿。
 
 ---
 
@@ -1820,9 +1821,10 @@ python3 tools/check_docs.py
 
 ## 31. 下一步（按顺序）
 
-1. **IETF 提交前置**（材料包已备好，§29）：闸门 0/3/4 已完成（作者与文档名就绪，`--submission` 常绿入 CI）；剩余三步真人动作——回复确认同意书（consent-template 已填好本人信息）、IPR 自查决策（无已知专利则据实说明）、发送已署名的 agentproto / OAuth 联络 信；
-2. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
-3. **M5**：一致性登记表已建立并机械化（§28）；剩余——找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿，并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
+1. **IETF**:两份 draft 已提交（§29,闸门 0–7 全部完成）；剩余——两封 WG 联络 信（agentproto / OAuth,已署名,可选项）、观察 Datatracker 反馈、如需延续发 `-01`；
+2. **发布**:打 tag `v0.1.0`（规范 + 参考实现 + 演示 + 一致性登记）;
+3. 加入 XPC/Binder/named pipe 平台原生传输（asyncio 绑定与撤销推送通道已完成，§26、§27）；
+4. **M5**：一致性登记表已建立并机械化（§28）；剩余——找 1–2 个外部实现做 C1–C2 互操作、独立安全评审、学术投稿（材料定位:本地绑定层的系统性整合,参考 §29 的在先技术分析），并在 freedesktop/GNOME/KDE 就 Linux binding 开 issue。
 
 ---
 
@@ -1876,6 +1878,7 @@ python3 tools/check_docs.py
 | 2026-11-20 | **demo 崩溃恢复与单一审计编码**（`d04c907`）：demo 第 7 节持久化运行时 + 重放闸门/对账/幂等重放/黑板不晋升；第 6 节 16 事件改由 `AuditLedger` 生成 |
 | 2026-11-20 | **README 限制清单**（`fcf0485`）：根 README 中英同步更新当前状态并列出六条采用相关限制 |
 | 2026-11-20 | **闸门 1/2 辅助材料**：`consent-record.md`（四条声明待署名者确认）与 `ipr-landscape.md`（领域态势：agentproto 已获章程并有 PACE 等委派 draft；第三方专利家族梳理；Macaroons 等公开在先技术）；agentproto 联络信按已获批章程的现实重写 |
+| 2026-11-21 | **闸门 1、2、6 完成,两份 draft 提交 IETF**:署名者确认 §10.4 四条声明;IPR 三问自查无披露义务;作者署名与 `draft-zeng-*` 文档名就绪;两份 individual draft 上传 Datatracker——[capability tokens](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/)、[consent receipts](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/)（2027-05-25 过期）;剩余:两封 WG 联络 信（署名待发,可选项） |
 | 2026-11-20 | **闸门 1 完成**:署名者确认 §10.4 四条声明(BCP 78 授权、Simplified BSD、IETF Trust 处分、IPR 义务知悉);记录于 `drafts/submission/consent-record.md`,DCO 签名提交固化 |
 | 2026-11-20 | **闸门 2 完成**:IPR 三问自查——个人无相关专利/申请、雇主组合与本领域无关、无已知未授权使用;**无披露义务**,结论与检索记录见 `drafts/submission/ipr-landscape.md` §1/§3 |
 | 2026-11-21 | **闸门 6 就绪**:两份 draft `<date>` 更新为实际上传日 2026-11-21;`--submission --compile` 38 checks 与全量复核通过,待署名者在 Datatracker 上传 |

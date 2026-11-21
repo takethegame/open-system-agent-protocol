@@ -69,10 +69,19 @@
 
 ## 6. 提交动作(闸门全过之后)
 
-1. 在 Datatracker 以**真实个人账号**上传(an individual submission,不是 WG upload);
-2. 上传前重跑:`python3 tools/check_drafts.py --submission --compile` + 全量测试;
-3. Datatracker 会自动执行 ipr/authors 检查;任何 mismatches 按其提示处理;
-4. 提交后在 `drafts/README.md` 记录 URL 与日期,并在 `GOVERNANCE.md` §10.4 的"新版本说明"要求下更新声明。
+✅ **已完成(2026-11-21)**:
+
+1. 以署名者本人的 Datatracker 账号(Zeng Zhiyong, 272577337@qq.com)按 individual submission 上传;
+2. 上传前 `python3 tools/check_drafts.py --submission --compile` ✅(38 checks)+ 全量测试与一致性运行 ✅;
+3. Datatracker 的自动检查通过,无 mismatch;
+4. 官方 URL 已登记:
+
+| Draft | Datatracker | 官方文本 | 到期 |
+|---|---|---|---|
+| `draft-zeng-osap-capability-tokens-00` | <https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/> | <https://www.ietf.org/archive/id/draft-zeng-osap-capability-tokens-00.txt> | 2027-05-25 |
+| `draft-zeng-osap-consent-receipts-00` | <https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/> | <https://www.ietf.org/archive/id/draft-zeng-osap-consent-receipts-00.txt> | 2027-05-25 |
+
+后续:`-01` 版本按需发布(上传前更新 `<date>`);WG 联络(§5)仍待两封署名信发出;过期前(2027-05-25)如需延续,发 `-01` 或让其为 naturally expire。
 
 ---
 

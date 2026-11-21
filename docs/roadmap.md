@@ -277,7 +277,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 - [x] 写 §15 的 14 条 ADR
 - [x] 在 `GOVERNANCE.md` §9 更新联络状态
 
-**当前状态（2026-11-19）**：本地打包已完成并推送（`f98a6b3`），CI run [44461943418](https://github.com/takethegame/open-system-agent-protocol/actions/runs/44461943418) 的 `validate` 3.11/3.12 与 `drafts` job 全部通过。`drafts/` 含两个 `xml2rfc` v3 individual draft、来源映射与静态检查工具；Linux binding 含 D-Bus 接口、portal 映射、`systemd --user` 单元与 3 个序列图；`decisions/` 含 14 条 ADR；`GOVERNANCE.md` §9.1 记录真实联络状态。**未提交 IETF，未做 IPR 披露**；对外提交前仍须按 §10.4 取得贡献者同意。
+**当前状态（2026-11-21）**：两个 individual draft **已提交 IETF Datatracker**——[draft-zeng-osap-capability-tokens-00](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/) 与 [draft-zeng-osap-consent-receipts-00](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/)（2026-11-21，2027-05-25 过期）。§10.4 贡献者同意与 BCP 79 IPR 自查已完成（记录见 `drafts/submission/`）；作者署名 Zeng Zhiyong，`check_drafts.py --submission` 常绿并接入 CI。Linux binding 含 D-Bus 接口、portal 映射、`systemd --user` 单元与 3 个序列图；`decisions/` 含 14 条 ADR；`GOVERNANCE.md` §9.1 记录真实联络状态。**WG 归属未定**：两封联络信已署名待发（agentproto 已获章程，组内有 PACE 等委派类 draft）。
 
 **退出标准**
 

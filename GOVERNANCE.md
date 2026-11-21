@@ -117,20 +117,21 @@
 
 OSAP 的定位是**本地绑定/联邦层**，不替代上述协议。
 
-### 9.1 联络状态（2026-11-19）
+### 9.1 联络状态（2026-11-21 更新）
 
 下表记录**已发生的动作**，不是意向：
 
 | 对象 | 状态 | 证据/下一步 |
 |---|---|---|
-| IETF `agentproto` | 未正式联络；已准备两个 individual draft 骨架 | 完成贡献者同意与 IPR 披露后，再向 WG 邮件列表提交 |
-| IETF OAuth / WIMSE | 未正式联络 | 先观察 WIMSE 身份 profile；避免重复定义 PKI |
+| IETF Datatracker | ✅ 两个 individual draft 已提交（2026-11-21）：[capability tokens](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/)、[consent receipts](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/)；§10.4 同意与 IPR 自查已完成（`drafts/submission/consent-record.md`、`ipr-landscape.md`） | 观察 Autobuf/邮箱反馈；未被 WG 采用前保持 individual 状态 |
+| IETF `agentproto` | 未正式联络；WG 已于 2026-10 获章程，组内有 PACE 等委派类 draft；联络信已署名待发 | 发送 `drafts/submission/liaison-agentproto.md`，按 wgchairs 页核对收件人 |
+| IETF OAuth / WIMSE | 未正式联络；联络信已署名待发 | 发送 `drafts/submission/liaison-oauth.md`；WIMSE 侧另有 `sadp-delegation` 同域稿，需定位差异 |
 | AAIF / Linux Foundation | 未正式联络 | 先做外部互操作，再讨论归属 |
 | AGNTCY | 未正式联络 | 评估目录与传输映射 |
 | OS 厂商 | 未正式联络 | 通过公开 issue 与文档收集反馈，不私下承诺背书 |
 | GNOME/KDE/freedesktop | 未正式联络 | Linux binding 已落盘，可就 portal 映射开 issue 讨论 |
 
-**注意**：individual draft 的存在不等于 IETF 采用；提交前必须按 §10.4 取得贡献者同意。
+**注意**：individual draft 已提交不等于 IETF 采用；WG 归属仍以 chairs 回复与组内共识为准。
 
 ---
 

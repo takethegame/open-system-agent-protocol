@@ -7,7 +7,12 @@
 
 本目录把 OSAP 0.1 中**可以独立成文**的两部分拆成 IETF individual draft，并用一个独立的 Linux binding profile 与一组 ADR 补齐 M4 的打包产出。
 
-**当前状态不是 IETF 提交。** 两个 XML 文件是 `xml2rfc` v3 骨架，文档名为 `-00`，用于内部评审与外部预读；在完成 WG 归属确认与实际上传之前，不得提交到 IETF Datatracker（§10.4 同意与 IPR 自查已于 2026-11-20 完成，记录见 `submission/consent-record.md` 与 `submission/ipr-landscape.md`）。
+**当前状态不是 WG 采用稿。** 两份 XML 已于 2026-11-21 提交 IETF Datatracker，官方文本见：
+
+- https://www.ietf.org/archive/id/draft-zeng-osap-capability-tokens-00.txt（[Datatracker](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/)）
+- https://www.ietf.org/archive/id/draft-zeng-osap-consent-receipts-00.txt（[Datatracker](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/)）
+
+文档名 `draft-zeng-*` 由作者姓氏生成；**WG 归属未定**——两封联络信已署名待发（`submission/`）。§10.4 同意与 IPR 自查的记录见 `submission/consent-record.md` 与 `submission/ipr-landscape.md`。后续版本以 `-01` 起编号,上传前更新 `<date>`。
 
 ---
 

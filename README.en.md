@@ -141,7 +141,7 @@ The full 22-item list lives in [`impl/README.md`](impl/README.md) Section 6; the
 3. **The persistence layer is single-writer JSON**: one process writes each store file; no multi-writer coordination, TTL cleanup, or compaction.
 4. **Revocation distribution must be wired explicitly**: journal, pull subscription, and push channel exist, but the issuer must call `notify()`; cross-device propagation is out of 0.1.
 5. **C2-05, C4-01, C6-08, C7-01 remain manual**: real cross-App consent UI, native registry TTL, and cross-process recovery are not automated.
-6. **Both IETF drafts are unsubmitted**: gates 1–3 (consent confirmation, IPR self-check, WG liaison) are pending — see `drafts/submission/checklist.md`.
+6. **Both IETF drafts are submitted (2026-11-21)**: `draft-zeng-osap-capability-tokens-00` and `draft-zeng-osap-consent-receipts-00` are public on [Datatracker](https://datatracker.ietf.org/drafts/current/) (expiring 2027-05-25); the remaining action is the two WG liaison emails (agentproto / OAuth, signed and ready to send), with the home to be decided by the chairs' response.
 
 ---
 
