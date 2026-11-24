@@ -1195,5 +1195,59 @@ class EffectArchiveTests(unittest.TestCase):
                 task.TaskBoard(max_effects=value)
 
 
+class ProgressReportTests(unittest.TestCase):
+    """A `status` message records budget consumption (§8.6)."""
+
+    def setUp(self):
+        self.board = task.TaskBoard()
+        self.record = self.board.add(parent_task())
+        self.board.transition(self.record, "accepted")
+        self.board.transition(self.record, "running")
+
+    def test_progress_is_recorded_and_returns_remaining(self):
+        report = self.board.report_progress(
+            self.record.task_id,
+            consumed={"wall_ms": 1200, "tool_calls": 1},
+            sender=self.record.assignee,
+        )
+        self.assertEqual(report["consumed"], {"wall_ms": 1200, "tool_calls": 1})
+        self.assertEqual(report["remaining"]["wall_ms"], 8000 - 1200)
+        self.assertEqual(self.board.require(self.record.task_id).consumed["tool_calls"], 1)
+
+    def test_consumption_must_be_monotonic(self):
+        self.board.report_progress(
+            self.record.task_id, consumed={"tool_calls": 2}, sender=self.record.assignee
+        )
+        with self.assertRaises(OsapError):
+            self.board.report_progress(
+                self.record.task_id, consumed={"tool_calls": 1}, sender=self.record.assignee
+            )
+        self.assertEqual(self.board.require(self.record.task_id).consumed["tool_calls"], 2)
+
+    def test_only_the_assignee_reports(self):
+        with self.assertRaises(OsapError):
+            self.board.report_progress(
+                self.record.task_id, consumed={"tool_calls": 1}, sender=ORCHESTRATOR
+            )
+
+    def test_terminal_tasks_do_not_report(self):
+        self.board.transition(self.record, "succeeded")
+        with self.assertRaises(OsapError):
+            self.board.report_progress(
+                self.record.task_id, consumed={"tool_calls": 1}, sender=self.record.assignee
+            )
+
+    def test_a_heartbeat_without_consumption_is_valid(self):
+        report = self.board.report_progress(self.record.task_id, sender=self.record.assignee)
+        self.assertEqual(report["consumed"], {})
+
+    def test_invalid_values_are_rejected(self):
+        for consumed in ({"tool_calls": -1}, {"tool_calls": "one"}, {"tool_calls": True}, "x"):
+            with self.assertRaises((ValueError, OsapError)):
+                self.board.report_progress(
+                    self.record.task_id, consumed=consumed, sender=self.record.assignee
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

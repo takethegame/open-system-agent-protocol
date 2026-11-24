@@ -345,6 +345,17 @@ def main() -> int:
     board.transition(notes_child, "running")
     print(f"notes  {notes_child.task_id} budget wall_ms={notes_child.budget['wall_ms']}")
 
+    progress = board.report_progress(
+        notes_child.task_id,
+        consumed={"wall_ms": 1200, "tool_calls": 1},
+        sender=NOTES,
+    )
+    print(
+        f"notes  status consumed tool_calls={progress['consumed']['tool_calls']}/1 "
+        f"wall_ms={progress['consumed']['wall_ms']}/3000 "
+        f"remaining wall_ms={progress['remaining']['wall_ms']}"
+    )
+
     notes_result = {
         "osap": "0.1",
         "id": "msg_demo_result_notes",

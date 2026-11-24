@@ -69,6 +69,7 @@ class Bus:
         store: JsonStore | str | os.PathLike[str] | None = None,
         admission: AdmissionController | None = None,
         admission_wait: float = 0.0,
+        progress_board=None,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -81,12 +82,17 @@ class Bus:
                 idempotency = IdempotencyIndex()
         if admission_wait < 0:
             raise ValueError("admission_wait must not be negative")
+        if progress_board is not None and not callable(
+            getattr(progress_board, "report_progress", None)
+        ):
+            raise ValueError("progress_board must expose report_progress()")
         self.binding = binding
         self.version = version
         self.state = AWAITING_HELLO
         self.idempotency = idempotency
         self.admission = admission or AdmissionController()
         self.admission_wait = admission_wait
+        self.progress_board = progress_board
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []
@@ -158,12 +164,24 @@ class Bus:
         if self.binding != framing.Binding.STREAM:
             raise RuntimeError("raw bytes require a stream binding")
         messages, _remainder = framing.decode_stream(data)
-        return [self.receive(message) for message in messages]
+        return [reply for message in messages if (reply := self.receive(message)) is not None]
 
-    def dispatch(self, message: dict) -> dict:
-        """Route a validated message."""
+    def dispatch(self, message: dict) -> dict | None:
+        """Route a validated message; None for one-way types like `status`."""
 
         kind = message["type"]
+        if kind == "status":
+            if self.progress_board is None:
+                raise NotImplementedError(
+                    f"bus does not route {kind!r} without a progress board"
+                )
+            data = (message.get("body") or {}).get("data") or {}
+            self.progress_board.report_progress(
+                envelope.task_id(message),
+                consumed=data.get("consumed") or {},
+                sender=message.get("from"),
+            )
+            return None
         if kind == "request":
             deadline = Deadline.from_envelope(message)
             deadline.check()

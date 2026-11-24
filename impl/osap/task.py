@@ -803,6 +803,95 @@ class TaskBoard:
             raise
         return copy.deepcopy(effect)
 
+    def report_progress(
+        self,
+        task_id: str,
+        *,
+        consumed: dict | None = None,
+        sender: str | None = None,
+    ) -> dict:
+        """Record assignee progress against the task budget (§8.6).
+
+        A `status` message carries the four budget dimensions that have
+        advanced so far (`wall_ms`, `tool_calls`, `tokens`, `depth`).
+        Consumption MUST be monotonic: a report below the recorded value is
+        rejected instead of silently shrinking the budget. Only the assignee
+        may report, and only while the task is non-terminal. The board does
+        not audit progress events — they are high-frequency bookkeeping, and
+        the enforcement point for over-budget remains the receiver's
+        `check_budget` at execution time (§8.6).
+        """
+
+        record = self.require(task_id)
+        if record.status in TERMINAL:
+            raise OsapError(
+                "POLICY_DENIED",
+                "a terminal task cannot accept progress",
+                details={"task_id": task_id, "status": record.status},
+            )
+        if sender is not None and record.assignee != sender:
+            raise OsapError(
+                "POLICY_DENIED",
+                "only the assignee may report progress",
+                details={"task_id": task_id, "sender": sender, "assignee": record.assignee},
+            )
+        before = dict(record.consumed or {})
+        merged = dict(before)
+        reported = consumed or {}
+        if not isinstance(reported, dict):
+            raise ValueError("consumed must be a JSON object")
+        for dimension in BUDGET_DIMENSIONS:
+            if dimension not in reported:
+                continue
+            value = reported[dimension]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{dimension} consumption must be a non-negative integer")
+            previous = merged.get(dimension, 0)
+            if value < previous:
+                raise OsapError(
+                    "POLICY_DENIED",
+                    f"{dimension} consumption must not go backwards",
+                    details={
+                        "dimension": dimension,
+                        "recorded": previous,
+                        "reported": value,
+                    },
+                )
+            merged[dimension] = value
+        money = reported.get("money")
+        if money is not None:
+            if not isinstance(money, dict):
+                raise ValueError("money consumption must be an object")
+            amount = money.get("amount")
+            if not isinstance(amount, int) or isinstance(amount, bool) or amount < 0:
+                raise ValueError("money amount must be a non-negative integer")
+            currency = money.get("currency")
+            previous_money = merged.get("money")
+            if (
+                previous_money is not None
+                and previous_money.get("currency") == currency
+                and amount < previous_money.get("amount", 0)
+            ):
+                raise OsapError(
+                    "POLICY_DENIED",
+                    "money consumption must not go backwards",
+                    details={"currency": currency, "reported": amount},
+                )
+            merged["money"] = {"amount": amount, "currency": currency}
+        before_consumed = copy.deepcopy(record.consumed)
+        try:
+            record.consumed = merged
+            self._persist()
+        except BaseException:
+            record.consumed = before_consumed
+            raise
+        return {
+            "task_id": task_id,
+            "status": record.status,
+            "consumed": copy.deepcopy(merged),
+            "remaining": remaining_budget(record.budget, merged),
+        }
+
     def reconcile_effect(self, intent_ref: str, *, outcome: str) -> dict:
         """Write a reconciliation result back to an `unknown` effect (§8.11)."""
 

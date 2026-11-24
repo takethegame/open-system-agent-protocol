@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope
+from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope, task
 from osap.clock import Deadline
 from osap.clock import parse_timestamp
 
@@ -138,6 +138,67 @@ class ClockTests(unittest.TestCase):
 
     def test_timestamp_requires_timezone_aware_input(self):
         self.assertEqual(parse_timestamp("2026-11-10T10:14:45Z").utcoffset().total_seconds(), 0)
+
+
+class StatusRoutingTests(unittest.TestCase):
+    """A `status` message updates the progress board one-way (§8.6)."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "tasks.json"
+        self.store = JsonStore(self.path)
+        self.board = task.TaskBoard(store=self.store)
+        record = self.board.add(task.Task.from_document(load("task.json")))
+        self.board.transition(record, "accepted")
+        self.board.transition(record, "running")
+        self.bus = Bus(progress_board=self.board)
+        self.bus.handshake({"osap": "0.1"})
+        self.record = record
+
+    def status(self) -> dict:
+        return {
+            "osap": "0.1",
+            "id": "msg_status_1",
+            "type": "status",
+            "trace_id": "trace_status_01",
+            "session_id": "session_01J9Z6Q3V8N2K4M7P1R5T0WX09",
+            "from": self.record.assignee,
+            "to": {"agent": self.record.owner},
+            "task": {"id": self.record.task_id, "mode": "supervisor"},
+            "body": {"schema": "osap.status/v1", "data": {"consumed": {"tool_calls": 1}}},
+            "ts": "2026-11-10T10:14:45Z",
+        }
+
+    def test_status_updates_the_board_and_returns_nothing(self):
+        self.assertIsNone(self.bus.receive(self.status()))
+        self.assertEqual(self.board.require(self.record.task_id).consumed["tool_calls"], 1)
+
+    def test_status_without_a_board_is_not_routed(self):
+        bare = Bus()
+        bare.handshake({"osap": "0.1"})
+        with self.assertRaises(NotImplementedError):
+            bare.receive(self.status())
+
+    def test_a_non_assignee_status_is_denied(self):
+        message = self.status()
+        message["from"] = "agent://com.example.other/agent#1"
+        with self.assertRaises(OsapError) as caught:
+            self.bus.receive(message)
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+
+    def test_consumption_must_be_monotonic(self):
+        self.bus.receive(self.status())
+        message = self.status()
+        message["id"] = "msg_status_2"
+        message["body"]["data"]["consumed"] = {"tool_calls": 0}
+        with self.assertRaises(OsapError):
+            self.bus.receive(message)
+
+    def test_progress_survives_a_restart(self):
+        self.bus.receive(self.status())
+        reopened_board = task.TaskBoard(store=JsonStore(self.path))
+        self.assertEqual(reopened_board.require(self.record.task_id).consumed["tool_calls"], 1)
 
 
 if __name__ == "__main__":

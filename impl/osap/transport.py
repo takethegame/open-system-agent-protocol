@@ -334,7 +334,11 @@ class UnixSession:
     # --- Bus integration --------------------------------------------------
 
     def serve(self) -> dict:
-        """Receive one message, dispatch it, and send the reply or error."""
+        """Receive one message, dispatch it, and send the reply or error.
+
+        One-way messages (`status`) produce no reply frame; the method
+        returns an empty dict for them.
+        """
 
         request = None
         try:
@@ -342,8 +346,9 @@ class UnixSession:
             reply = self.bus.receive(request)
         except OsapError as error:
             reply = self.bus.error_envelope(request or {}, error)
-        self.send(reply)
-        return reply
+        if reply is not None:
+            self.send(reply)
+        return reply if reply is not None else {}
 
     def call(self, message: dict) -> dict:
         """Send one message and return the next reply."""
@@ -468,6 +473,9 @@ class _AsyncioStreamProtocol(asyncio.Protocol):
             if not isinstance(message, dict):
                 raise OsapError("SCHEMA_INVALID", "transport payload must be an object")
             reply = self.session.bus.receive(message)
+            if reply is None:
+                # One-way message (`status`): handled, no reply frame.
+                return True
         except OsapError as error:
             self._send(self.session.bus.error_envelope(message or {}, error))
             return True

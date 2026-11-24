@@ -48,6 +48,7 @@
 | 预算 | §8.6 | 逐维比较；运行期超支报 `TASK_BUDGET_EXCEEDED` |
 | 取消 | §8.7 | 沿任务树向下传播，`detached` 子任务继续运行 |
 | 结果 | §8.8 | 只接受 assignee 的 `result`，`body.schema` 必须等于 `result_schema` |
+| 进度上报 | §7.2、§8.6 | `status` 单向消息（无回复帧）：`Bus(progress_board=...)` 按 `task.id` 交给 `TaskBoard.report_progress`——`consumed` 四维合账且单调递减、仅 assignee 可报、终态拒绝；返回剩余预算；无 progress_board 时报 `NotImplementedError` |
 | 所有权转移 | §8.9 | `handoff` 一次性转移、拒绝即不变、L3/L4 需新回执 |
 | 句柄解析 | §9.2 | `resolve` 授权、`audience`/`allowed_agents`、每次解析写 `context.resolve` 审计 |
 | 句柄 TTL | §9.3 | `expires_at` 或 `created_at + ttl`；过期即拒绝，不自动续期 |
@@ -87,7 +88,7 @@ impl/
   adapter.py            一致性适配器（tools/conformance_run.py --impl 的入口）
   osap/
     __init__.py         公共导出
-    bus.py              握手、校验、路由、幂等、错误回执
+    bus.py              握手、校验、路由、幂等、错误回执、status 单向进度路由
     audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留归档与压缩、按用户分区与导出、脱敏导出、回放、恢复
     capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销、撤销日志/副本应用与轮询订阅
     clock.py            单调时钟 deadline
@@ -107,7 +108,7 @@ impl/
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
-    task.py             §8 任务树、预算、取消、结果、handoff、整树持久化、恢复同事务审计与 effect 归档
+    task.py             §8 任务树、预算、取消、结果、handoff、进度上报、整树持久化、恢复同事务审计与 effect 归档
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、三种并发模式、撤销推送通道
   tests/                单元测试（unittest）
 ```
