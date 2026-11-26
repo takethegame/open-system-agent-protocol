@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope, registry, task
+from osap.streams import StreamRegistry
 from osap.clock import Deadline
 from osap.clock import parse_timestamp
 
@@ -270,6 +271,51 @@ class DescribeRoutingTests(unittest.TestCase):
 
     def test_refs_without_an_authorizer_pass_silently(self):
         self.assertEqual(self.bus.receive(self.message(with_refs=True))["type"], "result")
+
+
+    def test_stream_messages_route_through_the_registry(self):
+        bus = Bus(streams=StreamRegistry(), clock=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc))
+        bus.handshake({"osap": "0.1"})
+
+        def envelope(message_id, kind, data):
+            return {
+                "osap": "0.1",
+                "id": message_id,
+                "type": kind,
+                "trace_id": "trace_stream_01",
+                "from": "agent://com.example.calendar/agent#9c",
+                "to": {"agent": "agent://com.example.orchestrator/main#1a2b"},
+                "body": {"schema": "osap.stream/v1", "data": data},
+                "ts": "2026-11-10T10:14:45Z",
+            }
+
+        self.assertIsNone(
+            bus.receive(envelope("s1", "stream.open", {"stream_id": "stream_w", "schema": "osap.report/v1", "total_estimate": 2}))
+        )
+        self.assertIsNone(
+            bus.receive(envelope("s2", "stream.chunk", {"stream_id": "stream_w", "seq": 1, "data": {"part": 1}}))
+        )
+        self.assertIsNone(
+            bus.receive(envelope("s3", "stream.close", {"stream_id": "stream_w", "status": "complete"}))
+        )
+        view = bus.streams.view("stream_w")
+        self.assertEqual(view["status"], "complete")
+        self.assertEqual([chunk["seq"] for chunk in view["chunks"]], [1])
+
+    def test_stream_messages_without_a_registry_are_not_routed(self):
+        bare = Bus()
+        bare.handshake({"osap": "0.1"})
+        message = {
+            "osap": "0.1",
+            "id": "s1",
+            "type": "stream.open",
+            "from": "agent://com.example.calendar/agent#9c",
+            "to": {"agent": "agent://com.example.orchestrator/main#1a2b"},
+            "body": {"schema": "osap.stream/v1", "data": {"stream_id": "stream_x"}},
+            "ts": "2026-11-10T10:14:45Z",
+        }
+        with self.assertRaises(NotImplementedError):
+            bare.receive(message)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ Covered so far:
 
 from . import (
     audit,
+    streams,
     capability,
     consent,
     consent_flow,
@@ -70,6 +71,7 @@ from .keystore import (
 )
 from .pcs import ConsentSigner, KeyRegistry
 from .store import JsonStore
+from .streams import StreamRegistry
 
 __all__ = [
     "Admission",
@@ -94,6 +96,7 @@ __all__ = [
     "OsapError",
     "Quota",
     "STANDARD_CODES",
+    "StreamRegistry",
     "SUPPORTED_MAJOR",
     "audit",
     "capability",
@@ -111,6 +114,7 @@ __all__ = [
     "schema",
     "sender_identity",
     "store",
+    "streams",
     "task",
     "transport",
     "validate",

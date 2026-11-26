@@ -142,7 +142,7 @@ python3 tools/benchmark_revocation.py  # 撤销传播 P95（本地基准，不�
 4. **撤销分发需显式接线**：日志/拉订阅/推送通道已实现，但签发方必须显式 `notify()`,跨设备传播不在 0.1。
 5. **C2-05、C4-01、C6-08、C7-01 仍是 manual**:跨 App 同意 UI、原生注册表 TTL、跨进程恢复的真实集成未自动化。
 6. **两份 IETF draft 已提交（2026-11-21）**：`draft-zeng-osap-capability-tokens-00` 与 `draft-zeng-osap-consent-receipts-00` 在 [Datatracker](https://datatracker.ietf.org/drafts/current/) 公开（2027-05-25 过期）；剩余动作是两封 WG 联络 信（agentproto / OAuth，已署名待发），归属以 chairs 回复为准。
-7. **四个规范机制中两个仍未实现（列入 0.2）**：§7.5 `stream.*` 流式传输与 §7.4 事件订阅在 0.1 参考实现中零路径（2026-11-24 审计发现，已列入 roadmap §4 冻结表）；§7.2 `describe` 与 §7.1 "`refs` 句柄由发送方有权传递" 的校验已于 2026-11-24 实现（`Registry.describe`、`ContextFabric.authorize_refs`）；缓解：接收方用句柄时仍过 CF 授权解析。
+7. **四个规范机制中三个已实现,事件订阅仍缺（列入 0.2）**：§7.2 `describe`、§7.1 "`refs` 句柄由发送方有权传递" 校验与 §7.5 `stream.*` 流式传输已于 2026-11-24 实现（`Registry.describe`、`ContextFabric.authorize_refs`、`StreamRegistry`,见 roadmap §4);§7.4 事件订阅仍零路径。缓解：接收方用句柄时仍过 CF 授权解析;`obj://` 归属模型未建。
 
 ---
 

@@ -73,6 +73,7 @@ class Bus:
         describe_service=None,
         refs_authorizer=None,
         clock=None,
+        streams=None,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -97,6 +98,8 @@ class Bus:
             raise ValueError("refs_authorizer must be callable")
         if clock is not None and not callable(clock):
             raise ValueError("clock must be callable")
+        if streams is not None and not callable(getattr(streams, "chunk", None)):
+            raise ValueError("streams must expose chunk()")
         self.binding = binding
         self.version = version
         self.state = AWAITING_HELLO
@@ -106,6 +109,7 @@ class Bus:
         self.progress_board = progress_board
         self.describe_service = describe_service
         self.refs_authorizer = refs_authorizer
+        self.streams = streams
         self._clock = clock
         self.side_effects = 0
         self.replays = 0
@@ -236,6 +240,30 @@ class Bus:
                 consumed=data.get("consumed") or {},
                 sender=message.get("from"),
             )
+            return None
+        if kind in ("stream.open", "stream.chunk", "stream.close"):
+            if self.streams is None:
+                raise NotImplementedError(
+                    f"bus does not route {kind!r} without a stream registry"
+                )
+            data = (message.get("body") or {}).get("data") or {}
+            stream_id = data.get("stream_id")
+            if kind == "stream.open":
+                self.streams.open(
+                    stream_id,
+                    schema=data.get("schema"),
+                    total_estimate=data.get("total_estimate"),
+                )
+            elif kind == "stream.chunk":
+                self.streams.chunk(
+                    stream_id,
+                    seq=data.get("seq"),
+                    data=data.get("data"),
+                    ref=data.get("ref"),
+                )
+            else:
+                self.streams.close(stream_id, status=data.get("status"))
+            # One-way: the receiver builds the result from its stream view.
             return None
         if kind == "request":
             deadline = Deadline.from_envelope(message)
