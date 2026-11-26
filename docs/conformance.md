@@ -139,6 +139,7 @@ python3 tools/conformance_run.py --impl path/to/adapter.py --format md
 | C2-04 | 过期能力记录 | 不用于授权决策 |
 | C2-05 | 原生能力删除 | TTL 内失效 |
 | C2-06 | 联邦记录缺少 `provenance` | 拒绝索引 |
+| C2-07 | describe 按 agent 查询详情 | 返回完整记录（含 policy），restricted 不返回 |
 
 ### C3 — Authorization
 
@@ -172,6 +173,8 @@ python3 tools/conformance_run.py --impl path/to/adapter.py --format md
 | C4-09 | 副作用前崩溃（只有 intent） | 标记 unknown，不自动重放 |
 | C4-10 | handoff 后原 owner 仍发送该任务请求 | 拒绝 |
 | C4-11 | handoff 被拒绝，任务仍留在原 owner | 状态与预算不变 |
+| C4-12 | assignee 发送 status 进度 | `consumed` 合账并返回剩余预算 |
+| C4-13 | 流式结果乱序到达 | 按 `seq` 去重排序，缺口可检测 |
 
 ### C5 — Context
 
@@ -213,6 +216,7 @@ python3 tools/conformance_run.py --impl path/to/adapter.py --format md
 | C7-05 | 回放 | 不重复执行副作用 |
 | C7-06 | L3 副作用只有 intent 无 outcome | 标记 unknown + 告警 |
 | C7-07 | 被攻破的 Bus | 0.1 明确失败；P1 另行评估 |
+| C7-08 | 事件发布与订阅 | 订阅者收到匹配主题事件，至多一次 |
 
 ---
 

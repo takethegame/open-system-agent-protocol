@@ -128,7 +128,7 @@ All of these except the benchmark run in CI; dependencies are in `requirements.t
 - **Trust boundary**: the Bus Core is the minimal TCB; RFS/CA/PCS/CF/AL are independent services. The 0.1 Bus can read payloads, which is an explicit trust assumption; a P1 encrypted profile that does not trust the Bus is planned for 0.2.
 - **State semantics**: task trees, idempotency indexes, revocation lists, and audit chain heads must be persisted and support crash recovery. Bus state is not memory: long-term semantic memory is held by agents or a separate memory service and must be authorized separately (see [`docs/standard.md`](docs/standard.en.md) §3.7, §9.3).
 - **Implementation**: a Python reference implementation lives in `impl/` (M0–M4 complete, 790 unit tests, revocation p95 1.23 ms); `demo/` provides a three-agent demo including crash recovery (Section 7).
-- **Conformance**: C0–C7 levels and all 68 cases are executable; `conformance/registry.md` indexes verified reports — the reference implementation self-attests 64 pass / 4 manual skip.
+- **Conformance**: C0–C7 levels and all 72 cases are executable; `conformance/registry.md` indexes verified reports — the reference implementation self-attests 68 pass / 4 manual skip.
 - **Standards home**: undetermined; recommended to align as a local profile with IETF `agentproto`-related discussions, OAuth WIMSE, and the AAIF/LF ecosystem (whether a working group is formed is subject to the IETF's official position).
 - **License**: Apache-2.0 (uniform across specification, schemas, examples, and tools); contributions use DCO 1.1.
 

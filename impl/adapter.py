@@ -47,6 +47,8 @@ from osap import (  # noqa: E402
     task,
     transport,
 )
+from osap.streams import StreamRegistry  # noqa: E402
+from osap.events import EventBroker as events_module  # noqa: E402
 from osap.clock import parse_timestamp  # noqa: E402
 
 MILESTONES: dict[str, str] = {}
@@ -350,12 +352,45 @@ def _check_c1(case: dict, documents: dict) -> dict:
 def _check_c2(case: dict, documents: dict) -> dict:
     operation = case.get("operation")
     primary = documents.get("primary")
+    context = documents.get("context") or []
 
     if operation == "index":
         return _check_c2_index(primary)
     if operation == "discover":
         return _check_c2_discover(primary)
+    if operation == "describe":
+        return _check_c2_describe(context, (case.get("input") or {}).get("params") or {})
     return {"outcome": "skip", "reason": f"C2 operation {operation!r} has no automated check"}
+
+
+def _check_c2_describe(context: list, params: dict) -> dict:
+    registry_instance = _dev_registry()
+    for record in context:
+        registry_instance.index_record(record, now=parse_timestamp(record["freshness"]["observed_at"]))
+
+    # The restricted record is derived from the example fixture so it stays
+    # schema-valid: same body, different id, capability, and visibility.
+    restricted_id = params.get("restricted_id")
+    if restricted_id and context:
+        restricted = copy.deepcopy(context[0])
+        restricted["record_id"] = restricted_id
+        restricted["capability"]["cap"] = "cap://os/tasks/orchestrate"
+        restricted["policy"]["visibility"] = "restricted"
+        registry_instance.index_record(restricted, now=parse_timestamp(record["freshness"]["observed_at"]))
+
+    target = params["target"]
+    records = registry_instance.describe(target, now=parse_timestamp("2026-11-10T10:14:45Z"))
+    restricted_returned = any(
+        record["record_id"] == params.get("restricted_id") for record in records
+    )
+    return {
+        "outcome": "accept",
+        "state": {
+            "records": len(records),
+            "has_policy": all("policy" in record for record in records),
+            "restricted_returned": restricted_returned,
+        },
+    }
 
 
 def _check_c2_index(document: dict) -> dict:
@@ -495,7 +530,61 @@ def _check_c4(case: dict, documents: dict) -> dict:
         return _check_c4_restart(primary, params)
     if operation == "replay":
         return _check_c4_replay(primary, params)
+    if operation == "status":
+        return _check_c4_status(
+            (case.get("input") or {}).get("params", {}).get("status"),
+            (case.get("input") or {}).get("params") or {},
+            context,
+        )
+    if operation == "stream":
+        return _check_c4_stream((case.get("input") or {}).get("params") or {})
     return {"outcome": "skip", "reason": f"C4 operation {operation!r} has no automated check"}
+
+
+def _check_c4_status(message: dict, params: dict, context: list) -> dict:
+    envelope.validate(message)
+    board = _board_with(context)
+    data = (message.get("body") or {}).get("data") or {}
+    report = board.report_progress(
+        envelope.task_id(message),
+        consumed=data.get("consumed") or {},
+        sender=message.get("from"),
+    )
+    return {
+        "outcome": "accept",
+        "state": {
+            "consumed": {"tool_calls": report["consumed"].get("tool_calls", 0)},
+            "remaining_wall_ms": report["remaining"].get("wall_ms", 0),
+        },
+    }
+
+
+def _check_c4_stream(params: dict) -> dict:
+    streams = StreamRegistry()
+    opening = params["open"]
+    streams.open(
+        opening["stream_id"],
+        schema=opening.get("schema"),
+        total_estimate=opening.get("total_estimate"),
+    )
+    for chunk in params["chunks"]:
+        streams.chunk(
+            opening["stream_id"],
+            seq=chunk["seq"],
+            data=chunk.get("data"),
+            ref=chunk.get("ref"),
+        )
+    closing = params["close"]
+    streams.close(closing["stream_id"], status=closing["status"], summary=closing.get("summary"))
+    view = streams.view(closing["stream_id"])
+    return {
+        "outcome": "accept",
+        "state": {
+            "order": [chunk["seq"] for chunk in view["chunks"]],
+            "missing": view["missing"],
+            "received": view["received"],
+        },
+    }
 
 
 def _board_with(context: list) -> task.TaskBoard:
@@ -827,7 +916,26 @@ def _check_c7(case: dict, documents: dict) -> dict:
         return {"outcome": "accept", "state": audit.recover_effects(primary["events"])}
     if operation == "declare":
         return {"outcome": "observe", "state": _compromised_bus(params)}
+    if operation == "publish":
+        return _check_c7_publish((case.get("input") or {}).get("params") or {})
     return {"outcome": "skip", "reason": f"C7 operation {operation!r} has no automated check"}
+
+
+def _check_c7_publish(params: dict) -> dict:
+    broker = events_module()
+    for subscription in params["subscribers"]:
+        broker.subscribe(subscription["agent"], topics=subscription["topics"])
+    report = broker.publish(
+        params["topic"],
+        event=params["event"],
+        sender="agent://com.example.calendar/agent#9c",
+    )
+    # Re-publishing the same event id must not deliver again (§7.4).
+    redelivered = broker.publish(params["topic"], event=params["event"])["delivered"]
+    return {
+        "outcome": "accept",
+        "state": {"delivered": report["delivered"], "redelivered": len(redelivered)},
+    }
 
 
 def _check_c7_export(chain: dict, params: dict) -> dict:

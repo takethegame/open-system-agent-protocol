@@ -13,7 +13,7 @@
 | 里程碑 | 状态 | 进度 | 完成日期 |
 |---|---|---|---|
 | M0 仓库可信化 | ✅ 完成 | 7/7 | 2026-11-12 |
-| M1 可执行一致性 | ✅ 完成 | 68/68 用例（100%） | 2026-11-12 |
+| M1 可执行一致性 | ✅ 完成 | 72/72 用例（100%,含 0.2 扩展的 C2-07/C4-12/C4-13/C7-08） | 2026-11-12 |
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
 | M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
 | 持久化基础（M4 前置） | ✅ 完成 | 幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启；原子分节写入；387 tests | 2026-11-16 |
@@ -49,7 +49,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 25 个模块 + 适配器（9830 行）+ 848 个单元测试 |
+| 参考实现 | 25 个模块 + 适配器（9830 行）+ 848 个单元测试 + 72 条一致性用例（68 pass） |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（672 行，含崩溃恢复第 7 节）+ 演示说明 |
 | 中英平行文档 | 9 对 |
@@ -1724,7 +1724,7 @@ python3 demo/run_demo.py
 | 文件 | 作用 |
 |---|---|
 | `conformance/registry.md` | 登记表本体:目的与原则(可复现闸门、登记非认证、自证标注、报告卫生)、条目格式、登记流程(提交 → 复核 → 收录/除名)、登记表、边界 |
-| `conformance/reports/osap-reference-2026-11-20.json` | 参考实现的首条报告:68 用例,64 pass / 0 fail / 4 manual skip,已通过 `report.schema.json` 校验 |
+| `conformance/reports/osap-reference-2026-11-26.json` | 参考实现报告(0.2 套件扩展后重发):72 用例,68 pass / 0 fail / 4 manual skip,已通过 `report.schema.json` 校验;首条 2026-11-20 报告保留 |
 | `conformance/README.md` §8 | 目录结构新增 `registry.md` 与 `reports/`;登记流程入口 |
 | `docs/conformance.md` §6 / `.en.md` | 指向登记表与复核闸门(中英同步) |
 | `docs/roadmap.md` M5 | "建立一致性登记表"标记完成 |
@@ -1873,6 +1873,7 @@ python3 tools/check_docs.py
 | 2026-11-19 | **撤销订阅与跨进程测量**（`1b477f6`）：`RevocationWatcher` 轮询订阅自动应用；`benchmark_revocation.py --cross-process` 端到端传播测量；新增 4 条测试，累计 778 |
 | 2026-11-19 | **asyncio 绑定**（`c32fc97`）：`serve_forever(mode="asyncio")` 缓冲分帧，半帧停滞 peer 不阻塞他人；跨线程 kqueue fd 关闭挂死修复；新增 8 条测试，累计 782 |
 | 2026-11-19 | **撤销推送通道**（`c2b3f39`）：`RevocationFeedServer/Client` AF_UNIX sidecar（catch-up + 增量，非 Bus 流量）；`--cross-process --tree` 整树 cascade 测量；新增 8 条测试，累计 790 |
+| 2026-11-26 | **登记表重发**:0.2 套件扩展(新增 C2-07/C4-12/C4-13/C7-08)后报告重发为 `osap-reference-2026-11-26.json`(68/72 pass);`case.schema.json` 操作枚举新增 describe/status/stream/publish |
 | 2026-11-20 | **M5 一致性登记表**:新建 `conformance/registry.md`(可复现闸门、条目格式、登记流程)与 `conformance/reports/osap-reference-2026-11-20.json`;`docs/conformance.md` §6 与 roadmap M5 同步;参考实现自证登记(64 pass / 4 manual skip) |
 | 2026-11-20 | **IETF 提交前置材料包**：`drafts/submission/`（闸门检查单、§10.4 同意书模板、BCP 79 披露模板、agentproto/OAuth 联络 信草稿）；`check_drafts.py --submission` 机械闸门（占位作者强制，未入 CI） |
 | 2026-11-20 | **闸门 0/3/4 完成**：贡献者名单确认为署名者本人；两份 draft 的作者替换为 Zeng Zhiyong（ZZHY, Independent, 272577337@qq.com），文档名改名为 `draft-zeng-osap-*`；`--submission` 转绿并接入 CI `drafts` job；剩余闸门 1（同意邮件确认）、2（IPR 自查）、5（chairs 联络）为真人动作 |

@@ -65,7 +65,7 @@
 
 | 实现 | 版本/提交 | 联系 | 等级 | 声明三件套 | 报告 | 复现命令 | 日期 | 状态 |
 |---|---|---|---|---|---|---|---|---|
-| `osap-reference`(本仓库 `impl/`) | 0.1 Draft(commit `251be10`) | [repo issue](https://github.com/takethegame/open-system-agent-protocol/issues) | C0–C7 automated(64/68 pass,4 manual skip:C2-05、C4-01、C6-08、C7-01) | `bus_visibility=payload`、`state_recovery=durable`、`cf_mode=os_handles` | [`reports/osap-reference-2026-11-20.json`](reports/osap-reference-2026-11-20.json) | `python3 tools/conformance_run.py --impl impl/adapter.py`(仓库根目录,Python 3.11+) | 2026-11-20 | ✅ 已复核(`self-attested`,维护者自证) |
+| `osap-reference`(本仓库 `impl/`) | 0.1 Draft(commit `34d9534`/tag `v0.1.0`;0.2 第 1–3 批后重登记) | [repo issue](https://github.com/takethegame/open-system-agent-protocol/issues) | C0–C7 automated(68/72 pass,4 manual skip:C2-05、C4-01、C6-08、C7-01) | `bus_visibility=payload`、`state_recovery=durable`、`cf_mode=os_handles` | [`reports/osap-reference-2026-11-26.json`](reports/osap-reference-2026-11-26.json) | `python3 tools/conformance_run.py --impl impl/adapter.py`(仓库根目录,Python 3.11+) | 2026-11-26 | ✅ 已复核(`self-attested`,维护者自证) |
 
 **manual 用例说明**:参考实现的报告覆盖全部 64 条 automated 用例;C2-05(密钥 TTL 上限)、C4-01(跨 App 同意 UI)、C6-08(原生注册表 TTL)、C7-01(跨进程恢复)是 manual,不计入 pass/fail,登记时须如实列出。
 

@@ -5,7 +5,12 @@
   "description": "One machine-readable conformance case. The identifier space is owned by docs/conformance.md.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "level", "title", "expect"],
+  "required": [
+    "id",
+    "level",
+    "title",
+    "expect"
+  ],
   "properties": {
     "id": {
       "type": "string",
@@ -13,7 +18,16 @@
     },
     "level": {
       "type": "string",
-      "enum": ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7"]
+      "enum": [
+        "C0",
+        "C1",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "C7"
+      ]
     },
     "title": {
       "type": "string",
@@ -21,12 +35,18 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["automated", "manual"],
+      "enum": [
+        "automated",
+        "manual"
+      ],
       "default": "automated"
     },
     "preconditions": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "operation": {
       "type": "string",
@@ -50,49 +70,97 @@
         "declare",
         "restart",
         "replay",
-        "export"
+        "export",
+        "describe",
+        "status",
+        "stream",
+        "publish"
       ]
     },
-    "input": { "$ref": "#/$defs/input" },
+    "input": {
+      "$ref": "#/$defs/input"
+    },
     "steps": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
-    "expect": { "$ref": "#/$defs/expect" },
+    "expect": {
+      "$ref": "#/$defs/expect"
+    },
     "audit": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
-    "notes": { "type": "string" }
+    "notes": {
+      "type": "string"
+    }
   },
   "allOf": [
     {
       "if": {
-        "properties": { "mode": { "const": "manual" } },
-        "required": ["mode"]
+        "properties": {
+          "mode": {
+            "const": "manual"
+          }
+        },
+        "required": [
+          "mode"
+        ]
       },
-      "then": { "required": ["steps"] }
+      "then": {
+        "required": [
+          "steps"
+        ]
+      }
     },
     {
       "if": {
-        "properties": { "mode": { "const": "automated" } },
-        "required": ["mode"]
+        "properties": {
+          "mode": {
+            "const": "automated"
+          }
+        },
+        "required": [
+          "mode"
+        ]
       },
-      "then": { "required": ["input"] }
+      "then": {
+        "required": [
+          "input"
+        ]
+      }
     },
     {
       "if": {
         "properties": {
           "expect": {
-            "properties": { "outcome": { "const": "reject" } },
-            "required": ["outcome"]
+            "properties": {
+              "outcome": {
+                "const": "reject"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
           }
         },
-        "required": ["expect"]
+        "required": [
+          "expect"
+        ]
       },
       "then": {
         "properties": {
-          "expect": { "required": ["error"] }
+          "expect": {
+            "required": [
+              "error"
+            ]
+          }
         }
       }
     }
@@ -109,11 +177,16 @@
         "context": {
           "type": "array",
           "description": "Additional fixtures (envelope, receipt, task) resolved before running the case.",
-          "items": { "type": "string", "minLength": 1 }
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "mutations": {
           "type": "array",
-          "items": { "$ref": "#/$defs/mutation" }
+          "items": {
+            "$ref": "#/$defs/mutation"
+          }
         },
         "params": {
           "type": "object",
@@ -124,11 +197,20 @@
     "mutation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["op", "path"],
+      "required": [
+        "op",
+        "path"
+      ],
       "properties": {
         "op": {
           "type": "string",
-          "enum": ["add", "replace", "remove", "extend", "truncate"]
+          "enum": [
+            "add",
+            "replace",
+            "remove",
+            "extend",
+            "truncate"
+          ]
         },
         "path": {
           "type": "string",
@@ -140,11 +222,17 @@
     "expect": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["outcome"],
+      "required": [
+        "outcome"
+      ],
       "properties": {
         "outcome": {
           "type": "string",
-          "enum": ["accept", "reject", "observe"],
+          "enum": [
+            "accept",
+            "reject",
+            "observe"
+          ],
           "description": "accept: the operation succeeds; reject: it fails with error; observe: no automatic verdict, the report records the observation."
         },
         "error": {
@@ -155,7 +243,9 @@
           "type": "object",
           "description": "Expected state keys; only these keys are compared."
         },
-        "notes": { "type": "string" }
+        "notes": {
+          "type": "string"
+        }
       }
     }
   }
