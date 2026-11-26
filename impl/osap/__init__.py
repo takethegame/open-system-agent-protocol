@@ -37,6 +37,7 @@ Covered so far:
 from . import (
     audit,
     streams,
+    events,
     capability,
     consent,
     consent_flow,
@@ -58,6 +59,7 @@ from .bus import Bus, sender_identity
 from .clock import Deadline
 from .envelope import KNOWN_TYPES, SUPPORTED_MAJOR, validate
 from .errors import STANDARD_CODES, OsapError
+from .events import EventBroker
 from .flowcontrol import Admission, AdmissionController, DEFAULT_QUOTA, Quota
 from .framing import MAX_FRAME_BYTES, Binding
 from .idempotency import IdempotencyIndex
@@ -83,6 +85,7 @@ __all__ = [
     "ConsentSigner",
     "DEFAULT_QUOTA",
     "Deadline",
+    "EventBroker",
     "IdempotencyIndex",
     "JsonKeyStore",
     "JsonStore",
@@ -103,6 +106,7 @@ __all__ = [
     "consent",
     "consent_flow",
     "context",
+    "events",
     "crypto",
     "federation",
     "flowcontrol",

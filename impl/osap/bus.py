@@ -74,6 +74,7 @@ class Bus:
         refs_authorizer=None,
         clock=None,
         streams=None,
+        events=None,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -100,6 +101,8 @@ class Bus:
             raise ValueError("clock must be callable")
         if streams is not None and not callable(getattr(streams, "chunk", None)):
             raise ValueError("streams must expose chunk()")
+        if events is not None and not callable(getattr(events, "publish", None)):
+            raise ValueError("events must expose publish()")
         self.binding = binding
         self.version = version
         self.state = AWAITING_HELLO
@@ -110,6 +113,7 @@ class Bus:
         self.describe_service = describe_service
         self.refs_authorizer = refs_authorizer
         self.streams = streams
+        self.events = events
         self._clock = clock
         self.side_effects = 0
         self.replays = 0
@@ -264,6 +268,26 @@ class Bus:
             else:
                 self.streams.close(stream_id, status=data.get("status"))
             # One-way: the receiver builds the result from its stream view.
+            return None
+        if kind == "event":
+            if self.events is None:
+                raise NotImplementedError(
+                    f"bus does not route {kind!r} without an event broker"
+                )
+            data = (message.get("body") or {}).get("data") or {}
+            topic = data.get("topic") or ""
+            payload = data.get("payload")
+            self.events.publish(
+                topic,
+                event={
+                    "id": message.get("id"),
+                    "origin": message.get("origin") or data.get("origin"),
+                    "payload": payload,
+                    "refs": message.get("refs") or [],
+                },
+                sender=message.get("from"),
+            )
+            # One-way publication; delivery is at-most-once per subscriber.
             return None
         if kind == "request":
             deadline = Deadline.from_envelope(message)

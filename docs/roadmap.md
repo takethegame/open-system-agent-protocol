@@ -313,7 +313,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 | 厂商 SDK 适配器 | 开放问题 9 | 至少一个厂商表达兴趣 |
 | 多实例 Bus | 开放问题 14 | leader election 与审计分区设计 |
 | 流式传输（§7.5 `stream.*`） | ✅ 已实现（0.2 第 2 批,2026-11-24）: `impl/osap/streams.py` `StreamRegistry`——按 `seq` 去重(首达为准)、乱序排序、缺口列表;close 时 complete 保留分片(即结果)、cancelled/error 释放资源;`Bus(streams=...)` 单向路由三种 `stream.*` 消息 | 与 `cancel` 的自动联动(任务取消时由调用方 close);持久化(流是运行时状态,进程死即消失) |
-| 事件订阅（§7.4 `event`/`event://`） | 信封类型合法，实现零路径（审计发现） | `cap://os/events/subscribe` 能力语义、主题过滤、投递语义升级策略、用户查看/撤销订阅的授权 |
+| 事件订阅（§7.4 `event`/`event://`） | ✅ 已实现（0.2 第 3 批,2026-11-24）: `impl/osap/events.py` `EventBroker`——订阅需 `cap://os/events/subscribe`（注入 `authorize` 钩子,fail closed）、主题过滤（精确 + `/*` 通配）、**最多一次**投递（按事件 id 去重）、`origin` MUST、用户查看/撤销（幂等）;`Bus(events=...)` 单向路由 `event` 发布 | 跨进程 fan-out 与持久化（broker 是运行时状态）;投递保证升级策略 |
 | `describe` 详情查询（§7.2） | ✅ 已实现（0.2 第 1 项,2026-11-24）: `Registry.describe(agent/capability/record_id)` + `Bus(describe_service=..., clock=...)` 路由 `describe` 信封返回 `osap.describe/v1` 结果;可见性随 discover（仅 `discoverable`）、过期即排除 | `Registry.describe` 的调用方语义已定;WG 评审时把 `osap.describe/v1` 的字段写进 draft |
 | `refs` 发送方校验（§7.1 MUST） | ✅ 已实现（0.2 第 2 项,2026-11-24）: `ContextFabric.authorize_refs(agent, refs, now)` 复用 §9.2 检查序列并审计（未注册 `obj://` 报 `unmodeled` 放行）+ `Bus(refs_authorizer=...)` 对携带 `refs` 的信封 fail closed（`CONTEXT_DENIED`） | `obj://` 摘要的归属模型仍缺（limitation #25 保持）;多句柄批量授权的 UX 待定 |
 

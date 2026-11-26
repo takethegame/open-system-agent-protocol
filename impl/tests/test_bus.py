@@ -8,8 +8,10 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope, registry, task
+from osap import Bus, EventBroker, IdempotencyIndex, JsonStore, OsapError, capability, envelope, registry, task
 from osap.streams import StreamRegistry
+
+TOPIC = "event://app.com.example.calendar/event_changed"
 from osap.clock import Deadline
 from osap.clock import parse_timestamp
 
@@ -312,6 +314,49 @@ class DescribeRoutingTests(unittest.TestCase):
             "from": "agent://com.example.calendar/agent#9c",
             "to": {"agent": "agent://com.example.orchestrator/main#1a2b"},
             "body": {"schema": "osap.stream/v1", "data": {"stream_id": "stream_x"}},
+            "ts": "2026-11-10T10:14:45Z",
+        }
+        with self.assertRaises(NotImplementedError):
+            bare.receive(message)
+
+
+    def test_event_publishes_through_the_broker(self):
+        inbox_agent = "agent://com.example.notes/assistant#7f3a"
+        broker = EventBroker()
+        broker.subscribe(inbox_agent, topics=[TOPIC])
+        bus = Bus(events=broker, clock=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc))
+        bus.handshake({"osap": "0.1"})
+        message = {
+            "osap": "0.1",
+            "id": "evt_1",
+            "type": "event",
+            "trace_id": "trace_event_01",
+            "from": "agent://com.example.calendar/agent#9c",
+            "to": {"agent": inbox_agent},
+            "origin": {"kind": "agent", "trust": "verified"},
+            "body": {
+                "schema": "osap.event/v1",
+                "data": {"topic": TOPIC, "payload": {"changed": True}},
+            },
+            "ts": "2026-11-10T10:14:45Z",
+        }
+        self.assertIsNone(bus.receive(message))
+        inbox = broker.inbox(inbox_agent)
+        self.assertEqual(len(inbox), 1)
+        self.assertEqual(inbox[0]["topic"], TOPIC)
+        self.assertEqual(inbox[0]["origin"], {"kind": "agent", "trust": "verified"})
+
+    def test_event_without_a_broker_is_not_routed(self):
+        bare = Bus()
+        bare.handshake({"osap": "0.1"})
+        message = {
+            "osap": "0.1",
+            "id": "evt_2",
+            "type": "event",
+            "from": "agent://com.example.calendar/agent#9c",
+            "to": {"agent": "agent://com.example.notes/assistant#7f3a"},
+            "origin": {"kind": "agent", "trust": "verified"},
+            "body": {"schema": "osap.event/v1", "data": {"topic": TOPIC}},
             "ts": "2026-11-10T10:14:45Z",
         }
         with self.assertRaises(NotImplementedError):
