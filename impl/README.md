@@ -97,6 +97,7 @@ impl/
     context.py          §9 句柄、标签、黑板、对象、缓存、存储声明、解析事件与上下文对象持久化
     crypto.py           Ed25519 签名与规范化 JSON
     envelope.py         §7.1 校验（版本 → 类型 → schema）
+    events.py           §7.4 事件订阅、主题过滤、最多一次投递、用户查看/撤销
     errors.py           §7.7 错误码与 OsapError
     federation.py       §6.7、§6.8 原生描述符投影与命名空间映射
     flowcontrol.py      §7.11、§11.7 admission control、令牌桶与背压
@@ -107,6 +108,7 @@ impl/
     pcs.py              §4.5、§10.4 PCS 回执签名、离线验签、公钥登记/轮换/撤销
     registry.py         §6 清单、能力记录、发现
     schema.py           JSON Schema 加载与错误映射
+    streams.py          §7.5 流式传输的接收侧状态：seq 去重、排序、缺口列表
     store.py            原子分节 JSON 持久化（幂等、能力、同意流程、任务树、审计账本与顺序）
     task.py             §8 任务树、预算、取消、结果、handoff、进度上报、整树持久化、恢复同事务审计与 effect 归档
     transport.py        §7.9、§7.10 UDS stream、消息型 socketpair、对端认证、三种并发模式、撤销推送通道
