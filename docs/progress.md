@@ -49,7 +49,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 23 个模块 + 适配器（9118 行）+ 790 个单元测试 |
+| 参考实现 | 23 个模块 + 适配器（9233 行）+ 801 个单元测试 |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（672 行，含崩溃恢复第 7 节）+ 演示说明 |
 | 中英平行文档 | 9 对 |
@@ -104,6 +104,7 @@
 | `7274a27` | 2026-11-18 | **上下文事件持久化**：`ContextFabric(store=...)` 写 `context.events`；重开逐条校验；`limit` 保留最新 N 条；19 条新测试，累计 582 |
 | `1a8394d` | 2026-11-18 | **审计保留与归档**：`AuditLedger(max_events=...)` 移入 `audit.archive.<trace_id>`；live 首条锚定归档尾；`history()` 导出完整链；20 条新测试，累计 602 |
 | `c7e990c` | 2026-11-19 | **任务与副作用恢复**：`TaskBoard` 持久化 `task.effects`；`recover()` 失败非终态任务并标记 intent-only effect 为 unknown；重放闸门与对账；37 条新测试，累计 639 |
+| `126956e` | 2026-11-21 | **进度上报接线**：`TaskBoard.report_progress` 合账 consumed（单调、仅 assignee、终态拒绝）+ `Bus(progress_board=...)` 路由单向 status（无回复帧）；demo 第 4 节演示；11 条新测试，累计 801 |
 | `f98a6b3` | 2026-11-19 | **M4 本地打包**：两个 xml2rfc v3 individual draft、来源映射、`check_drafts.py`、Linux binding、14 条 ADR；CI 新增 `drafts` job |
 | `fca8fe4` | 2026-11-19 | M4 输出接入 README / roadmap / progress，记录 CI run 44462099197 |
 | `3d251a6` | 2026-11-19 | **上下文对象持久化**：`context.handles` / `context.blackboards` / `context.objects` 分节落盘；句柄按标识解析、黑板关闭清空、对象引用计数与墓碑跨重启；46 条新测试，累计 685 |
@@ -1880,6 +1881,8 @@ python3 tools/check_docs.py
 | 2026-11-20 | **闸门 1/2 辅助材料**：`consent-record.md`（四条声明待署名者确认）与 `ipr-landscape.md`（领域态势：agentproto 已获章程并有 PACE 等委派 draft；第三方专利家族梳理；Macaroons 等公开在先技术）；agentproto 联络信按已获批章程的现实重写 |
 | 2026-11-21 | **闸门 1、2、6 完成,两份 draft 提交 IETF**:署名者确认 §10.4 四条声明;IPR 三问自查无披露义务;作者署名与 `draft-zeng-*` 文档名就绪;两份 individual draft 上传 Datatracker——[capability tokens](https://datatracker.ietf.org/doc/draft-zeng-osap-capability-tokens-00/)、[consent receipts](https://datatracker.ietf.org/doc/draft-zeng-osap-consent-receipts-00/)（2027-05-25 过期）;剩余:两封 WG 联络 信（署名待发,可选项） |
 | 2026-11-21 | **v0.1.0 发布**:打 tag `v0.1.0`(M0–M4 + M5 登记表;两份 draft 已在 IETF Datatracker);CHANGELOG 转 `[0.1.0] - 2026-11-21`,README 版本行更新 |
+| 2026-11-24 | **第二次规范↔实现审计**：发现四个信封合法但零路径的机制——§7.2 `describe`、§7.5 `stream.*`、§7.4 事件订阅、§7.1 `refs` 发送方校验（MUST）——全部列入 roadmap §4 的 0.2 冻结表并写入两侧 README 限制清单；缓解：接收方句柄解析仍过 CF 授权。修复后的 `status` 进度路径经复核无同类缺口 |
 | 2026-11-20 | **闸门 1 完成**:署名者确认 §10.4 四条声明(BCP 78 授权、Simplified BSD、IETF Trust 处分、IPR 义务知悉);记录于 `drafts/submission/consent-record.md`,DCO 签名提交固化 |
 | 2026-11-20 | **闸门 2 完成**:IPR 三问自查——个人无相关专利/申请、雇主组合与本领域无关、无已知未授权使用;**无披露义务**,结论与检索记录见 `drafts/submission/ipr-landscape.md` §1/§3 |
 | 2026-11-21 | **闸门 6 就绪**:两份 draft `<date>` 更新为实际上传日 2026-11-21;`--submission --compile` 38 checks 与全量复核通过,待署名者在 Datatracker 上传 |
+| 2026-11-21 | **进度上报接线**(`126956e`):`TaskBoard.report_progress` 合账 `consumed`(单调、仅 assignee、终态拒绝)+ `Bus(progress_board=...)` 路由单向 `status`(无回复帧);demo 第 4 节演示;11 条新测试,累计 801 |

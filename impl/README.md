@@ -79,7 +79,7 @@
 | 跨用户 | §11.2 | 默认拒绝；显式开启且双方同意才放行 |
 | 被攻破的 Bus | §3.6、§11.1 | 0.1 不声称 P0 防护；声明了即判不合约 |
 
-**不在本阶段**：跨进程撤销的推送通道（拉模式日志与轮询订阅已实现）、Windows named pipe / Android Binder / macOS XPC 平台绑定，以及 localhost mTLS。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
+**不在本阶段**：跨进程撤销的推送通道（拉模式日志与轮询订阅已实现）、Windows named pipe / Android Binder / macOS XPC 平台绑定、localhost mTLS，以及 **2026-11-24 审计登记的四个规范机制**——§7.2 `describe` 详情查询、§7.5 `stream.*` 流式传输、§7.4 `event`/`event://` 事件订阅、§7.1 `refs` 发送方有权传递校验（信封类型均合法但实现零路径，已列入 roadmap §4 的 0.2 冻结表）。未实现的传输类型会抛 `NotImplementedError`，一致性运行器据此记为 `skip`。
 
 ## 2. 目录
 
@@ -452,6 +452,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_archive` 压缩归档后，被丢弃的最旧事件不再参与重复 `audit_id` 检查，也不再能从创世验证。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随保留的归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 24. **密钥环绑定仍是 CLI 包装**：Windows 路径经 PowerShell 的 `PasswordVault`（需 Windows PowerShell 5.1 的 WinRT 投影），未在真实 Windows 上端到端验证；macOS 路径仍把密钥放在 `security` 的命令行参数里。`migrate_key_store` 与 `tools/migrate_pcs_key.py` 覆盖单条记录迁移，但没有跨密钥环条目/多账号迁移，也不会自动在迁移后重建 `ConsentFlow`。
+25. **四个规范机制零路径（2026-11-24 审计）**：`describe`、`stream.open/chunk/close`、`event`/`event://` 订阅在 `KNOWN_TYPES` 里合法通过信封校验，但全仓库无实现路径（Bus 抛 `NotImplementedError`、适配器跳过、无单测）；§7.1 "`refs` 句柄 MUST 由发送方有权传递" 同样未实现。缓解：接收方用句柄时仍须过 CF 授权解析，边界不因缺失而消失；四项均已列入 roadmap §4 的 0.2 冻结表。
 
 ## 7. 与规范的偏差登记
 
