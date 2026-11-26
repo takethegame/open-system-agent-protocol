@@ -471,55 +471,145 @@ class ContextFabric:
         elif not isinstance(handle, dict):
             raise ValueError("handle must be a context handle object or identifier")
 
-        # Identity and OS checks come first so a caller that cannot use the
-        # handle learns nothing about its expiry state (§9.2).
-        audience = handle.get("audience")
-        if audience is not None and agent != audience:
-            self._deny(handle, agent, "audience")
-        allowed = (handle.get("constraints") or {}).get("allowed_agents")
-        if allowed and agent not in allowed:
-            self._deny(handle, agent, "agent_not_allowed")
-
-        # The OS permission is the outer boundary: a handle never widens it (§9.9).
-        if os_permission == "denied":
-            self._deny(handle, agent, "os_permission")
-
-        needed = required_action(handle)
-        if needed not in granted_actions:
-            self._deny(
-                handle,
-                agent,
-                "missing_grant",
-                required_action=needed,
-                granted_actions=list(granted_actions),
-            )
-
-        expires_at = expiry_of(handle)
-        if expires_at is not None and expires_at <= now:
-            self._event(handle, agent, "deny", "expired")
-            raise OsapError(
-                "CONTEXT_EXPIRED",
-                "context handle has expired and is not renewed automatically",
-                details={"handle": handle.get("handle"), "expires_at": handle.get("expires_at")},
-            )
-
-        label = handle.get("label")
-        if egress and label in EGRESS_GUARDED and not user_approval:
-            self._event(handle, agent, "deny", "egress_requires_approval")
-            raise OsapError(
-                "POLICY_CONSENT_REQUIRED",
-                f"{label} data may not leave the device without explicit approval",
-                details={"handle": handle.get("handle"), "label": label},
-            )
+        decision, failure = self._authorize(
+            handle,
+            agent=agent,
+            now=now,
+            os_permission=os_permission,
+            granted_actions=granted_actions,
+            egress=egress,
+            user_approval=user_approval,
+        )
+        if decision == "deny":
+            reason = failure["reason"]
+            if reason == "expired":
+                self._event(handle, agent, "deny", "expired")
+                raise OsapError(
+                    "CONTEXT_EXPIRED",
+                    "context handle has expired and is not renewed automatically",
+                    details={"handle": handle.get("handle"), "expires_at": handle.get("expires_at")},
+                )
+            if reason == "egress_requires_approval":
+                self._event(handle, agent, "deny", "egress_requires_approval")
+                raise OsapError(
+                    "POLICY_CONSENT_REQUIRED",
+                    f"{handle.get('label')} data may not leave the device without explicit approval",
+                    details={"handle": handle.get("handle"), "label": handle.get("label")},
+                )
+            self._deny(handle, agent, reason, **(failure.get("details") or {}))
 
         self._event(handle, agent, "allow", "resolved")
         return {
             "handle": handle.get("handle"),
             "scheme": handle.get("scheme"),
             "scope": handle.get("scope"),
-            "label": label,
+            "label": handle.get("label"),
             "expires_at": handle.get("expires_at"),
         }
+
+    def authorize_refs(
+        self,
+        *,
+        agent: str | None,
+        refs: list[str],
+        now,
+        os_permission: str = "granted",
+        granted_actions: list[str] | None = None,
+        user_approval: bool = False,
+    ) -> dict:
+        """Check §7.1 refs ownership: the sender must be able to pass each ref.
+
+        Registered handles go through exactly the §9.2 check sequence a
+        `resolve` would run (audience, `allowed_agents`, OS permission, the
+        `resolve` grant, expiry), each decision audited with the same reason
+        vocabulary. Unregistered refs — `obj://` digests and other opaque
+        handles — have no ownership model yet and are reported as
+        `unmodeled`; they pass, and the limitation is declared in
+        impl/README and the roadmap 0.2 freeze table.
+
+        Returns `{ref: {"decision": "allow"|"deny"|"unmodeled", "reason": …}}`.
+        The caller (typically the sending path in `Bus`) fails closed with
+        `CONTEXT_DENIED` on any `deny`.
+        """
+
+        actions = list(granted_actions) if granted_actions is not None else ["resolve"]
+        verdicts: dict[str, dict] = {}
+        for ref in refs:
+            if not isinstance(ref, str) or not ref:
+                raise ValueError("each ref must be a non-empty string")
+            record = self._handles.get(ref)
+            if record is None:
+                verdicts[ref] = {"decision": "unmodeled", "reason": "not_registered"}
+                continue
+            decision, failure = self._authorize(
+                record,
+                agent=agent,
+                now=now,
+                os_permission=os_permission,
+                granted_actions=actions,
+                egress=False,
+                user_approval=user_approval,
+            )
+            if decision == "deny":
+                reason = failure["reason"]
+                self._event(record, agent, "deny", reason)
+                verdicts[ref] = {"decision": "deny", "reason": reason}
+            else:
+                self._event(record, agent, "allow", "refs_check")
+                verdicts[ref] = {"decision": "allow", "reason": "refs_check"}
+        return verdicts
+
+    def _authorize(
+        self,
+        handle: dict,
+        *,
+        agent: str | None,
+        now,
+        os_permission: str,
+        granted_actions: list[str],
+        egress: bool,
+        user_approval: bool,
+    ) -> tuple[str, dict | None]:
+        """Run the §9.2 check sequence; return ("allow", None) or ("deny", failure).
+
+        Identity and OS checks come first so a caller that cannot use the
+        handle learns nothing about its expiry state (§9.2). The failure
+        carries the audit reason plus the details the caller needs to raise
+        the right error code (`expired` → `CONTEXT_EXPIRED`,
+        `egress_requires_approval` → `POLICY_CONSENT_REQUIRED`, everything
+        else → `CONTEXT_DENIED` via `_deny`).
+        """
+
+        audience = handle.get("audience")
+        if audience is not None and agent != audience:
+            return "deny", {"reason": "audience"}
+        allowed = (handle.get("constraints") or {}).get("allowed_agents")
+        if allowed and agent not in allowed:
+            return "deny", {"reason": "agent_not_allowed"}
+
+        # The OS permission is the outer boundary: a handle never widens it (§9.9).
+        if os_permission == "denied":
+            return "deny", {"reason": "os_permission"}
+
+        needed = required_action(handle)
+        if needed not in granted_actions:
+            return "deny", {
+                "reason": "missing_grant",
+                "details": {
+                    "required_action": needed,
+                    "granted_actions": list(granted_actions),
+                },
+            }
+
+        expires_at = expiry_of(handle)
+        if expires_at is not None and expires_at <= now:
+            return "deny", {"reason": "expired"}
+
+        label = handle.get("label")
+        if egress and label in EGRESS_GUARDED and not user_approval:
+            return "deny", {"reason": "egress_requires_approval"}
+
+        return "allow", None
 
     # --- handle registry --------------------------------------------------
 

@@ -5,13 +5,18 @@
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope, task
+from osap import Bus, IdempotencyIndex, JsonStore, OsapError, capability, envelope, registry, task
 from osap.clock import Deadline
 from osap.clock import parse_timestamp
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+
+
+def record_agent() -> str:
+    return "agent://com.example.calendar/agent#9c"
 
 
 def load(name: str) -> dict:
@@ -199,6 +204,72 @@ class StatusRoutingTests(unittest.TestCase):
         self.bus.receive(self.status())
         reopened_board = task.TaskBoard(store=JsonStore(self.path))
         self.assertEqual(reopened_board.require(self.record.task_id).consumed["tool_calls"], 1)
+
+
+class DescribeRoutingTests(unittest.TestCase):
+    """A `describe` message resolves details through the registry (§7.2)."""
+
+    def setUp(self):
+        self.registry = registry.Registry()
+        record = json.loads((EXAMPLES / "capability-record.json").read_text())
+        self.registry.index_record(record, now=datetime(2026, 11, 10, tzinfo=timezone.utc))
+        self.bus = Bus(describe_service=self.registry, clock=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc))
+        self.bus.handshake({"osap": "0.1"})
+
+    def message(self, target=None, *, with_refs=False):
+        message = {
+            "osap": "0.1",
+            "id": "msg_describe_1",
+            "type": "describe",
+            "trace_id": "trace_describe_01",
+            "from": "agent://com.example.orchestrator/main#1a2b",
+            "to": {"agent": "agent://system/registry#0"},
+            "body": {
+                "schema": "osap.describe/v1",
+                "data": target or {"agent": record_agent()},
+            },
+            "ts": "2026-11-10T10:14:45Z",
+        }
+        if with_refs:
+            message["refs"] = ["obj://sha256:9f2c7b1a"]
+        return message
+
+    def test_describe_returns_the_record(self):
+        reply = self.bus.receive(self.message())
+        self.assertEqual(reply["type"], "result")
+        self.assertEqual(reply["body"]["schema"], "osap.describe/v1")
+        self.assertEqual(reply["body"]["data"]["records"][0]["agent"], record_agent())
+
+    def test_an_unknown_target_is_not_found(self):
+        with self.assertRaises(OsapError) as caught:
+            self.bus.receive(self.message({"agent": "agent://com.example.other/agent#1"}))
+        self.assertEqual(caught.exception.code, "ROUTING_NOT_FOUND")
+
+    def test_describe_without_a_service_is_not_routed(self):
+        bare = Bus(clock=lambda: datetime(2026, 11, 10, tzinfo=timezone.utc))
+        bare.handshake({"osap": "0.1"})
+        with self.assertRaises(NotImplementedError):
+            bare.receive(self.message())
+
+    def test_refs_pass_when_the_authorizer_allows(self):
+        registry_result = {
+            "obj://sha256:9f2c7b1a": {"decision": "allow", "reason": "refs_check"},
+        }
+        self.bus.refs_authorizer = lambda agent, refs: registry_result
+        reply = self.bus.receive(self.message(with_refs=True))
+        self.assertEqual(reply["type"], "result")
+
+    def test_a_denied_ref_fails_closed(self):
+        self.bus.refs_authorizer = lambda agent, refs: {
+            "obj://sha256:9f2c7b1a": {"decision": "deny", "reason": "audience"},
+        }
+        with self.assertRaises(OsapError) as caught:
+            self.bus.receive(self.message(with_refs=True))
+        self.assertEqual(caught.exception.code, "CONTEXT_DENIED")
+        self.assertEqual(caught.exception.details["refs"], ["obj://sha256:9f2c7b1a"])
+
+    def test_refs_without_an_authorizer_pass_silently(self):
+        self.assertEqual(self.bus.receive(self.message(with_refs=True))["type"], "result")
 
 
 if __name__ == "__main__":

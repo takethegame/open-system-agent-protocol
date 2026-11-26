@@ -70,6 +70,9 @@ class Bus:
         admission: AdmissionController | None = None,
         admission_wait: float = 0.0,
         progress_board=None,
+        describe_service=None,
+        refs_authorizer=None,
+        clock=None,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -86,6 +89,14 @@ class Bus:
             getattr(progress_board, "report_progress", None)
         ):
             raise ValueError("progress_board must expose report_progress()")
+        if describe_service is not None and not callable(
+            getattr(describe_service, "describe", None)
+        ):
+            raise ValueError("describe_service must expose describe()")
+        if refs_authorizer is not None and not callable(refs_authorizer):
+            raise ValueError("refs_authorizer must be callable")
+        if clock is not None and not callable(clock):
+            raise ValueError("clock must be callable")
         self.binding = binding
         self.version = version
         self.state = AWAITING_HELLO
@@ -93,6 +104,9 @@ class Bus:
         self.admission = admission or AdmissionController()
         self.admission_wait = admission_wait
         self.progress_board = progress_board
+        self.describe_service = describe_service
+        self.refs_authorizer = refs_authorizer
+        self._clock = clock
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []
@@ -170,6 +184,47 @@ class Bus:
         """Route a validated message; None for one-way types like `status`."""
 
         kind = message["type"]
+
+        # §7.1: the sender must be allowed to pass every handle in refs. The
+        # check is wired through an authorizer because handle ownership lives
+        # in the Context Fabric, not the Bus core.
+        refs = message.get("refs") or []
+        if refs and self.refs_authorizer is not None:
+            verdicts = self.refs_authorizer(
+                agent=message.get("from"), refs=refs
+            )
+            denied = sorted(
+                ref for ref, verdict in verdicts.items()
+                if verdict.get("decision") == "deny"
+            )
+            if denied:
+                raise OsapError(
+                    "CONTEXT_DENIED",
+                    "a ref is not passable by the sender",
+                    details={"refs": denied},
+                )
+
+        if kind == "describe":
+            if self.describe_service is None:
+                raise NotImplementedError(
+                    f"bus does not route {kind!r} without a describe service"
+                )
+            target = (message.get("body") or {}).get("data") or {}
+            records = self.describe_service.describe(
+                target, now=self._clock() if self._clock else None
+            )
+            if not records:
+                raise OsapError(
+                    "ROUTING_NOT_FOUND",
+                    "describe found no matching record",
+                    details={"target": target},
+                )
+            return {
+                "type": "result",
+                "id": message["id"],
+                "causation_id": message["id"],
+                "body": {"schema": "osap.describe/v1", "data": {"records": records}},
+            }
         if kind == "status":
             if self.progress_board is None:
                 raise NotImplementedError(

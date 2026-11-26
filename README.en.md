@@ -142,7 +142,7 @@ The full 22-item list lives in [`impl/README.md`](impl/README.md) Section 6; the
 4. **Revocation distribution must be wired explicitly**: journal, pull subscription, and push channel exist, but the issuer must call `notify()`; cross-device propagation is out of 0.1.
 5. **C2-05, C4-01, C6-08, C7-01 remain manual**: real cross-App consent UI, native registry TTL, and cross-process recovery are not automated.
 6. **Both IETF drafts are submitted (2026-11-21)**: `draft-zeng-osap-capability-tokens-00` and `draft-zeng-osap-consent-receipts-00` are public on [Datatracker](https://datatracker.ietf.org/drafts/current/) (expiring 2027-05-25); the remaining action is the two WG liaison emails (agentproto / OAuth, signed and ready to send), with the home to be decided by the chairs' response.
-7. **Four specification mechanisms are unimplemented (deferred to 0.2)**: §7.2 `describe`, §7.5 `stream.*`, §7.4 event subscriptions, and the §7.1 check that a sender may pass every handle in `refs` have zero implementation paths in the 0.1 reference implementation (2026-11-24 audit, recorded in the roadmap §4 freeze table); mitigation: resolving a handle still goes through CF authorization on the receiving side.
+7. **Two of the four specification mechanisms remain unimplemented (deferred to 0.2)**: §7.5 `stream.*` and §7.4 event subscriptions have zero implementation paths in the 0.1 reference implementation (2026-11-24 audit, recorded in the roadmap §4 freeze table); §7.2 `describe` and the §7.1 sender-side `refs` check were implemented on 2026-11-24 (`Registry.describe`, `ContextFabric.authorize_refs`); mitigation: resolving a handle still goes through CF authorization on the receiving side.
 
 ---
 

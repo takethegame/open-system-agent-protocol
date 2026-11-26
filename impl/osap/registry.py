@@ -16,6 +16,8 @@ scope until a bridge milestone.
 
 from __future__ import annotations
 
+import copy
+
 from datetime import datetime, timedelta, timezone
 
 from . import crypto, identity, schema
@@ -29,6 +31,9 @@ RECORD_SCHEMA = "capability-record.schema.json"
 PRIVATE_CANDIDATE_KEYS = frozenset({"data", "body", "content"})
 
 RISK_ORDER = {f"L{level}": level for level in range(5)}
+
+#: Selectors a `describe` query may use (§7.2).
+DESCRIBE_KEYS = ("agent", "capability", "record_id")
 
 
 def _now() -> datetime:
@@ -136,6 +141,48 @@ class Registry:
 
     def records(self) -> list[dict]:
         return list(self._records.values())
+
+    def describe(self, target: dict | str, *, now: datetime | None = None) -> list[dict]:
+        """Return full fresh records for one agent, capability, or id (§7.2).
+
+        `describe` is the idempotent detail lookup behind a `describe`
+        message: `discover` answers "who can do X", `describe` answers
+        "what exactly does this thing offer". The selector is one of
+        `{"agent": uri}`, `{"capability": cap://uri}`, or
+        `{"record_id": id}`; a bare string is shorthand for `agent`.
+
+        Visibility follows the discovery rule: only `discoverable` records
+        are returned, and stale records are excluded. The returned records
+        are detached copies; an empty result means the caller reports
+        `ROUTING_NOT_FOUND`.
+        """
+
+        if isinstance(target, str):
+            target = {"agent": target}
+        if not isinstance(target, dict) or len(target) != 1 or not target:
+            raise ValueError(
+                "describe target must be exactly one of agent/capability/record_id"
+            )
+        key, value = next(iter(target.items()))
+        if key not in DESCRIBE_KEYS or not isinstance(value, str) or not value:
+            raise ValueError(
+                f"describe target key must be one of {DESCRIBE_KEYS} with a non-empty string"
+            )
+
+        matches = []
+        for record in self._records.values():
+            if not self._fresh(record, now):
+                continue
+            if record["policy"]["visibility"] != "discoverable":
+                continue
+            if key == "agent" and record["agent"] == value:
+                matches.append(copy.deepcopy(record))
+            elif key == "capability" and record["capability"]["cap"] == value:
+                matches.append(copy.deepcopy(record))
+            elif key == "record_id" and record["record_id"] == value:
+                matches.append(copy.deepcopy(record))
+        matches.sort(key=lambda item: item["record_id"])
+        return matches
 
     # --- discovery ---------------------------------------------------------
 

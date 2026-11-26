@@ -995,5 +995,56 @@ class ObjectMetadataTests(DurableFabricTests):
         self.assertFalse(self.path.exists())
 
 
+class AuthorizeRefsTests(unittest.TestCase):
+    """§7.1: the sender must be able to pass every handle in refs."""
+
+    def setUp(self):
+        self.fabric = context.ContextFabric()
+        self.handle_doc = handle()
+        self.fabric.register_handle(self.handle_doc)
+        self.sender = self.handle_doc["audience"]
+
+    def refs(self, fabric, refs, *, agent=None, **kwargs):
+        agent = agent or self.sender
+        kwargs.setdefault("now", now_of(handle()))
+        kwargs.setdefault("granted_actions", ["resolve"])
+        return fabric.authorize_refs(agent=agent, refs=refs, **kwargs)
+
+    def test_a_registered_handle_the_sender_holds_is_allowed(self):
+        verdicts = self.refs(self.fabric, [self.handle_doc["handle"]])
+        self.assertEqual(verdicts[self.handle_doc["handle"]]["decision"], "allow")
+        self.assertEqual(len(self.fabric.audit), 1)
+        self.assertEqual(self.fabric.audit[-1]["reason"], "refs_check")
+
+    def test_an_unregistered_ref_is_unmodeled_and_passes(self):
+        verdicts = self.refs(self.fabric, ["obj://sha256:9f2c7b1a"])
+        self.assertEqual(verdicts["obj://sha256:9f2c7b1a"]["decision"], "unmodeled")
+        self.assertEqual(self.fabric.audit, [])
+
+    def test_a_denied_handle_is_audited(self):
+        verdicts = self.refs(self.fabric, [self.handle_doc["handle"]], agent=NOTES)
+        self.assertEqual(verdicts[self.handle_doc["handle"]]["decision"], "deny")
+        self.assertEqual(verdicts[self.handle_doc["handle"]]["reason"], "audience")
+        self.assertEqual(self.fabric.audit[-1]["decision"], "deny")
+
+    def test_an_expired_handle_is_denied(self):
+        late = parse_timestamp("2026-11-10T11:00:00Z")
+        verdicts = self.refs(
+            self.fabric, [self.handle_doc["handle"]], now=late
+        )
+        self.assertEqual(verdicts[self.handle_doc["handle"]]["reason"], "expired")
+
+    def test_a_missing_grant_is_denied(self):
+        verdicts = self.refs(
+            self.fabric, [self.handle_doc["handle"]], granted_actions=[]
+        )
+        self.assertEqual(verdicts[self.handle_doc["handle"]]["reason"], "missing_grant")
+
+    def test_empty_and_invalid_refs(self):
+        self.assertEqual(self.refs(self.fabric, []), {})
+        with self.assertRaises(ValueError):
+            self.refs(self.fabric, [""])
+
+
 if __name__ == "__main__":
     unittest.main()

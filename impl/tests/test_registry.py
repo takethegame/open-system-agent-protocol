@@ -2,6 +2,7 @@
 # Copyright 2026 The OSAP Authors
 """Unit tests for the registry subset (standard.md §6.2, §6.6, §6.10)."""
 
+import copy
 import json
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,12 @@ from pathlib import Path
 from osap import OsapError, crypto, registry
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+
+NOW = datetime(2026, 11, 10, 10, 14, 45, tzinfo=timezone.utc)
+
+
+def load(name: str) -> dict:
+    return json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
 
 
 def record(**overrides) -> dict:
@@ -154,6 +161,74 @@ class DescriptorLookupTests(unittest.TestCase):
 
     def test_unknown_capability_has_no_risk(self):
         self.assertIsNone(registry.Registry().risk_of("cap://os/unknown"))
+
+
+class DescribeTests(unittest.TestCase):
+    """§7.2: describe is the idempotent detail lookup behind discover."""
+
+    def setUp(self):
+        self.registry = registry.Registry()
+        record = copy.deepcopy(load("capability-record.json"))
+        record["agent"] = "agent://com.example.calendar/agent#9c"
+        record["record_id"] = "rec_calendar"
+        self.registry.index_record(record, now=NOW)
+        second = copy.deepcopy(record)
+        second["record_id"] = "rec_calendar_tasks"
+        second["capability"]["cap"] = "cap://os/tasks/orchestrate"
+        second["policy"]["visibility"] = "restricted"
+        self.registry.index_record(second, now=NOW)
+        self.record_id = "rec_calendar"
+
+    def describe(self, target):
+        return self.registry.describe(target, now=NOW)
+
+    def test_describe_by_agent_returns_full_records(self):
+        records = self.describe({"agent": "agent://com.example.calendar/agent#9c"})
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["record_id"], self.record_id)
+        self.assertEqual(records[0]["capability"]["risk"], "L2")
+        self.assertIn("policy", records[0])
+
+    def test_describe_by_capability_uri(self):
+        records = self.describe({"capability": "cap://os/calendar/events"})
+        self.assertEqual([item["record_id"] for item in records], [self.record_id])
+
+    def test_describe_by_record_id(self):
+        records = self.describe({"record_id": self.record_id})
+        self.assertEqual(len(records), 1)
+
+    def test_describe_bare_string_is_an_agent_selector(self):
+        self.assertEqual(len(self.describe("agent://com.example.calendar/agent#9c")), 1)
+
+    def test_restricted_records_are_not_describable(self):
+        self.assertEqual(self.describe({"record_id": "rec_calendar_tasks"}), [])
+        self.assertEqual(
+            self.describe({"capability": "cap://os/tasks/orchestrate"}), []
+        )
+
+    def test_unknown_targets_return_empty(self):
+        self.assertEqual(self.describe({"agent": "agent://com.example.other/agent#1"}), [])
+        self.assertEqual(self.describe({"record_id": "rec_missing"}), [])
+
+    def test_stale_records_are_excluded(self):
+        stale = copy.deepcopy(load("capability-record.json"))
+        stale["agent"] = "agent://com.example.stale/agent#1"
+        stale["record_id"] = "rec_stale"
+        stale["freshness"]["expires_at"] = "2026-11-10T00:00:00Z"
+        self.registry.index_record(stale, now=NOW)
+        self.assertEqual(self.describe({"agent": "agent://com.example.stale/agent#1"}), [])
+
+    def test_invalid_selectors_are_rejected(self):
+        for target in ({}, {"record_id": ""}, {"agent": 7}, {"agent": "x", "extra": 1}, "not a dict" if False else None):
+            with self.assertRaises(ValueError):
+                self.describe(target)
+
+    def test_returns_detached_copies(self):
+        records = self.describe({"agent": "agent://com.example.calendar/agent#9c"})
+        records[0]["capability"]["risk"] = "L0"
+        self.assertEqual(
+            self.describe({"record_id": self.record_id})[0]["capability"]["risk"], "L2"
+        )
 
 
 if __name__ == "__main__":
