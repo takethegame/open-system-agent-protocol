@@ -306,7 +306,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 
 | 议题 | 现状 | 进入 0.2 的前置条件 |
 |---|---|---|
-| P1 Opaque Bus（HPKE） | 仅有方向描述 | 需要 wire format + 密钥发现 + 前向保密分析 |
+| P1 Opaque Bus（HPKE） | **设计提案已完成**：[`docs/p1-opaque-bus.md`](../docs/p1-opaque-bus.md)（wire format、密钥发现、FS 分析、开放问题）；实现未开始 | 设计文档经维护者 + 外部密码学评审;`opaque.py` 过 RFC 9180 官方向量;standard §3.6 升级为规范文字 |
 | 跨设备 / 跨组织信任根 | 非目标 | 与 A2A、WIMSE、SPIFFE 的对齐方案 |
 | 语义发现（embedding） | 开放问题 6 | 隐私影响评估 + 本地索引方案 |
 | 多用户共享会话 | 开放问题 4 | 主体切换与数据边界模型 |

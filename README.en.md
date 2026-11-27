@@ -64,6 +64,7 @@ For a more detailed positioning and prior work, see [`docs/prior-art.md`](docs/p
 |---|---|
 | [`docs/standard.en.md`](docs/standard.en.md) | **Normative draft**: architecture, identity, capabilities, federation, messages, tasks, context, consent, auditing, conformance |
 | [`docs/conformance.en.md`](docs/conformance.en.md) | Conformance levels, test cases, interoperability matrix, report format |
+| [`docs/p1-opaque-bus.md`](docs/p1-opaque-bus.md) | P1 Opaque Bus 0.2 design proposal (HPKE wire format, key discovery, forward-secrecy analysis; non-normative) |
 | [`docs/prior-art.en.md`](docs/prior-art.en.md) | Prior work, comparison matrix, possible novel points, and falsifiable claims |
 | [`docs/design-draft.en.md`](docs/design-draft.en.md) | Early design notes (non-normative; background and trade-offs retained) |
 | [`GOVERNANCE.en.md`](GOVERNANCE.en.md) | Versions, changes, roles, security disclosure, external standards liaison |

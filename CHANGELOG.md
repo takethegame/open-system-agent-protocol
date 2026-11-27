@@ -74,6 +74,7 @@ First tagged release: the 0.1 discussion draft (130 sections, submitted to the I
 - `tools/benchmark_revocation.py`: a local, CI-excluded revocation-propagation benchmark over a configurable tree; it measures from `revoke(root)` to every descendant reporting `is_revoked()` and enforces a p95 below 100 ms.
 - `tools/conformance_run.py`: loads and validates cases, applies JSON Pointer mutations, runs an implementation adapter, and emits text, JSON, or Markdown reports.
 - `docs/roadmap.md`: milestone plan from 0.1 to 0.2 (M0–M5, decision gates, risk register).
+- `docs/p1-opaque-bus.md`: the P1 Opaque Bus 0.2 design proposal (non-normative) — threat model, the plaintext/ciphertext field decision with AAD binding of the outer metadata, the HPKE wire format (`osap.opaque/v1`, DHKEM(X25519)+HKDF-SHA256+AES-128-GCM), key discovery via welcome and RFS with kid rotation (R=24h, grace 1h), an honest rotation-window forward-secrecy analysis (not a ratchet), an implementation sketch with RFC 9180 test vectors, and six open questions. The roadmap freeze table links it.
 - `SECURITY.md` / `SECURITY.en.md`: disclosure channel, timelines, security review triggers.
 - `.github/workflows/ci.yml`: schema meta-validation, example validation, and documentation checks on Python 3.11 and 3.12.
 - `tools/check_schemas.py`: validates every schema against the 2020-12 metaschema, enforces unique `urn:osap:schema:` `$id`s, and rejects unsupported `$ref` targets.

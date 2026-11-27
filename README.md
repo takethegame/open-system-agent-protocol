@@ -64,6 +64,7 @@ OSAP 的目标不是“再发明一个 Agent 协议”，而是定义 **本地�
 |---|---|
 | [`docs/standard.md`](docs/standard.md) | **规范性草案**：架构、身份、能力、联邦、消息、任务、上下文、同意、审计、一致性 |
 | [`docs/conformance.md`](docs/conformance.md) | 一致性等级、测试用例、互操作矩阵、报告格式 |
+| [`docs/p1-opaque-bus.md`](docs/p1-opaque-bus.md) | P1 Opaque Bus 0.2 设计提案(HPKE wire format、密钥发现、前向保密分析;非规范) |
 | [`docs/prior-art.md`](docs/prior-art.md) | 先行工作、对比矩阵、可能的新颖点与可证伪主张 |
 | [`docs/design-draft.md`](docs/design-draft.md) | 早期设计说明（非规范性，保留背景与取舍） |
 | [`GOVERNANCE.md`](GOVERNANCE.md) | 版本、变更、角色、安全披露、外部标准联络 |
