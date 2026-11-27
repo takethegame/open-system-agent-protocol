@@ -214,7 +214,7 @@ def _check_p1(params: dict, documents: dict) -> dict:
 
     bus = Bus(p1_keys=keys, progress_board=board)
     bus.handshake({"osap": "0.1"})
-    sealed = bus.seal(envelope_message, peer_public_key=keys.active_public_key)
+    sealed = bus.seal(envelope_message, peer_public_key=keys.active_public_key("hpke-x25519-128"))
     tamper = params.get("tamper")
     if tamper:
         sealed[tamper["field"]] = tamper["value"]

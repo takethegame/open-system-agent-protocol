@@ -66,20 +66,20 @@ P1 Opaque Bus 的目标:**Bus 只见路由与授权元数据,不见业务载荷*
 
 ### 3.1 密钥类型
 
-每个 Agent 注册时生成一枚 **P1 HPKE 静态密钥对**(KEM:X25519):
+**密钥按套件生成与隔离**(§4.1):每个 Agent 对每个自己声明支持的套件,各持有一枚 P1 HPKE 静态密钥对(KEM:X25519):
 
 - 私钥:仅本进程持有,存 `KeyStore`(复用 `impl/osap/keystore.py` 契约——`JsonKeyStore` / `MemoryKeyStore` / OS 密钥环,与 PCS 私钥同一治理);
 - 公钥:进入发现面,绑定 `kid`。
 
 ### 3.2 发布渠道(两条,均可独立工作)
 
-1. **welcome 扩展**:`welcome` 的 `features` 增加 `"p1"`,并携带 `{p1_kid, p1_public_key}`——点对点连接建立时直接获得对方当前公钥;
-2. **RFS 索引**:能力记录的 `extensions` 携带 `{p1_kid, p1_public_key}`,经 `describe` 查询——发送方在路由前即可解析目标公钥(对 `to: {capability}` 这类接收方未知的场景必需)。
+1. **welcome 扩展**:`welcome` 的 `features` 列出支持的套件(如 `["p1", "p1-hpke-x25519-256"]`),并按套件携带 `{suite, p1_kid, p1_public_key}`——点对点连接建立时直接获得对方当前公钥与套件;
+2. **RFS 索引**:能力记录的 `extensions` 携带 `{suite, p1_kid, p1_public_key}` 对,经 `describe` 查询——发送方在路由前即可解析目标公钥与套件(对 `to: {capability}` 这类接收方未知的场景必需)。
 
 ### 3.3 `kid`、轮换与撤销
 
 - `kid` 格式:`p1_<公钥指纹前 16 hex>`;**轮换必须换 kid**(与 PCS KeyRegistry §10.4 同一原则);
-- **轮换间隔 R(默认建议 24h)**:接收方每 R 生成新密钥对、发布新 kid、旧 kid 进入**退役宽限 G(默认建议 1h)**——G 内旧私钥仅用于解密在途消息,G 后**销毁**;
+- **轮换间隔 R(默认建议 24h)**:接收方对**每个套件**每 R 生成新密钥对、发布新 kid、旧 kid 进入**退役宽限 G(默认建议 1h)**——G 内旧私钥仅用于解密在途消息,G 后**销毁**;
 - **撤销**:kid 泄露时在 RFS 标记 revoked;消息携带 `p1_kid`,接收方/发送方遇到 revoked kid 时拒绝并提示重连获取新公钥;
 - 跨 App 一致性:发送方缓存的目标公钥过期(观察到新 kid)时,重查 RFS——与能力记录 TTL 语义一致。
 
@@ -87,15 +87,28 @@ P1 Opaque Bus 的目标:**Bus 只见路由与授权元数据,不见业务载荷*
 
 ## 4. Wire format(HPKE,RFC 9180)
 
-### 4.1 密码套件(固定,0.2 不协商)
+### 4.1 密码套件（命名套件 + 声明-选择，0.2 起）
 
-| 组件 | 选择 | 依据 |
-|---|---|---|
-| KEM | DHKEM(X25519, HKDF-SHA256) | RFC 9180 §7.1;X25519 已在实现依赖内 |
-| KDF | HKDF-SHA256 | 同上 |
-| AEAD | AES-128-GCM | RFC 9180 §7.2;128 位密钥对本场景足够,避免 256 位输出尺寸争议 |
+套件**可以协商**，但机制不是交互式协商，而是**声明-选择**（declare-and-choose）：
 
-`info` = `"osap-p1-v0.2"`(协议上下文绑定)。
+1. 每个命名套件有一个稳定标识符，并定义完整的 (KEM, KDF, AEAD) 组合与 `info` 字符串；
+2. 接收方在 welcome 与 RFS 上**公布**自己接受的 `(kid, suite)` 对——公布即全部选择面；
+3. 发送方**只能**从接收方公布过的组合里选一个，并把所选 `suite` 回显在 `osap.opaque/v1` 的 `data` 中；
+4. 不存在交互式协商，也不存在双方"共同决定"的回合——**降级面从结构上不存在**（Bus 无法让发送方选到接收方未公布的套件）。
+
+| 套件名 | KEM | KDF | AEAD | `info` | 状态 |
+|---|---|---|---|---|---|
+| `hpke-x25519-128` | DHKEM(X25519, HKDF-SHA256) | HKDF-SHA256 | AES-128-GCM | `osap-p1-hpke-x25519-128-v0.2` | **默认、必备**（RFC 9180 A.1.1 向量验证） |
+| `hpke-x25519-256` | DHKEM(X25519, HKDF-SHA256) | HKDF-SHA256 | AES-256-GCM | `osap-p1-hpke-x25519-256-v0.2` | 可选实现 |
+| （未来）X448 / ChaCha20Poly1305 / PQ-KEM | — | — | — | — | 按 RFC 9180 §7.1.5 立项 |
+
+`info` 按套件**域分隔**——两个套件永远不会从相同输入派生出相同密钥。
+
+#### 4.1.1 降级与残留风险（诚实边界）
+
+- **声明通道的可信度**：`welcome` 是点对点直连，声明不可被第三方剥离；RFS 索引上的声明与 RFS 同信任级——被攻陷的 RFS 可以**裁剪**高强度的 `(kid, suite)` 条目，但不能注入接收方未生成的密钥（kid 绑定接收方公钥，解密仍需私钥）。缓解：发送方本地策略可设**强度下限**（如"绝不使用低于 128 的套件"），低于下限的声明直接拒绝发送；
+- **套件替换**：攻击者把 `data.suite` 从 256 改成 128？接收方以 (kid → 自己生成的密钥及其套件) 打开——密钥是**按套件生成**的，kid 与套件绑定，替换后 kid/套件不匹配即 `AUTH_DENIED`；
+- **逐消息混合**：同一接收方同时运行两个套件的密钥是允许的（密钥按套件隔离，§3.3）。
 
 ### 4.2 AAD:外层元数据绑定
 
@@ -124,6 +137,7 @@ osap, id, type, trace_id, causation_id(如有), from, to, task, deadline(如有)
   "body": {
     "schema": "osap.opaque/v1",
     "data": {
+      "suite": "hpke-x25519-128",
       "p1_kid": "p1_9f2c7b1a8d3e4f5b",
       "enc": "base64url(HPKE enc, 32 字节)",
       "ciphertext": "base64url(AEAD 密文)"
@@ -148,7 +162,7 @@ osap, id, type, trace_id, causation_id(如有), from, to, task, deadline(如有)
 
 - 每条消息**一次独立 HPKE 封装**(fresh ephemeral)——无跨消息 nonce 状态,乱序/并行安全;
 - `auth`/`body`/`refs`/`consent`/`extensions` 全部进内层,结构就是 P0 信封的对应字段;
-- `osap.opaque/v1` 的 `data` 只含 `p1_kid`/`enc`/`ciphertext`,Bus 与任何中间件无需也无法解析更多;
+- `osap.opaque/v1` 的 `data` 只含 `suite`/`p1_kid`/`enc`/`ciphertext`,Bus 与任何中间件无需也无法解析更多;
 - 解密失败 → `AUTH_DENIED`(fail closed);`p1_kid` 未知/撤销 → `AUTH_DENIED` 并提示重查 RFS。
 
 ### 4.4 各消息类型在 P1 下
@@ -233,6 +247,8 @@ P1 与传输绑定正交:UDS stream / 数据报 / 未来 XPC/Binder 均可携带
 4. **`consent.request` 是否在 P1 下加密**:预览文本面向用户,PCS 端点本就明文;加密反而把 PCS 排除在外——倾向不加密,待 WG 讨论;
 5. **priority 的 AAD 绑定**:防止降级改序 vs 允许路由器调度弹性——需要 WG 权衡;
 6. **与 WIMSE 的关系**:`sadp-delegation` 等稿同样处理加密委派载荷;0.2 规范化时应与 WIMSE 对齐或明确分界。
+
+~~7. 套件演进~~(已解决,2026-11-27):套件协商采用 §4.1 的声明-选择模型——命名套件、接收方按套件公布 `(kid, suite)`、发送方选择并回显 `suite`;降级面从结构上不存在,残留风险与缓解见 §4.1.1。
 
 ---
 

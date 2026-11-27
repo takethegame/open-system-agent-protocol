@@ -78,9 +78,9 @@ class Rfc9180VectorTests(unittest.TestCase):
         self.assertEqual(enc, self.pk_em)
         for seq, aad, expected_ct in ENCODINGS:
             nonce = opaque._compute_nonce(schedule["base_nonce"], seq)
-            ct = opaque._aead_seal(schedule["key"], nonce, aad, PT)
+            ct = opaque._aead_seal(schedule["aead"], schedule["key"], nonce, aad, PT)
             self.assertEqual(ct, expected_ct, f"seq {seq}")
-            self.assertEqual(opaque._aead_open(schedule["key"], nonce, aad, ct), PT)
+            self.assertEqual(opaque._aead_open(schedule["aead"], schedule["key"], nonce, aad, ct), PT)
 
     def test_exported_values(self):
         enc = self.pk_em

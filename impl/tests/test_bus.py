@@ -449,35 +449,35 @@ class P1OpaqueTests(unittest.TestCase):
         }
 
     def test_seal_hides_the_inner_fields(self):
-        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key("hpke-x25519-128"))
         self.assertEqual(sealed["body"]["schema"], "osap.opaque/v1")
         self.assertNotIn("auth", sealed)
         self.assertNotIn("refs", sealed)
         self.assertNotIn(b"opaque payload", json.dumps(sealed).encode())
 
     def test_sealed_then_unsealed_dispatches_the_inner_message(self):
-        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key("hpke-x25519-128"))
         reply = self.bus.receive(sealed)
         self.assertEqual(reply["type"], "result")
         # the inner request executed exactly once (§8.11 idempotency intact)
         self.assertEqual(self.bus.side_effects, 1)
 
     def test_tampered_task_metadata_fails_closed(self):
-        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key("hpke-x25519-128"))
         sealed["task"]["id"] = "task_tampered"
         with self.assertRaises(OsapError) as caught:
             self.bus.receive(sealed)
         self.assertEqual(caught.exception.code, "AUTH_DENIED")
 
     def test_an_unknown_kid_is_rejected(self):
-        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key("hpke-x25519-128"))
         sealed["body"]["data"]["p1_kid"] = "p1_unknown"
         with self.assertRaises(OsapError) as caught:
             self.bus.receive(sealed)
         self.assertEqual(caught.exception.code, "AUTH_DENIED")
 
     def test_rotation_window_forward_secrecy(self):
-        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key("hpke-x25519-128"))
         self.keys.rotate()  # the previous key enters the grace window
         self.assertIsNone(self.bus.receive(self._unsealable_copy(sealed)) or None) if False else None
         # A destroyed grace key must not decrypt past messages (§6 of the design).
@@ -500,15 +500,52 @@ class P1OpaqueTests(unittest.TestCase):
     def test_welcome_publishes_the_p1_feature_and_key(self):
         welcome = self.bus.handshake({"osap": "0.1"})
         self.assertIn("p1", welcome["features"])
-        self.assertEqual(welcome["p1_kid"], self.keys.active_kid)
+        self.assertIn("p1-hpke-x25519-128", welcome["features"])
+        published = welcome["p1_keys"][0]
+        self.assertEqual(published["suite"], "hpke-x25519-128")
+        self.assertEqual(published["p1_kid"], self.keys.active_kid("hpke-x25519-128"))
         self.assertEqual(
-            welcome["p1_public_key"],
-            __import__("base64").urlsafe_b64encode(self.keys.active_public_key).rstrip(b"=").decode(),
+            published["p1_public_key"],
+            __import__("base64").urlsafe_b64encode(
+                self.keys.active_public_key("hpke-x25519-128")
+            ).rstrip(b"=").decode(),
         )
 
     def test_welcome_without_p1_has_no_feature(self):
         welcome = Bus().handshake({"osap": "0.1"})
         self.assertNotIn("features", welcome)
+
+    def test_two_suites_keep_separate_keys_and_kids(self):
+        ring = opaque.P1KeyRing(suites=("hpke-x25519-128", "hpke-x25519-256"))
+        r128 = ring.rotate("hpke-x25519-128")
+        r256 = ring.rotate("hpke-x25519-256")
+        self.assertNotEqual(r128["kid"], r256["kid"])
+        self.assertEqual(ring.active_kid("hpke-x25519-128"), r128["kid"])
+        self.assertEqual(ring.active_kid("hpke-x25519-256"), r256["kid"])
+
+        bus = Bus(p1_keys=ring, progress_board=self.board, p1_suite="hpke-x25519-256")
+        bus.handshake({"osap": "0.1"})
+        sealed256 = bus.seal(self.p0_envelope(), peer_public_key=ring.active_public_key("hpke-x25519-256"))
+        self.assertEqual(sealed256["body"]["data"]["suite"], "hpke-x25519-256")
+        reply = bus.receive(sealed256)
+        self.assertEqual(reply["type"], "result")
+
+    def test_an_unknown_suite_is_rejected_everywhere(self):
+        ring = opaque.P1KeyRing(suites=("hpke-x25519-128",))
+        ring.rotate("hpke-x25519-128")  # the ring must hold a key first
+        with self.assertRaises(ValueError):
+            ring.rotate("hpke-x25519-999")
+        bus = Bus(p1_keys=ring)
+        bus.handshake({"osap": "0.1"})
+        public_key = ring.active_public_key("hpke-x25519-128")
+        with self.assertRaises(OsapError) as caught:
+            bus.seal(self.p0_envelope(), peer_public_key=public_key, suite="hpke-x25519-999")
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        sealed = bus.seal(self.p0_envelope(), peer_public_key=public_key)
+        sealed["body"]["data"]["suite"] = "hpke-x25519-999"
+        with self.assertRaises(OsapError) as caught:
+            bus.receive(sealed)
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
 
 
 if __name__ == "__main__":

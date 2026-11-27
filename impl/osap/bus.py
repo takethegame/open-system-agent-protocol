@@ -16,7 +16,7 @@ from . import envelope, framing
 from .clock import Deadline, parse_timestamp
 from .errors import OsapError
 from .flowcontrol import AdmissionController
-from .opaque import open_p1 as _p1_open, seal_p1 as _p1_seal
+from .opaque import DEFAULT_SUITE, SUITES, open_p1 as _p1_open, seal_p1 as _p1_seal
 from .idempotency import IdempotencyIndex
 from .store import JsonStore
 
@@ -89,6 +89,7 @@ class Bus:
         skew_seconds: float | None = None,
         p1_keys=None,
         p1_required: bool = False,
+        p1_suite: str = DEFAULT_SUITE,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -136,12 +137,15 @@ class Bus:
             or skew_seconds < 0
         ):
             raise ValueError("skew_seconds must be a non-negative number or None")
+        if p1_suite not in SUITES:
+            raise ValueError(f"unknown p1 suite: {p1_suite!r}")
         if p1_keys is not None and not callable(getattr(p1_keys, "private_for", None)):
             raise ValueError("p1_keys must expose private_for()")
         if p1_required and p1_keys is None:
             raise ValueError("p1_required requires p1_keys")
         self.p1_keys = p1_keys
         self.p1_required = p1_required
+        self.p1_suite = p1_suite
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []
@@ -191,12 +195,20 @@ class Bus:
         if hello.get("id"):
             welcome["causation_id"] = hello["id"]
         if self.p1_keys is not None:
-            # P1 feature bit + current key so peers can seal immediately (§4.3
-            # of docs/p1-opaque-bus.md).
-            welcome["features"] = ["p1"]
-            welcome["p1_kid"] = self.p1_keys.active_kid
-            welcome["p1_public_key"] = base64_url(self.p1_keys.active_public_key)
-        return welcome
+            # P1 feature bits + per-suite current keys so peers can seal
+            # immediately (docs/p1-opaque-bus.md §3.2).
+            welcome["features"] = ["p1"] + [
+                f"p1-{suite}" for suite in self.p1_keys.suites
+            ]
+            welcome["p1_keys"] = [
+                {
+                    "suite": suite,
+                    "p1_kid": self.p1_keys.active_kid(suite),
+                    "p1_public_key": base64_url(self.p1_keys.active_public_key(suite)),
+                }
+                for suite in self.p1_keys.suites
+                if self.p1_keys.active_kid(suite) is not None
+            ]
         return welcome
 
     # --- receive -----------------------------------------------------------
@@ -263,9 +275,16 @@ class Bus:
     #: Fields that live inside the encrypted P1 payload (§4.3 of the design).
     P1_INNER_FIELDS = frozenset({"auth", "body", "refs", "consent", "extensions"})
 
-    def seal(self, envelope: dict, *, peer_public_key: bytes) -> dict:
+    def seal(self, envelope: dict, *, peer_public_key: bytes, suite: str | None = None) -> dict:
         """Seal a P0 envelope into an `osap.opaque/v1` P1 envelope."""
 
+        suite = suite or self.p1_suite
+        if suite not in self.p1_keys.suites:
+            raise OsapError(
+                "POLICY_DENIED",
+                "this bus has not published a key for the requested suite",
+                details={"suite": suite, "published": list(self.p1_keys.suites)},
+            )
         inner = {
             key: envelope[key]
             for key in ("auth", "body", "refs", "consent", "extensions")
@@ -277,7 +296,7 @@ class Bus:
         }
         outer["body"] = {
             "schema": "osap.opaque/v1",
-            "data": _p1_seal(outer, inner, pk_r=peer_public_key),
+            "data": _p1_seal(outer, inner, pk_r=peer_public_key, suite=suite),
         }
         return outer
 
@@ -288,6 +307,13 @@ class Bus:
             )
         data = (message.get("body") or {}).get("data") or {}
         kid = data.get("p1_kid")
+        suite = data.get("suite")
+        if suite not in self.p1_keys.suites:
+            raise OsapError(
+                "AUTH_DENIED",
+                "opaque body names a suite this bus has not published",
+                details={"suite": suite},
+            )
         private_key = self.p1_keys.private_for(kid)
         if private_key is None:
             raise OsapError(
@@ -301,7 +327,7 @@ class Bus:
             key: value for key, value in message.items()
             if key not in self.P1_INNER_FIELDS
         }
-        inner = _p1_open(outer, data, sk_r=private_key)
+        inner = _p1_open(outer, data, sk_r=private_key, suite=suite)
         merged = dict(outer)
         merged.update(inner)
         return merged
