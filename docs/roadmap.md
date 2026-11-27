@@ -306,7 +306,7 @@ JSON 报告在 runner 内直接对照 `report.schema.json` 校验，CI 增加了
 
 | 议题 | 现状 | 进入 0.2 的前置条件 |
 |---|---|---|
-| P1 Opaque Bus（HPKE） | **设计提案 + 实现**:设计文档 + `opaque.py`(RFC 9180 A.1.1 向量逐字节验证、P1 信封层、**套件协商**:命名套件 + 声明-选择模型,`hpke-x25519-128` 默认、`hpke-x25519-256` 可选)+ `Bus` 接线(`seal`/unseal/`p1_required`/welcome 按套件发布 `p1_keys`)+ `P1KeyRing` 按套件 FS 轮换(2026-11-27) | 外部密码学评审;welcome/RFS 密钥发现落地到多进程;`standard.md` §3.6 升级为规范文字;P1 一致性用例扩展到 AES-256 套件的互操作 |
+| P1 Opaque Bus（HPKE） | **设计提案 + 实现 + 规范化**:设计文档 + `opaque.py`(RFC 9180 A.1.1 向量逐字节验证、套件协商)+ `Bus` 接线 + `P1KeyRing` 按套件 FS 轮换;`standard.md` §3.6 已升级为 P1 规范文字(2026-11-27,中英同步);§15 开放问题 11 已关闭 | 外部密码学评审;welcome/RFS 密钥发现落地到多进程;P1 一致性用例扩展到 AES-256 套件的互操作 |
 | 跨设备 / 跨组织信任根 | 非目标 | 与 A2A、WIMSE、SPIFFE 的对齐方案 |
 | 语义发现（embedding） | 开放问题 6 | 隐私影响评估 + 本地索引方案 |
 | 多用户共享会话 | 开放问题 4 | 主体切换与数据边界模型 |

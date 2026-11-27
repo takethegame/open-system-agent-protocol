@@ -265,24 +265,31 @@ Bus Core MUST NOT refuse routing on the basis of policy or revocation decisions;
 
 ### 3.6 Trust profiles
 
-0.1 discusses two trust profiles; only P0 may be declared by a 0.1 implementation.
+0.1 defines two trust profiles; P0 is the default and mandatory profile for 0.1 implementations, and P1 is the optional profile introduced in 0.2.
 
-| Profile | Bus visibility | Applicability | 0.1 status |
+| Profile | Bus visibility | Applicability | Status |
 |---|---|---|---|
-| **P0 Trusted Bus** | Sees envelope and plaintext `body` | Single-user device, Bus protected by OS integrity | Default, the only declarable one |
-| **P1 Opaque Bus** | Sees only envelope metadata | Deployments that do not trust the Bus | Experimental, defined in 0.2 |
+| **P0 Trusted Bus** | Sees the envelope and the plaintext `body` | Single-user devices where the Bus is protected by OS integrity | Default, 0.1 implementation |
+| **P1 Opaque Bus** | Sees only envelope metadata | Deployments that do not trust the Bus | Normative in 0.2 (this section) |
 
-P0 requires:
+P0 requirements:
 
-- Bus Core MUST be protected by OS code signing/sandboxing and MUST verify its own integrity where available.
-- Bus Core MUST NOT log payloads by default; error messages, audit, and crash dumps MUST be redacted.
-- Deployers MUST disclose to users that "the Bus can read the content of cross-App messages".
-- A conformance declaration MUST include `bus_visibility: "payload"`.
+- The Bus Core MUST be protected by OS code signing/sandboxing and MUST verify its own integrity when available.
+- The Bus Core MUST NOT log payloads by default; error messages, audit trails, and crash dumps MUST be redacted.
+- The deployment MUST disclose to the user that "the Bus can read cross-app message content".
+- A conformance claim MUST include `bus_visibility: "payload"`.
 
-P1 direction (not 0.1 normative):
+P1 Opaque Bus (normative in 0.2; see `docs/p1-opaque-bus.md` for the design proposal):
 
-- Payloads use HPKE (RFC 9180) or equivalent end-to-end encryption; the Bus sees only routing and authorization metadata.
-- 0.1 implementations MUST NOT claim support for P1; the related wire format is listed as an open issue in §15.
+- **Visibility**: the Bus sees only routing and authorization metadata (`osap`, `id`, `type`, `trace_id`, `from`, `to`, `task`, `deadline`, `ts`, `origin`); `auth`, `body`, `refs`, `consent`, and `extensions` MUST be end-to-end encrypted and invisible to the Bus.
+- **Ciphersuite**: named suites with a **declare-and-choose** model — the receiver publishes the `(p1_kid, suite)` pairs it accepts in `welcome` and the RFS (must include `hpke-x25519-128` = DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + AES-128-GCM; `hpke-x25519-256` = AES-256-GCM optional), the sender MUST choose a published pair and echo the `suite` in the sealed body; there is no interactive negotiation, and the downgrade surface is structurally absent.
+- **Integrity binding**: the ciphertext MUST use the canonical serialization of the visible routing metadata as AEAD AAD — the Bus tampering with or reordering any visible field, or replaying the ciphertext across tasks, MUST break decryption.
+- **Forward secrecy**: P1 provides **rotation-window forward secrecy** — the receiver MUST rotate the P1 private key every `R` and destroy it after a grace period `G` (suggested defaults R=24h, G=1h); P1 does not provide per-message forward secrecy and does not protect metadata.
+- **Authorization split**: the router checks the available outer bindings (audience/subject/task_id); depth, consent validity, budget, and revocation checks are all performed by the receiver after decryption.
+- **Audit**: audit events are written by the services directly to the Audit Ledger, not through the Bus payload; P1 does not change the AI8 path (audit before side effects).
+- **Negotiation and downgrade**: `welcome` MUST declare the P1 feature bit and the per-suite `(p1_kid, public_key)`; a P1 deployment MUST accept P0 messages as well (mixed period), and MUST NOT treat a downgrade as acceptable — downgrades are rejected.
+- A conformance claim MAY include `bus_visibility: "opaque"`; an implementation claiming P1 MUST satisfy every requirement in this table and support P0 (both profiles coexist).
+- The 0.1 implementation (this repository, tag `v0.1.0`) MUST NOT claim P1 support; P1 is a 0.2 conformance target.
 
 ### 3.7 State and recovery
 
@@ -1446,7 +1453,7 @@ Users MUST be able to view:
 | DoS | A flood of requests overwhelms the Bus/target App | Quotas, rates, backpressure, budgets |
 | Supply chain | Malicious App/dependency | Signatures, manifest review, capability allowlists |
 | Audit tampering | Deleting unfavorable records | Append-only + hash chain + external anchors |
-| Compromised Bus | The Bus is compromised or malicious | 0.1 explicitly trusts P0; OS integrity, minimal TCB, payload not persisted; P1 see §3.6 |
+| Compromised Bus | The Bus is compromised or malicious | 0.1 explicitly trusts P0; OS integrity, minimal TCB, payload not persisted; deployments that do not trust the Bus use P1 (§3.6, normative in 0.2) |
 | Clock manipulation | The wall clock is adjusted or the system suspends/resumes | Monotonic clock, skew checks, short TTLs |
 | State rollback | Crashes/rollbacks cause duplication or loss | Persistence + anchoring + idempotency + reconciliation |
 | Privilege escalation | A child Agent widens its capability | Monotonic attenuation + CA validation + depth limits |
@@ -1692,7 +1699,7 @@ See [`GOVERNANCE.en.md`](../GOVERNANCE.en.md) for governance details.
 8. Performance: the overhead of going through policy on every resolution; local policy caching and short-term leases.
 9. Vendor adoption: how to get adapters for App Intents/AppFunctions/App Actions into official SDKs.
 10. Standards ownership: an independent foundation, LF/AAIF, IETF, or a vendor alliance?
-11. The P1 profile for payloads invisible to the Bus: HPKE wire format, key discovery, and forward secrecy.
+11. ~~The P1 profile for payloads invisible to the Bus: HPKE wire format, key discovery, and forward secrecy.~~ **Resolved (2026-11-27)**: P1 is normative in §3.6; the wire format, key discovery, and rotation-window forward secrecy are in the `docs/p1-opaque-bus.md` design proposal, implemented in `impl/osap/opaque.py` (RFC 9180 A.1.1 vectors).
 12. A formal model for crash recovery and side-effect reconciliation (intent/outcome, unknown state).
 13. Standardized mapping between Context Fabric and OS handles/portals.
 14. Leader election and audit chain partitioning for multi-instance Buses.

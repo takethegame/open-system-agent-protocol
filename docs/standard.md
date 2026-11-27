@@ -263,12 +263,12 @@ Bus Core MUST NOT 因策略或撤销判定拒绝路由；它只做**无状态绑
 
 ### 3.6 Trust profiles
 
-0.1 讨论两个信任 profile；只有 P0 可以被 0.1 实现声明。
+0.1 定义两个信任 profile；P0 是 0.1 的默认与必须实现的 profile，P1 为 0.2 引入的可选 profile。
 
-| Profile | Bus 可见性 | 适用 | 0.1 状态 |
+| Profile | Bus 可见性 | 适用 | 状态 |
 |---|---|---|---|
-| **P0 Trusted Bus** | 可见信封与明文 `body` | 单用户设备，Bus 受 OS 完整性保护 | 默认、唯一可声明 |
-| **P1 Opaque Bus** | 仅见信封元数据 | 不信任 Bus 的部署 | 实验性，0.2 定义 |
+| **P0 Trusted Bus** | 可见信封与明文 `body` | 单用户设备，Bus 受 OS 完整性保护 | 默认，0.1 实现 |
+| **P1 Opaque Bus** | 仅见信封元数据 | 不信任 Bus 的部署 | 0.2 规范化（本节） |
 
 P0 要求：
 
@@ -277,10 +277,17 @@ P0 要求：
 - 部署方 MUST 向用户披露“Bus 可读取跨 App 消息内容”。
 - 一致性声明 MUST 包含 `bus_visibility: "payload"`。
 
-P1 方向（非 0.1 规范）：
+P1 Opaque Bus（0.2 规范，详见 `docs/p1-opaque-bus.md` 设计提案）：
 
-- payload 使用 HPKE（RFC 9180）或等效的端到端加密；Bus 只看到路由与授权元数据。
-- 0.1 实现 MUST NOT 声称支持 P1；相关 wire format 列入 §15 开放问题。
+- **可见性**：Bus 仅见路由与授权元数据（`osap`、`id`、`type`、`trace_id`、`from`、`to`、`task`、`deadline`、`ts`、`origin`）；`auth`、`body`、`refs`、`consent` 与 `extensions` MUST 端到端加密，Bus 不可见。
+- **密码套件**：命名套件 + **声明-选择**模型——接收方在 `welcome` 与 RFS 上公布其接受的 `(p1_kid, suite)` 对（必含 `hpke-x25519-128` = DHKEM(X25519, HKDF-SHA256) + HKDF-SHA256 + AES-128-GCM；`hpke-x25519-256` = AES-256-GCM 可选），发送方 MUST 从公布过的组合中选择并在密文体中回显 `suite`；不存在交互式协商，降级面从结构上不存在。
+- **完整性绑定**：密文 MUST 以可见路由元数据的规范化序列化作为 AEAD AAD——Bus 篡改或重排任何可见字段、或跨任务重放密文，MUST 导致解密失败。
+- **前向保密**：P1 提供**轮换窗口内的前向保密**——接收方 MUST 按 `R` 轮换 P1 私钥并在宽限 `G` 后销毁（默认建议 R=24h、G=1h）；P1 不提供逐条消息的前向保密，也不保护元数据。
+- **授权分工**：路由器核对可用的外层绑定（audience/subject/task_id），`depth`、consent 有效期、预算与撤销等有状态核对全部由接收方在解密后执行。
+- **审计**：审计事件由各服务直写 Audit Ledger，不经 Bus payload；P1 不改变 AI8（审计先于副作用）的路径。
+- **协商与降级**：`welcome` MUST 声明 P1 特性位与按套件的 `(p1_kid, public_key)`；P1 部署 MUST 同时接受 P0 消息（混合期），且 MUST NOT 以任何方式把 P0 升级承诺为 P1 的替代——降级即拒绝。
+- 一致性声明 MAY 包含 `bus_visibility: "opaque"`；声明 P1 的实现 MUST 同时满足本表全部要求，并支持 P0（双 profile 共存）。
+- 0.1 实现（本仓库 tag `v0.1.0`）MUST NOT 声称支持 P1；P1 为 0.2 的一致性目标。
 
 ### 3.7 State and recovery
 
@@ -1444,7 +1451,7 @@ L3/L4 副作用 MUST 采用两段审计：
 | DoS | 大量请求拖垮 Bus/目标 App | 配额、速率、背压、预算 |
 | Supply chain | 恶意 App/依赖 | 签名、清单审查、能力白名单 |
 | Audit tampering | 删除不利记录 | 只追加 + 哈希链 + 外部锚点 |
-| Compromised Bus | Bus 被攻破或恶意 | 0.1 显式信任 P0；OS 完整性、最小 TCB、payload 不落盘；P1 见 §3.6 |
+| Compromised Bus | Bus 被攻破或恶意 | 0.1 显式信任 P0；OS 完整性、最小 TCB、payload 不落盘；不信任 Bus 的部署用 P1（§3.6，0.2 规范） |
 | Clock manipulation | 墙钟被调整或挂起/恢复 | 单调时钟、偏差检查、短 TTL |
 | State rollback | 崩溃/回滚导致重复或丢失 | 持久化 + 锚定 + 幂等 + 对账 |
 | Privilege escalation | 子 Agent 扩大能力 | 单调衰减 + CA 校验 + 深度限制 |
@@ -1690,7 +1697,7 @@ OSAP 不试图检测所有恶意文本，而是做三件事：
 8. 性能：每次解析都过策略的开销；本地策略缓存与短期租约。
 9. 厂商采用：如何让 App Intents/AppFunctions/App Actions 的适配器进入官方 SDK。
 10. 标准归属：独立基金会、LF/AAIF、IETF，还是厂商联盟？
-11. Bus 不可见 payload 的 P1 profile：HPKE wire format、密钥发现与前向保密。
+11. ~~Bus 不可见 payload 的 P1 profile：HPKE wire format、密钥发现与前向保密。~~ **已解决（2026-11-27）**：P1 在 §3.6 规范化；wire format、密钥发现与轮换窗口 FS 见 `docs/p1-opaque-bus.md` 设计提案，实现见 `impl/osap/opaque.py`（RFC 9180 A.1.1 向量验证）。
 12. 崩溃恢复与副作用对账的形式化模型（intent/outcome、unknown 状态）。
 13. Context Fabric 与 OS 句柄/portals 的标准化映射。
 14. 多实例 Bus 的 leader election 与审计链分区。
