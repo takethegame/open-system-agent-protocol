@@ -61,6 +61,7 @@
 | 缓存窗口 | §9.7 | 缓存 TTL 钳制到句柄 TTL，被撤销的句柄不会命中 |
 | 数据出口 | §9.8 | `sensitive`/`secret` 离开设备需要用户显式放行 |
 | OS 权限 | §9.9 | OS 拒绝是外层边界，句柄不能绕过沙箱 |
+| 时钟与偏差 | §2.5 | `welcome` 公布 `now` 与 `clock_skew_seconds`；`skew_seconds` 启用后，`ts` 超偏差的消息以 `TRANSPORT_CLOCK_SKEW` 拒绝（opt-in，默认 None 即仅声明） |
 | 存储声明 | §9.10 | `managed_store` 必须覆盖配额、GC、崩溃恢复、加密、路径安全、删除 |
 | 联邦投影 | §6.7 | 原生描述符投影为能力记录；保留 `source`、`native_id`、`version`、`provenance` |
 | 原生身份 | §6.7 | MCP server/tool、A2A card/skill、D-Bus bus/path/interface/method、OpenAPI operationId |
@@ -88,7 +89,7 @@ impl/
   adapter.py            一致性适配器（tools/conformance_run.py --impl 的入口）
   osap/
     __init__.py         公共导出
-    bus.py              握手、校验、路由、幂等、错误回执、status 单向进度路由
+    bus.py              握手、校验、路由、幂等、错误回执、status 单向进度路由、时钟偏差
     audit.py            §8.11、§10.5、§10.6 审计链、持久账本、保留归档与压缩、按用户分区与导出、脱敏导出、回放、恢复
     capability.py       §5.2–§5.6 能力凭证、衰减、绑定、撤销、撤销日志/副本应用与轮询订阅
     clock.py            单调时钟 deadline

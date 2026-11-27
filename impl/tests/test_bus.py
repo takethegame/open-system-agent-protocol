@@ -363,5 +363,56 @@ class DescribeRoutingTests(unittest.TestCase):
             bare.receive(message)
 
 
+class ClockSkewTests(unittest.TestCase):
+    """§2.5: the welcome publishes time and skew; out-of-skew ts is rejected."""
+
+    MOMENT = datetime(2026, 11, 10, 10, 14, 45, tzinfo=timezone.utc)
+
+    def bus(self, *, skew=None):
+        return Bus(clock=lambda: self.MOMENT, skew_seconds=skew)
+
+    def message(self, ts="2026-11-10T10:14:45Z"):
+        message = load("request.json")
+        message["ts"] = ts
+        return message
+
+    def test_welcome_publishes_now_and_skew(self):
+        welcome = self.bus(skew=120).handshake({"osap": "0.1"})
+        self.assertEqual(welcome["body"]["data"]["now"], "2026-11-10T10:14:45Z")
+        self.assertEqual(welcome["body"]["data"]["clock_skew_seconds"], 120)
+
+    def test_welcome_skew_is_none_when_not_enforced(self):
+        welcome = self.bus().handshake({"osap": "0.1"})
+        self.assertIsNone(welcome["body"]["data"]["clock_skew_seconds"])
+        self.assertIn("now", welcome["body"]["data"])
+
+    def test_a_message_within_the_skew_is_accepted(self):
+        bus = self.bus(skew=60)
+        bus.handshake({"osap": "0.1"})
+        message = self.message(ts="2026-11-10T10:14:45Z")  # exactly on the bus clock
+        reply = bus.receive(message)
+        self.assertEqual(reply["type"], "result")
+
+    def test_a_message_beyond_the_skew_is_rejected(self):
+        bus = self.bus(skew=60)
+        bus.handshake({"osap": "0.1"})
+        with self.assertRaises(OsapError) as caught:
+            bus.receive(self.message(ts="2026-11-10T11:14:45Z"))  # 3600 s off
+        self.assertEqual(caught.exception.code, "TRANSPORT_CLOCK_SKEW")
+        self.assertEqual(caught.exception.details["allowed_skew_seconds"], 60)
+        self.assertEqual(caught.exception.details["deviation_seconds"], 3600)
+
+    def test_the_check_is_opt_in(self):
+        bus = self.bus()  # skew_seconds None: the §2.5 rejection never fires.
+        bus.handshake({"osap": "0.1"})
+        reply = bus.receive(self.message())
+        self.assertEqual(reply["type"], "result")
+
+    def test_an_invalid_skew_configuration_is_rejected(self):
+        for skew in (-1, "60", True):
+            with self.assertRaises(ValueError):
+                Bus(skew_seconds=skew)
+
+
 if __name__ == "__main__":
     unittest.main()

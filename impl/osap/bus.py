@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timezone
 
 from . import envelope, framing
-from .clock import Deadline
+from .clock import Deadline, parse_timestamp
 from .errors import OsapError
 from .flowcontrol import AdmissionController
 from .idempotency import IdempotencyIndex
@@ -25,6 +25,10 @@ READY = "ready"
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def sender_identity(message: object) -> str:
@@ -75,6 +79,7 @@ class Bus:
         clock=None,
         streams=None,
         events=None,
+        skew_seconds: float | None = None,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -115,6 +120,13 @@ class Bus:
         self.streams = streams
         self.events = events
         self._clock = clock
+        self.skew_seconds = skew_seconds
+        if skew_seconds is not None and (
+            not isinstance(skew_seconds, (int, float))
+            or isinstance(skew_seconds, bool)
+            or skew_seconds < 0
+        ):
+            raise ValueError("skew_seconds must be a non-negative number or None")
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []
@@ -153,6 +165,10 @@ class Bus:
                     "osap": self.version,
                     "binding": self.binding.value,
                     "max_frame_bytes": framing.MAX_FRAME_BYTES,
+                    # §2.5: the bus publishes its time and the tolerated skew
+                    # so senders can pre-screen their own timestamps.
+                    "now": _stamp(self._clock() if self._clock else datetime.now(timezone.utc)),
+                    "clock_skew_seconds": self.skew_seconds,
                 },
             },
             "ts": _now(),
@@ -177,6 +193,7 @@ class Bus:
                 return self.handshake(message)
 
             envelope.validate(message)
+            self._check_skew(message)
             self.received.append(message["id"])
             return self.dispatch(message)
 
@@ -187,6 +204,33 @@ class Bus:
             raise RuntimeError("raw bytes require a stream binding")
         messages, _remainder = framing.decode_stream(data)
         return [reply for message in messages if (reply := self.receive(message)) is not None]
+
+    def _check_skew(self, message: dict) -> None:
+        """Reject messages whose `ts` deviates beyond the tolerated skew (§2.5).
+
+        Opt-in: `skew_seconds=None` (the default) disables the check, which
+        keeps the SHOULD satisfied by capability rather than enforcement.
+        """
+
+        if self.skew_seconds is None:
+            return
+        raw = message.get("ts")
+        if not isinstance(raw, str) or not raw:
+            return
+        message_ts = parse_timestamp(raw)
+        bus_now = self._clock() if self._clock else datetime.now(timezone.utc)
+        delta = abs((message_ts - bus_now).total_seconds())
+        if delta > self.skew_seconds:
+            raise OsapError(
+                "TRANSPORT_CLOCK_SKEW",
+                "message timestamp deviates beyond the tolerated skew",
+                details={
+                    "message_ts": raw,
+                    "bus_now": _stamp(bus_now),
+                    "allowed_skew_seconds": self.skew_seconds,
+                    "deviation_seconds": delta,
+                },
+            )
 
     def dispatch(self, message: dict) -> dict | None:
         """Route a validated message; None for one-way types like `status`."""
