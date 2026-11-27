@@ -18,7 +18,7 @@ conformance/
     C3-authorization.json
     ...                每个 level 一个文件
   reports/
-    osap-reference-2026-11-26.json
+    osap-reference-2026-11-27.json
     ...                每个登记一条,按 <implementation>-<date> 命名
 ```
 
@@ -42,7 +42,7 @@ conformance/
 | `title` | ✅ | 一句话描述，英文 |
 | `mode` | | `automated`（默认）或 `manual` |
 | `preconditions` | | 运行前必须成立的状态 |
-| `operation` | | `handshake` / `transport` / `register` / `send` / `frame` / `use` / `attenuate` / `delegate` / `handoff` / `cancel` / `discover` / `index` / `resolve` / `delete` / `cache` / `declare` / `restart` / `replay` / `export` / `clock` / `describe` / `status` / `stream` / `publish` |
+| `operation` | | `handshake` / `transport` / `register` / `send` / `frame` / `use` / `attenuate` / `delegate` / `handoff` / `cancel` / `discover` / `index` / `resolve` / `delete` / `cache` / `declare` / `restart` / `replay` / `export` / `clock` / `describe` / `status` / `stream` / `publish` / `p1` |
 | `input` | automated 必填 | 见下 |
 | `steps` | manual 必填 | 人工执行步骤 |
 | `expect` | ✅ | 见下 |
@@ -124,7 +124,7 @@ python3 tools/conformance_run.py --impl adapter.py --level C0,C3 --format md --o
 2. 把 `docs/conformance.md` 表格里的编号与用例文件逐一比对，缺号或多号都会失败；
 3. 解析每个 `input.ref`、`context` 并应用全部 mutation，夹具缺失或路径不存在都会失败。
 
-因此“`--stub` 全绿”等价于“72 条用例可加载、可定位夹具、可应用变异”，而不只是 JSON 能解析。
+因此“`--stub` 全绿”等价于“74 条用例可加载、可定位夹具、可应用变异”，而不只是 JSON 能解析。
 
 退出码：有任何 `fail` 时为 1；全部 `pass`/`skip` 时为 0。
 
@@ -150,4 +150,4 @@ python3 tools/conformance_run.py --impl adapter.py --level C0,C3 --format md --o
 3. `python3 tools/check_registry.py` 机械化校验(加 `--rerun` 会实际重跑 ✅ 条目的复现命令),CI 在非 rerun 模式运行;另在 conformance 步骤之后以 `--rerun` 运行,实现行为漂移时 CI 直接红,登记表必须重新登记;
 4. 登记不是认证,也不改变等级定义;流程、条目格式与除名规则见 [`registry.md`](registry.md)。
 
-参考实现已自证登记:`reports/osap-reference-2026-11-26.json`(68/72 pass,4 manual skip;0.2 套件扩展后重新登记)。
+参考实现已自证登记:`reports/osap-reference-2026-11-27.json`(70/74 pass,4 manual skip;0.2 机制与 P1 用例后重新登记)。

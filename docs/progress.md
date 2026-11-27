@@ -13,7 +13,7 @@
 | 里程碑 | 状态 | 进度 | 完成日期 |
 |---|---|---|---|
 | M0 仓库可信化 | ✅ 完成 | 7/7 | 2026-11-12 |
-| M1 可执行一致性 | ✅ 完成 | 72/72 用例（100%,含 0.2 扩展的 C2-07/C4-12/C4-13/C7-08） | 2026-11-12 |
+| M1 可执行一致性 | ✅ 完成 | 74/74 用例（100%,含 0.2 扩展与 P1 用例 C0-08/C0-09） | 2026-11-12 |
 | M2 参考实现 MVP | 🟢 完成 | M2.1a/b + M2.2 + M2.3 + M2.4a/b + M2.5a/b/c + M2.6 + M2.7 完成；撤销传播 P95 1.23 ms（1,555 节点，100 样本） | — |
 | M3 形式化不变量 | ✅ 完成 | 4/4 主不变量 + 同意/崩溃恢复模型通过 TLC；两个负向对照均报反例 | 2026-11-15 |
 | 持久化基础（M4 前置） | ✅ 完成 | 幂等、能力签发/撤销、同意请求/回执/预约与 PCS 签名密钥跨重启；原子分节写入；387 tests | 2026-11-16 |
@@ -49,7 +49,7 @@
 | 一致性用例 | 68 / 68 |
 | 校验与基准工具 | 6 |
 | Markdown 文件 | 42 |
-| 参考实现 | 26 个模块 + 适配器（10291 行）+ 865 个单元测试 + 72 条一致性用例（68 pass） |
+| 参考实现 | 26 个模块 + 适配器（10498 行）+ 873 个单元测试 + 74 条一致性用例（70 pass） |
 | 形式化模型 | 4 个 TLA+ 模块 + 6 个配置 + `check.sh`（479 行） |
 | 端到端演示 | `demo/run_demo.py`（672 行，含崩溃恢复第 7 节）+ 演示说明 |
 | 中英平行文档 | 9 对 |
@@ -1890,6 +1890,7 @@ python3 tools/check_docs.py
 | 2026-11-27 | **P1 Opaque Bus 设计提案**：新建 `docs/p1-opaque-bus.md`（非规范性 0.2 提案）——威胁模型、明文/密文字段决策（AAD 绑定外层元数据）、HPKE wire format（`osap.opaque/v1`，DHKEM(X25519)+HKDF-SHA256+AES-128-GCM）、密钥发现（welcome + RFS，kid 轮换 R=24h/宽限 G=1h）、**轮换窗口 FS 分析**（诚实边界：非 ratchet）、实现草图与 6 条开放问题；roadmap P1 行链接该提案 |
 | 2026-11-27 | **P1 第 1 批实现**:`impl/osap/opaque.py`——RFC 9180 base 模式(DHKEM(X25519)+HKDF-SHA256+AES-128-GCM),**A.1.1 官方向量逐字节验证**(KEM 密钥派生/共享密钥/key schedule/6 组 Seal/3 组 Export);P1 信封层 `seal_p1`/`open_p1`(AAD 绑定外层元数据、kid 校验、fail closed `AUTH_DENIED`);17 条新测试,累计 865 tests |
 | 2026-11-27 | **P1 第 2 批实现**:`Bus(p1_keys=..., p1_required=False)`——`seal()` 把 task-scoped 信封封装为 `osap.opaque/v1`(auth/body/refs/consent 入内层,路由元数据为 AAD);`osap.opaque/v1` 走缩减校验 → unseal → 合并 → 全量校验 → 正常路由;welcome 发布 `p1` 特性位与当前公钥;`p1_required` 拒绝明文;`P1KeyRing` FS 轮换(R 轮换/G 宽限/过期销毁);8 条新测试,累计 873 tests |
+| 2026-11-27 | **P1 一致性用例**(先改文档后改用例):C0-08(opaque seal/unseal 往返、内层正常路由、无 auth 外泄、轮换销毁后不可解)与 C0-09(AAD 篡改 → `AUTH_DENIED`);`case.schema` 操作枚举新增 `p1`;报告重发 `osap-reference-2026-11-27.json`(70/74 pass);累计 873 tests |
 | 2026-11-20 | **闸门 1 完成**:署名者确认 §10.4 四条声明(BCP 78 授权、Simplified BSD、IETF Trust 处分、IPR 义务知悉);记录于 `drafts/submission/consent-record.md`,DCO 签名提交固化 |
 | 2026-11-20 | **闸门 2 完成**:IPR 三问自查——个人无相关专利/申请、雇主组合与本领域无关、无已知未授权使用;**无披露义务**,结论与检索记录见 `drafts/submission/ipr-landscape.md` §1/§3 |
 | 2026-11-21 | **闸门 6 就绪**:两份 draft `<date>` 更新为实际上传日 2026-11-21;`--submission --compile` 38 checks 与全量复核通过,待署名者在 Datatracker 上传 |

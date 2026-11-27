@@ -47,6 +47,7 @@ from osap import (  # noqa: E402
     task,
     transport,
 )
+from osap.opaque import P1KeyRing  # noqa: E402
 from osap.streams import StreamRegistry  # noqa: E402
 from osap.events import EventBroker as events_module  # noqa: E402
 from osap.clock import parse_timestamp  # noqa: E402
@@ -195,7 +196,48 @@ def _check_c0(case: dict, documents: dict) -> dict:
         return _check_replay(primary, params)
     if operation == "clock":
         return _check_clock(primary, params)
+    if operation == "p1":
+        return _check_p1((case.get("input") or {}).get("params") or {}, documents)
     return {"outcome": "skip", "reason": f"C0 operation {operation!r} has no automated check"}
+
+
+def _check_p1(params: dict, documents: dict) -> dict:
+    """P1 opaque seal/unseal through the bus (§3.6, docs/p1-opaque-bus.md)."""
+
+    envelope_message = params["envelope"]
+    board = task.TaskBoard()
+    record = board.add(task.Task.from_document((documents.get("context") or [None])[0] or _p1_task_document()))
+    board.transition(record, "accepted")
+    board.transition(record, "running")
+    keys = P1KeyRing(grace_seconds=3600, clock=lambda: parse_timestamp(envelope_message["ts"]))
+    keys.rotate()
+
+    bus = Bus(p1_keys=keys, progress_board=board)
+    bus.handshake({"osap": "0.1"})
+    sealed = bus.seal(envelope_message, peer_public_key=keys.active_public_key)
+    tamper = params.get("tamper")
+    if tamper:
+        sealed[tamper["field"]] = tamper["value"]
+
+    state = {"opaque_schema": sealed["body"]["schema"] == "osap.opaque/v1", "no_auth_outside": "auth" not in sealed}
+    reply = bus.receive(sealed)
+    state["inner_routed"] = reply.get("type") == "result"
+    keys.rotate()
+    keys._grace.clear()  # rotation-window FS: destroyed keys cannot decrypt
+    with __import__("contextlib").suppress(OsapError):
+        bus.receive(sealed)
+        state["rotated_decrypts"] = True
+    else_ = state.setdefault("rotated_decrypts", False)
+    return {"outcome": "accept", "state": state}
+
+
+def _p1_task_document() -> dict:
+    return {
+        "task_id": "task_p1_01", "root_task_id": "task_p1_01", "mode": "supervisor",
+        "owner": "agent://com.example.orchestrator/main#1a2b",
+        "assignee": "agent://com.example.calendar/agent#9c",
+        "budget": {"wall_ms": 8000}, "status": "created",
+    }
 
 
 def _check_transport(params: dict, documents: dict) -> dict:

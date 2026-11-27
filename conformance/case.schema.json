@@ -74,7 +74,8 @@
         "describe",
         "status",
         "stream",
-        "publish"
+        "publish",
+        "p1"
       ]
     },
     "input": {

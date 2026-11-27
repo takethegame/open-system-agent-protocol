@@ -117,6 +117,8 @@ python3 tools/conformance_run.py --impl path/to/adapter.py --format md
 | C0-05 | 重复 `id` 的 `request` | 不重复执行副作用 |
 | C0-06 | 消息型传输被强制长度前缀 | 视为不一致 |
 | C0-07 | 系统时间回拨/挂起恢复 | 超时不延长，过期请求被拒绝 |
+| C0-08 | P1 opaque 信封 seal/unseal 往返 | Bus 只见 `osap.opaque/v1`,内层请求正常路由 |
+| C0-09 | P1 元数据篡改与 kid 轮换销毁 | 解密失败，`AUTH_DENIED` |
 
 ### C1 — Identity
 

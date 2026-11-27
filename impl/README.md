@@ -446,7 +446,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 12. **联邦只做投影**：没有监听原生注册表变化，也没有按 TTL 自动刷新；C6-08 仍是 manual。MCP/A2A/OpenAPI 的外部签名未验证，因此统一降为 `unverified`。
 13. **`verify_chain` 不重算正文哈希**：对夹具链只验证事件 schema、trace、`audit_id` 与 `prev_hash` 链接；夹具的 hash 是占位串，规范也未固定编码。`AuditLedger` 对自己写入的事件使用统一的规范编码并在重启时重算正文哈希，但它不是完整 RFC 8785。
 14. **缓存窗口未持久化**：`cache_window` 只按句柄 TTL 与已用时间计算窗口，不记录具体缓存条目；重启后无法判断某个缓存值是否仍可命中，只能重新解析句柄。
-15. **64 个 pass 覆盖全部 automated 用例**，但不覆盖 4 条 manual 的跨 App、原生注册表 TTL 与跨进程撤销语义。
+15. **70 个 pass 覆盖全部 automated 用例**，但不覆盖 4 条 manual 的跨 App、原生注册表 TTL 与跨进程撤销语义。
 16. **同意流程可持久化但不分发**：接入 `JsonStore` 后请求/回执/预约跨重启，但审计仍在内存，也不会把同一请求广播给多个 Bus；两个 flow 实例共享同一 store 时仍是单写者。
 17. **回执签名有本地密钥，注册表验签与分库都是可选的**：`ConsentFlow` 用 Ed25519 签回执；不传 `registry` 时 `activate` 仍用自己的 PCS 公钥验签。传 `registry` 后按 `proof.kid` 查表，验证方不需要 PCS 私钥，但必须显式 `publish_pcs_key()`。传 `key_store` 后私钥移出回执 store；不传时私钥与回执仍同处一个 0600 JSON 文件。默认后端仍是明文 JSON，密钥环只是可选后端。
 18. **单用户**：一个 `ConsentFlow` 只绑定一个 `user://`，没有多用户会话、代理同意或组织策略。

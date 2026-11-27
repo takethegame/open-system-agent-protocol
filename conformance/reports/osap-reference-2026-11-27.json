@@ -1,6 +1,6 @@
 {
   "osap": "0.1",
-  "generated_at": "2026-11-26T10:35:22+00:00",
+  "generated_at": "2026-11-27T08:57:31+00:00",
   "cases": [
     {
       "id": "C0-01",
@@ -127,6 +127,48 @@
         "error": "TIMEOUT",
         "state": {
           "retryable": true,
+          "standard_code": true
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-08",
+      "level": "C0",
+      "expected": {
+        "outcome": "accept",
+        "state": {
+          "opaque_schema": true,
+          "no_auth_outside": true,
+          "inner_routed": true,
+          "rotated_decrypts": false
+        }
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "accept",
+        "state": {
+          "opaque_schema": true,
+          "no_auth_outside": true,
+          "inner_routed": true,
+          "rotated_decrypts": false
+        }
+      },
+      "reason": "matched"
+    },
+    {
+      "id": "C0-09",
+      "level": "C0",
+      "expected": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED"
+      },
+      "status": "pass",
+      "actual": {
+        "outcome": "reject",
+        "error": "AUTH_DENIED",
+        "state": {
+          "retryable": false,
           "standard_code": true
         }
       },
@@ -1583,8 +1625,8 @@
     }
   ],
   "summary": {
-    "total": 72,
-    "pass": 68,
+    "total": 74,
+    "pass": 70,
     "fail": 0,
     "skip": 4
   }
