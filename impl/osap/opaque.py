@@ -36,6 +36,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from datetime import datetime, timezone
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
@@ -44,6 +45,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
+from .crypto import canonical_bytes
 from .errors import OsapError
 
 # --- ciphersuite identifiers (RFC 9180 §7) ---------------------------------
@@ -61,6 +63,10 @@ NSECRET = 32           # X25519 KEM shared-secret length
 P1_INFO = b"osap-p1-v0.2"
 
 _I2OSP = int.to_bytes
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _i2osp(n: int, width: int) -> bytes:
@@ -256,10 +262,8 @@ def seal_p1(
     body data: `{p1_kid, enc, ciphertext}`.
     """
 
-    from . import crypto
-
-    aad = crypto.canonical_bytes(outer_fields, drop=())
-    plaintext = crypto.canonical_bytes(inner, drop=())
+    aad = canonical_bytes(outer_fields, drop=())
+    plaintext = canonical_bytes(inner, drop=())
     enc, ct = seal_bytes(pk_r, info, aad, plaintext, sk_e=sk_e)
     return {
         "p1_kid": _kid_of(pk_r),
@@ -277,8 +281,6 @@ def open_p1(
 ) -> dict:
     """Decrypt an `osap.opaque/v1` body; raises `AUTH_DENIED` on failure."""
 
-    from . import crypto
-
     kid = opaque_data.get("p1_kid")
     if kid != _kid_of(sk_r_bytes_public(sk_r)):
         raise OsapError(
@@ -286,7 +288,7 @@ def open_p1(
             "opaque body carries an unknown or rotated p1_kid",
             details={"p1_kid": kid},
         )
-    aad = crypto.canonical_bytes(outer_fields, drop=())
+    aad = canonical_bytes(outer_fields, drop=())
     try:
         enc = base64.urlsafe_b64decode(opaque_data["enc"] + "=" * (-len(opaque_data["enc"]) % 4))
         ct = base64.urlsafe_b64decode(
@@ -300,6 +302,87 @@ def open_p1(
 
 def sk_r_bytes_public(sk_r: bytes) -> bytes:
     return _raw_public(X25519PrivateKey.from_private_bytes(sk_r).public_key())
+
+
+class P1KeyRing:
+    """Own P1 keys with rotation-window forward secrecy (§3.3, §6).
+
+    The ring keeps at most one **active** key (published in welcome/RFS and
+    used for sealing) plus previous keys in a **grace window** that may still
+    decrypt in-flight messages. When the grace window expires, the old
+    private keys are **destroyed** — dropped from the ring — which is where
+    the rotation-window forward secrecy of the P1 profile comes from
+    (R=rotation interval, G=grace; defaults per the design proposal).
+
+    The ring is runtime state: private keys are never persisted (a persisted
+    key cannot be "destroyed" credibly), so a restart starts a fresh ring —
+    peers must re-fetch the current public key from welcome/RFS. This is the
+    documented trade-off of the 0.2 slice, not a final decision.
+    """
+
+    def __init__(self, *, grace_seconds: int = 3600, clock=None) -> None:
+        if grace_seconds < 0:
+            raise ValueError("grace_seconds must be non-negative")
+        if clock is not None and not callable(clock):
+            raise ValueError("clock must be callable")
+        self.grace_seconds = grace_seconds
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._active: dict | None = None
+        self._grace: dict[str, dict] = {}
+
+    def rotate(self) -> dict:
+        """Publish a new active key; the previous one enters the grace window."""
+
+        pair = P1KeyPair.generate()
+        now = self._clock()
+        if self._active is not None:
+            previous = dict(self._active, status="grace", rotated_at=_stamp(now))
+            self._grace[previous["kid"]] = previous
+        self._active = {
+            "kid": pair.kid,
+            "public_key": pair.public_key,
+            "private_key": pair.private_key,
+            "status": "active",
+            "created_at": _stamp(now),
+        }
+        return {
+            "kid": self._active["kid"],
+            "public_key": self._active["public_key"],
+            "rotated_from": self._grace and list(self._grace) or None,
+        }
+
+    @property
+    def active_kid(self) -> str | None:
+        return self._active["kid"] if self._active else None
+
+    @property
+    def active_public_key(self) -> bytes | None:
+        return self._active["public_key"] if self._active else None
+
+    def private_for(self, kid: str) -> bytes | None:
+        """Private key for `kid` if it is active or inside the grace window."""
+
+        if self._active and self._active["kid"] == kid:
+            return self._active["private_key"]
+        record = self._grace.get(kid)
+        if record is None:
+            return None
+        rotated_at = datetime.fromisoformat(record["rotated_at"].replace("Z", "+00:00"))
+        if (self._clock() - rotated_at).total_seconds() > self.grace_seconds:
+            del self._grace[kid]  # forward secrecy: destroy expired keys
+            return None
+        return record["private_key"]
+
+    def destroy_expired(self) -> list[str]:
+        """Destroy grace-window keys whose window has passed; return the kids."""
+
+        destroyed = []
+        for kid in list(self._grace):
+            rotated_at = datetime.fromisoformat(self._grace[kid]["rotated_at"].replace("Z", "+00:00"))
+            if (self._clock() - rotated_at).total_seconds() > self.grace_seconds:
+                del self._grace[kid]
+                destroyed.append(kid)
+        return destroyed
 
 
 def json_loads(data: bytes) -> dict:

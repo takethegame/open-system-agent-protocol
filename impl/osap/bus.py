@@ -16,6 +16,7 @@ from . import envelope, framing
 from .clock import Deadline, parse_timestamp
 from .errors import OsapError
 from .flowcontrol import AdmissionController
+from .opaque import open_p1 as _p1_open, seal_p1 as _p1_seal
 from .idempotency import IdempotencyIndex
 from .store import JsonStore
 
@@ -29,6 +30,12 @@ def _now() -> str:
 
 def _stamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def base64_url(data: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
 def sender_identity(message: object) -> str:
@@ -80,6 +87,8 @@ class Bus:
         streams=None,
         events=None,
         skew_seconds: float | None = None,
+        p1_keys=None,
+        p1_required: bool = False,
     ) -> None:
         if idempotency is not None and store is not None:
             raise ValueError("pass either idempotency or store, not both")
@@ -127,6 +136,12 @@ class Bus:
             or skew_seconds < 0
         ):
             raise ValueError("skew_seconds must be a non-negative number or None")
+        if p1_keys is not None and not callable(getattr(p1_keys, "private_for", None)):
+            raise ValueError("p1_keys must expose private_for()")
+        if p1_required and p1_keys is None:
+            raise ValueError("p1_required requires p1_keys")
+        self.p1_keys = p1_keys
+        self.p1_required = p1_required
         self.side_effects = 0
         self.replays = 0
         self.received: list[str] = []
@@ -175,6 +190,13 @@ class Bus:
         }
         if hello.get("id"):
             welcome["causation_id"] = hello["id"]
+        if self.p1_keys is not None:
+            # P1 feature bit + current key so peers can seal immediately (§4.3
+            # of docs/p1-opaque-bus.md).
+            welcome["features"] = ["p1"]
+            welcome["p1_kid"] = self.p1_keys.active_kid
+            welcome["p1_public_key"] = base64_url(self.p1_keys.active_public_key)
+        return welcome
         return welcome
 
     # --- receive -----------------------------------------------------------
@@ -192,7 +214,13 @@ class Bus:
                     )
                 return self.handshake(message)
 
-            envelope.validate(message)
+            if isinstance(message, dict) and (message.get("body") or {}).get("schema") == "osap.opaque/v1":
+                # P1 opaque envelope: auth/body/refs/consent live inside the
+                # ciphertext, so only the reduced routing shape is checked
+                # here; the merged envelope is fully validated after unsealing.
+                self._validate_opaque(message)
+            else:
+                envelope.validate(message)
             self._check_skew(message)
             self.received.append(message["id"])
             return self.dispatch(message)
@@ -232,10 +260,106 @@ class Bus:
                 },
             )
 
+    #: Fields that live inside the encrypted P1 payload (§4.3 of the design).
+    P1_INNER_FIELDS = frozenset({"auth", "body", "refs", "consent", "extensions"})
+
+    def seal(self, envelope: dict, *, peer_public_key: bytes) -> dict:
+        """Seal a P0 envelope into an `osap.opaque/v1` P1 envelope."""
+
+        inner = {
+            key: envelope[key]
+            for key in ("auth", "body", "refs", "consent", "extensions")
+            if key in envelope
+        }
+        outer = {
+            key: value for key, value in envelope.items()
+            if key not in self.P1_INNER_FIELDS
+        }
+        outer["body"] = {
+            "schema": "osap.opaque/v1",
+            "data": _p1_seal(outer, inner, pk_r=peer_public_key),
+        }
+        return outer
+
+    def _unseal_p1(self, message: dict) -> dict:
+        if self.p1_keys is None:
+            raise NotImplementedError(
+                "bus does not unseal opaque bodies without p1_keys"
+            )
+        data = (message.get("body") or {}).get("data") or {}
+        kid = data.get("p1_kid")
+        private_key = self.p1_keys.private_for(kid)
+        if private_key is None:
+            raise OsapError(
+                "AUTH_DENIED",
+                "opaque body carries an unknown, rotated, or destroyed p1_kid",
+                details={"p1_kid": kid},
+            )
+        # The AAD is the routing metadata WITHOUT the opaque body — exactly
+        # what `seal` computed over (docs/p1-opaque-bus.md §4.2).
+        outer = {
+            key: value for key, value in message.items()
+            if key not in self.P1_INNER_FIELDS
+        }
+        inner = _p1_open(outer, data, sk_r=private_key)
+        merged = dict(outer)
+        merged.update(inner)
+        return merged
+
+    def _validate_opaque(self, message: dict) -> None:
+        """Reduced envelope validation for `osap.opaque/v1` bodies (§3.6).
+
+        Checks everything the outer envelope can honestly carry: version,
+        known type, the routing fields, and a task for task-scoped types.
+        Everything else is inside the ciphertext and is validated on the
+        merged envelope after unsealing.
+        """
+
+        if not isinstance(message, dict):
+            raise OsapError("SCHEMA_INVALID", "envelope must be a JSON object")
+        version = message.get("osap")
+        if not isinstance(version, str):
+            raise OsapError("SCHEMA_INVALID", "osap version must be a string")
+        if envelope.major_version(version) != envelope.SUPPORTED_MAJOR:
+            raise OsapError(
+                "TRANSPORT_VERSION_UNSUPPORTED",
+                f"unsupported osap major version: {version}",
+                details={"supported_major": envelope.SUPPORTED_MAJOR},
+            )
+        if message.get("type") not in envelope.KNOWN_TYPES:
+            raise OsapError(
+                "SCHEMA_UNSUPPORTED",
+                f"unknown message type: {message.get('type')!r}",
+            )
+        for field in ("id", "from", "to", "body", "ts"):
+            if field not in message:
+                raise OsapError("SCHEMA_INVALID", f"{field} is required")
+        if message["type"] in ("request", "delegate", "handoff") and "task" not in message:
+            raise OsapError("SCHEMA_INVALID", f"{message['type']} requires task")
+
     def dispatch(self, message: dict) -> dict | None:
         """Route a validated message; None for one-way types like `status`."""
 
         kind = message["type"]
+
+        # §3.6 / docs/p1-opaque-bus.md: an opaque body carries the sealed
+        # inner payload. Unseal it, merge the inner fields back onto the
+        # outer envelope, and dispatch the reconstructed message through the
+        # normal routing — so authorization, progress, and audit behave
+        # exactly as in P0 after the cryptographic boundary.
+        body = message.get("body") or {}
+        if body.get("schema") == "osap.opaque/v1":
+            merged = self._unseal_p1(message)
+            envelope.validate(merged)
+            return self.dispatch(merged)
+
+        # §3.6: a P1-required deployment rejects any task-scoped plaintext.
+        if self.p1_required and kind in ("request", "delegate", "handoff"):
+            raise OsapError(
+                "POLICY_DENIED",
+                "this bus requires P1 opaque bodies for task-scoped messages",
+                details={"reason": "p1_required"},
+            )
 
         # §7.1: the sender must be allowed to pass every handle in refs. The
         # check is wired through an authorizer because handle ownership lives

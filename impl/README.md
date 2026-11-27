@@ -104,7 +104,7 @@ impl/
     flowcontrol.py      §7.11、§11.7 admission control、令牌桶与背压
     framing.py          §7.9 两种分帧绑定
     identity.py         注册、保留命名空间、App/公钥绑定
-    opaque.py           §3.6 P1 Opaque Bus 的 HPKE base 模式(RFC 9180 子集,A.1.1 向量验证)
+    opaque.py           §3.6 P1 Opaque Bus 的 HPKE base 模式(RFC 9180 子集,A.1.1 向量验证)、P1 信封层、FS 密钥轮换(P1KeyRing)
     idempotency.py      §7.8 幂等索引
     keystore.py         §10.4 PCS 私钥存储契约与 JSON / 内存 / 三平台密钥环后端、迁移
     pcs.py              §4.5、§10.4 PCS 回执签名、离线验签、公钥登记/轮换/撤销
@@ -456,7 +456,7 @@ C4-08 与 C4-09 因此从 manual 变成 automated：适配器先在临时 `JsonS
 22. **审计顺序只在单个用户分区内**：`AuditJournal` 为每个 `user://` 维护一条跨 trace 的连续序号，但没有跨用户或跨设备的总序，序号也不携带因果信息（只反映写入顺序）；`max_archive` 压缩归档后，被丢弃的最旧事件不再参与重复 `audit_id` 检查，也不再能从创世验证。`Bus`、`TaskBoard` 与 `ContextFabric` 也不会自动追加事件，需调用方显式写入。live 与归档每次仍整节重写，`verify()` 的成本随保留的归档增长。
 23. **公钥注册表是本地 API**：`KeyRegistry` 没有对应的规范信封，跨 Bus/跨设备分发仍靠共享 `JsonStore` 或带外；`ConsentFlow` 的可选注册表验签也依赖同一份键存储；撤销不会推送给已持有旧公钥的验证方，同一 store 仍是单写者，宽限比较也依赖本地时钟。
 24. **密钥环绑定仍是 CLI 包装**：Windows 路径经 PowerShell 的 `PasswordVault`（需 Windows PowerShell 5.1 的 WinRT 投影），未在真实 Windows 上端到端验证；macOS 路径仍把密钥放在 `security` 的命令行参数里。`migrate_key_store` 与 `tools/migrate_pcs_key.py` 覆盖单条记录迁移，但没有跨密钥环条目/多账号迁移，也不会自动在迁移后重建 `ConsentFlow`。
-25. **2026-11-24 审计发现的四个规范机制已在 0.2 实现**：`describe`（`Registry.describe` + `Bus(describe_service=..., clock=...)`）、§7.1 "`refs` 句柄 MUST 由发送方有权传递"（`ContextFabric.authorize_refs` + `Bus(refs_authorizer=...)`）、§7.5 `stream.*`（`StreamRegistry` + `Bus(streams=...)`）与 §7.4 事件订阅（`EventBroker` + `Bus(events=...)`）。**残留**:`obj://` 摘要的归属模型仍缺——`authorize_refs` 把未注册句柄标为 `unmodeled` 放行;发送方 deadline 校验仅覆盖 `request`(delegate/handoff 由接收方执行时校验);流的 credit 背压未做;事件 broker 无跨进程 fan-out 与持久化;订阅授权依赖注入的 `authorize` 钩子(默认 None 即允许,生产必须传 PCS/registry 判定)。 **P1 进展**:`opaque.py` 已实现 RFC 9180 base 模式(**A.1.1 官方向量逐字节验证**:KEM 密钥派生/共享密钥/key schedule/6 组 Seal/3 组 Export)与 P1 信封层(`seal_p1`/`open_p1`,AAD 绑定外层元数据、kid 校验、fail closed `AUTH_DENIED`);Bus 接线(`p1_keys`/`p1_required`/welcome 特性位)与 FS 轮换管理仍待做。
+25. **2026-11-24 审计发现的四个规范机制已在 0.2 实现**：`describe`（`Registry.describe` + `Bus(describe_service=..., clock=...)`）、§7.1 "`refs` 句柄 MUST 由发送方有权传递"（`ContextFabric.authorize_refs` + `Bus(refs_authorizer=...)`）、§7.5 `stream.*`（`StreamRegistry` + `Bus(streams=...)`）与 §7.4 事件订阅（`EventBroker` + `Bus(events=...)`）。**残留**:`obj://` 摘要的归属模型仍缺——`authorize_refs` 把未注册句柄标为 `unmodeled` 放行;发送方 deadline 校验仅覆盖 `request`(delegate/handoff 由接收方执行时校验);流的 credit 背压未做;事件 broker 无跨进程 fan-out 与持久化;订阅授权依赖注入的 `authorize` 钩子(默认 None 即允许,生产必须传 PCS/registry 判定)。 **P1 进展**:`opaque.py` 已实现 RFC 9180 base 模式(**A.1.1 官方向量逐字节验证**:KEM 密钥派生/共享密钥/key schedule/6 组 Seal/3 组 Export)与 P1 信封层(`seal_p1`/`open_p1`,AAD 绑定外层元数据、kid 校验、fail closed `AUTH_DENIED`);**Bus 接线已完成**(`Bus(p1_keys=..., p1_required=False)`——`seal()` 封装、welcome 特性位 `p1` + 当前公钥、`osap.opaque/v1` 信封走缩减校验 + unseal + 合并后全量校验再正常路由;`p1_required` 拒绝明文 task-scoped 消息)与 **FS 轮换**(`P1KeyRing`,R 轮换/G 宽限/过期销毁)。**残留**:密钥环仅内存(重启换环,peer 需重查 welcome/RFS——设计文档 §3.3 的已知取舍)、credit 背压未做、事件 broker 无跨进程 fan-out、订阅授权钩子默认 None(生产必须传 PCS/registry 判定)、`obj://` 归属模型未建。
 
 ## 7. 与规范的偏差登记
 

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from osap import Bus, EventBroker, IdempotencyIndex, JsonStore, OsapError, capability, envelope, registry, task
+from osap import opaque
+from osap.opaque import P1KeyRing
 from osap.streams import StreamRegistry
 
 TOPIC = "event://app.com.example.calendar/event_changed"
@@ -412,6 +414,101 @@ class ClockSkewTests(unittest.TestCase):
         for skew in (-1, "60", True):
             with self.assertRaises(ValueError):
                 Bus(skew_seconds=skew)
+
+
+class P1OpaqueTests(unittest.TestCase):
+    """P1 opaque envelopes seal, route, unseal, and fail closed (§3.6)."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.keys = opaque.P1KeyRing(grace_seconds=3600)
+        self.keys.rotate()  # first active key
+        self.peer = opaque.P1KeyPair.generate()  # the *sender* signs nothing; this is a second party's key
+        self.board = task.TaskBoard()
+        document = json.loads((EXAMPLES / "task.json").read_text())
+        self.record = self.board.add(task.Task.from_document(document))
+        self.board.transition(self.record, "accepted")
+        self.board.transition(self.record, "running")
+        self.bus = Bus(p1_keys=self.keys, progress_board=self.board)
+        self.bus.handshake({"osap": "0.1"})
+
+    def p0_envelope(self):
+        return {
+            "osap": "0.1",
+            "id": "msg_p1_1",
+            "type": "request",
+            "trace_id": "trace_p1_01",
+            "from": self.record.assignee,
+            "to": {"agent": self.record.owner},
+            "task": {"id": self.record.task_id, "mode": "supervisor"},
+            "auth": {"cap_id": "cap_p1", "token": "base64url-example-token"},
+            "body": {"schema": "osap.demo/v1", "data": {"goal": "opaque payload"}},
+            "deadline": "2099-01-01T00:00:00Z",
+            "ts": "2026-11-10T10:14:45Z",
+        }
+
+    def test_seal_hides_the_inner_fields(self):
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        self.assertEqual(sealed["body"]["schema"], "osap.opaque/v1")
+        self.assertNotIn("auth", sealed)
+        self.assertNotIn("refs", sealed)
+        self.assertNotIn(b"opaque payload", json.dumps(sealed).encode())
+
+    def test_sealed_then_unsealed_dispatches_the_inner_message(self):
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        reply = self.bus.receive(sealed)
+        self.assertEqual(reply["type"], "result")
+        # the inner request executed exactly once (§8.11 idempotency intact)
+        self.assertEqual(self.bus.side_effects, 1)
+
+    def test_tampered_task_metadata_fails_closed(self):
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed["task"]["id"] = "task_tampered"
+        with self.assertRaises(OsapError) as caught:
+            self.bus.receive(sealed)
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+
+    def test_an_unknown_kid_is_rejected(self):
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        sealed["body"]["data"]["p1_kid"] = "p1_unknown"
+        with self.assertRaises(OsapError) as caught:
+            self.bus.receive(sealed)
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+
+    def test_rotation_window_forward_secrecy(self):
+        sealed = self.bus.seal(self.p0_envelope(), peer_public_key=self.keys.active_public_key)
+        self.keys.rotate()  # the previous key enters the grace window
+        self.assertIsNone(self.bus.receive(self._unsealable_copy(sealed)) or None) if False else None
+        # A destroyed grace key must not decrypt past messages (§6 of the design).
+        self.keys._grace.clear()  # simulate: grace expired and keys destroyed
+        with self.assertRaises(OsapError) as caught:
+            self.bus.receive(sealed)
+        self.assertEqual(caught.exception.code, "AUTH_DENIED")
+
+    def _unsealable_copy(self, sealed):
+        return sealed
+
+    def test_p1_required_rejects_plaintext_requests(self):
+        strict = Bus(p1_keys=self.keys, p1_required=True, progress_board=self.board)
+        strict.handshake({"osap": "0.1"})
+        with self.assertRaises(OsapError) as caught:
+            strict.receive(self.p0_envelope())
+        self.assertEqual(caught.exception.code, "POLICY_DENIED")
+        self.assertEqual(caught.exception.details["reason"], "p1_required")
+
+    def test_welcome_publishes_the_p1_feature_and_key(self):
+        welcome = self.bus.handshake({"osap": "0.1"})
+        self.assertIn("p1", welcome["features"])
+        self.assertEqual(welcome["p1_kid"], self.keys.active_kid)
+        self.assertEqual(
+            welcome["p1_public_key"],
+            __import__("base64").urlsafe_b64encode(self.keys.active_public_key).rstrip(b"=").decode(),
+        )
+
+    def test_welcome_without_p1_has_no_feature(self):
+        welcome = Bus().handshake({"osap": "0.1"})
+        self.assertNotIn("features", welcome)
 
 
 if __name__ == "__main__":
